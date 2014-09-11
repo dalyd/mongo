@@ -61,6 +61,7 @@
 #include "mongo/util/timer.h"
 #include "mongo/util/version.h"
 #include "mongo/util/version_reporting.h"
+#include "mongo/db/concurrency/lock_state.h"
 
 #if (__cplusplus >= 201103L)
 #include <mutex>
@@ -654,6 +655,143 @@ namespace PerfTests {
             _qlock.lock_w();
             _qlock.unlock_w();
         }
+    };
+
+
+
+    class locker_contestedX : public B {
+    public:
+        boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
+        boost::thread_specific_ptr<mongo::newlm::Locker> locker; 
+        int count;
+        string name() { return "locker_contestedX"; }
+        virtual int howLongMillis() { return 500; }
+        virtual bool showDurStats() { return false; }
+        virtual bool testThreaded() { return true; }
+        virtual void prep() {
+            count = 1;
+            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
+            locker.reset(new mongo::newlm::Locker(1));
+        }
+        
+        virtual void prep2() {
+            //std:ostringstream stream;
+            //stream << boost::thread::getId();
+            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
+            locker.reset(new mongo::newlm::Locker(++count));
+        }
+
+        void timed() {
+            locker->lock(*resId, mongo::newlm::MODE_X);
+            locker->unlock(*resId);
+        }
+
+        void timed2(DBClientBase*) {
+            locker->lock(*resId, mongo::newlm::MODE_X);
+            locker->unlock(*resId);
+        }
+
+    };
+    class locker_uncontestedX : public B {
+    public:
+        boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
+        boost::thread_specific_ptr<mongo::newlm::Locker> locker; 
+        int count;
+        string name() { return "locker_uncontestedX"; }
+        virtual int howLongMillis() { return 500; }
+        virtual bool showDurStats() { return false; }
+        virtual bool testThreaded() { return true; }
+        virtual void prep() {
+            count = 1;
+            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
+            locker.reset(new mongo::newlm::Locker(1));
+        }
+        
+        virtual void prep2() {
+            std::ostringstream stream;
+            stream << boost::this_thread::get_id();
+            
+            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection") + stream.str()));
+            locker.reset(new mongo::newlm::Locker(++count));
+        }
+
+        void timed() {
+            locker->lock(*resId, mongo::newlm::MODE_X);
+            locker->unlock(*resId);
+        }
+
+        void timed2(DBClientBase*) {
+            locker->lock(*resId, mongo::newlm::MODE_X);
+            locker->unlock(*resId);
+        }
+
+    };
+    class locker_contestedS : public B {
+    public:
+        boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
+        boost::thread_specific_ptr<mongo::newlm::Locker> locker; 
+        int count;
+        string name() { return "locker_contestedS"; }
+        virtual int howLongMillis() { return 500; }
+        virtual bool showDurStats() { return false; }
+        virtual bool testThreaded() { return true; }
+        virtual void prep() {
+            count = 1;
+            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
+            locker.reset(new mongo::newlm::Locker(1));
+        }
+        
+        virtual void prep2() {
+            //std:ostringstream stream;
+            //stream << boost::thread::getId();
+            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
+            locker.reset(new mongo::newlm::Locker(++count));
+        }
+
+        void timed() {
+            locker->lock(*resId, mongo::newlm::MODE_S);
+            locker->unlock(*resId);
+        }
+
+        void timed2(DBClientBase*) {
+            locker->lock(*resId, mongo::newlm::MODE_S);
+            locker->unlock(*resId);
+        }
+
+    };
+    class locker_uncontestedS : public B {
+    public:
+        boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
+        boost::thread_specific_ptr<mongo::newlm::Locker> locker; 
+        int count;
+        string name() { return "locker_uncontestedS"; }
+        virtual int howLongMillis() { return 500; }
+        virtual bool showDurStats() { return false; }
+        virtual bool testThreaded() { return true; }
+        virtual void prep() {
+            count = 1;
+            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
+            locker.reset(new mongo::newlm::Locker(1));
+        }
+        
+        virtual void prep2() {
+            std::ostringstream stream;
+            stream << boost::this_thread::get_id();
+            
+            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection") + stream.str()));
+            locker.reset(new mongo::newlm::Locker(++count));
+        }
+
+        void timed() {
+            locker->lock(*resId, mongo::newlm::MODE_S);
+            locker->unlock(*resId);
+        }
+
+        void timed2(DBClientBase*) {
+            locker->lock(*resId, mongo::newlm::MODE_S);
+            locker->unlock(*resId);
+        }
+
     };
 
 #if 0
@@ -1381,6 +1519,10 @@ namespace PerfTests {
                 add< wlock >();
                 add< qlock >();
                 add< qlockw >();
+                add< locker_contestedX >();
+                add< locker_uncontestedX >();
+                add< locker_contestedS >();
+                add< locker_uncontestedS >();
                 add< NotifyOne >();
                 add< mutexspeed >();
                 add< simplemutexspeed >();
