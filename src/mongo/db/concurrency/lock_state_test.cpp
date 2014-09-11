@@ -34,6 +34,7 @@
 #include "mongo/unittest/unittest.h"
 #include "mongo/db/concurrency/lock_mgr.h"
 #include "mongo/db/concurrency/lock_state.h"
+#include "mongo/util/log.h"
 
 
 namespace mongo {
@@ -58,7 +59,24 @@ namespace newlm {
         LockResult lastResult;
     };
 
-    
+   
+    TEST(Locker, BasicLockSpeed) {
+        Locker locker(1);
+        TrackingLockGrantNotification notify;
+        int test_time;
+        mongo::Timer t;
+        
+        const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
+        t.reset();
+        for (int i = 0; i < 10000; i++) {
+            locker.lockExtended(resId, MODE_X, &notify);
+            locker.unlock(resId);
+        }
+        test_time = t.micros();
+        log() << "\t 1000 lock iterations tool " << test_time << " microseconds" << std::endl;
+      
+    }
+  
     TEST(Locker, BasicLockNoConflict) {
         Locker locker(1);
         TrackingLockGrantNotification notify;
