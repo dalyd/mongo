@@ -173,6 +173,8 @@ namespace PerfTests {
 
         // anything you want to do before being timed
         virtual void prep() { }
+        // anything you want to do before threaded test
+        virtual void prep2() {}
 
         virtual void timed() = 0;
 
@@ -364,6 +366,7 @@ namespace PerfTests {
 
             Client::initThreadIfNotAlready("perftestthr");
             const unsigned int Batch = batchSize();
+            prep2();
             while( 1 ) {
                 unsigned int i = 0;
                 for( i = 0; i < Batch; i++ )
