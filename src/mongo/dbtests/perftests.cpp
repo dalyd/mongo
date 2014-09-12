@@ -645,13 +645,23 @@ namespace PerfTests {
             _qlock.lock_r();
             _qlock.unlock_r();
         }
+        void timed2(DBClientBase*) {
+            _qlock.lock_r();
+            _qlock.unlock_r();
+        }
+        virtual bool testThreaded() { return true; }
     };
     class qlockw : public B {
     public:
         string name() { return "qlockw"; }
         //virtual int howLongMillis() { return 500; }
         virtual bool showDurStats() { return false; }
+        virtual bool testThreaded() { return true; }
         void timed() {
+            _qlock.lock_w();
+            _qlock.unlock_w();
+        }
+        void timed2(DBClientBase*) {
             _qlock.lock_w();
             _qlock.unlock_w();
         }
