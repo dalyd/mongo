@@ -73,10 +73,17 @@ namespace repl {
         return StatusAndDuration(Status::OK(), Milliseconds(0));
     }
 
-    ReplicationCoordinator::StatusAndDuration ReplicationCoordinatorMock::awaitReplicationOfLastOp(
-            const OperationContext* txn,
-            const WriteConcernOptions& writeConcern) {
-        // TODO
+    ReplicationCoordinator::StatusAndDuration
+            ReplicationCoordinatorMock::awaitReplicationOfLastOpForClient(
+                    const OperationContext* txn,
+                    const WriteConcernOptions& writeConcern) {
+        return StatusAndDuration(Status::OK(), Milliseconds(0));
+    }
+
+    ReplicationCoordinator::StatusAndDuration
+            ReplicationCoordinatorMock::awaitReplicationOfLastOpApplied(
+                    const OperationContext* txn,
+                    const WriteConcernOptions& writeConcern) {
         return StatusAndDuration(Status::OK(), Milliseconds(0));
     }
 
@@ -84,14 +91,6 @@ namespace repl {
                                                 bool force,
                                                 const Milliseconds& waitTime,
                                                 const Milliseconds& stepdownTime) {
-        return Status::OK();
-    }
-
-    Status ReplicationCoordinatorMock::stepDownAndWaitForSecondary(
-            OperationContext* txn,
-            const Milliseconds& initialWaitTime,
-            const Milliseconds& stepdownTime,
-            const Milliseconds& postStepdownWaitTime) {
         return Status::OK();
     }
 
@@ -127,13 +126,22 @@ namespace repl {
         return Status::OK();
     }
 
+    OpTime ReplicationCoordinatorMock::getMyLastOptime() const {
+        // TODO
+        return OpTime();
+    }
+
+
     OID ReplicationCoordinatorMock::getElectionId() {
         // TODO
         return OID();
     }
 
-    OID ReplicationCoordinatorMock::getMyRID() {
+    OID ReplicationCoordinatorMock::getMyRID() const {
         return OID();
+    }
+
+    void ReplicationCoordinatorMock::setFollowerMode(const MemberState& newState) {
     }
 
     void ReplicationCoordinatorMock::prepareReplSetUpdatePositionCommand(
@@ -240,6 +248,12 @@ namespace repl {
     Status ReplicationCoordinatorMock::checkReplEnabledForCommand(BSONObjBuilder* result) {
         // TODO
         return Status::OK();
+    }
+
+    void ReplicationCoordinatorMock::connectOplogReader(OperationContext* txn,
+                                                        BackgroundSync* bgsync, 
+                                                        OplogReader* r) {
+        invariant(false);
     }
 
 } // namespace repl

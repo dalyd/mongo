@@ -49,7 +49,9 @@ namespace mongo {
 
 namespace repl {
 
+    class BackgroundSync;
     class HandshakeArgs;
+    class OplogReader;
     class ReplSetHeartbeatArgs;
     class ReplSetHeartbeatResponse;
     class UpdatePositionArgs;
@@ -151,7 +153,15 @@ namespace repl {
          * Like awaitReplication(), above, but waits for the replication of the last operation
          * performed on the client associated with "txn".
          */
-        virtual StatusAndDuration awaitReplicationOfLastOp(
+        virtual StatusAndDuration awaitReplicationOfLastOpForClient(
+                const OperationContext* txn,
+                const WriteConcernOptions& writeConcern) = 0;
+
+        /**
+         * Like awaitReplication(), above, but waits for the replication of the last operation
+         * applied to this node.
+         */
+        virtual StatusAndDuration awaitReplicationOfLastOpApplied(
                 const OperationContext* txn,
                 const WriteConcernOptions& writeConcern) = 0;
 
@@ -171,17 +181,6 @@ namespace repl {
                                 bool force,
                                 const Milliseconds& waitTime,
                                 const Milliseconds& stepdownTime) = 0;
-
-        /**
-         * Behaves similarly to stepDown except that after stepping down as primary it waits for
-         * up to 'postStepdownWaitTime' for one other node to match this node's optime exactly.
-         * TODO(spencer): This method should be removed and all callers should use shutDown, after
-         * shutdown has been fixed to block new writes while waiting for secondaries to catch up.
-         */
-        virtual Status stepDownAndWaitForSecondary(OperationContext* txn,
-                                                   const Milliseconds& initialWaitTime,
-                                                   const Milliseconds& stepdownTime,
-                                                   const Milliseconds& postStepdownWaitTime) = 0;
 
         /**
          * TODO a way to trigger an action on replication of a given operation
@@ -251,6 +250,11 @@ namespace repl {
         virtual Status setMyLastOptime(OperationContext* txn, const OpTime& ts) = 0;
 
         /**
+         * Returns the last optime recorded by setMyLastOptime.
+         */
+        virtual OpTime getMyLastOptime() const = 0;
+
+        /**
          * Retrieves and returns the current election id, which is a unique id that is local to
          * this node and changes every time we become primary.
          * TODO(spencer): Use term instead.
@@ -261,7 +265,23 @@ namespace repl {
          * Returns the RID for this node.  The RID is used to identify this node to our sync source
          * when sending updates about our replication progress.
          */
-        virtual OID getMyRID() = 0;
+        virtual OID getMyRID() const = 0;
+
+        /**
+         * Sets this node into a specific follower mode.
+         *
+         * It is an error to call this method if the node's topology coordinator would not
+         * report that it is in the follower role.
+         *
+         * Follower modes are RS_STARTUP2 (initial sync), RS_SECONDARY, RS_ROLLBACK and
+         * RS_RECOVERING.  They are the valid states of a node whose topology coordinator has the
+         * follower role.
+         *
+         * This is essentially an interface that allows the applier to prevent the node from
+         * becoming a candidate or accepting reads, depending on circumstances in the oplog
+         * application process.
+         */
+        virtual void setFollowerMode(const MemberState& newState) = 0;
 
         /**
          * Prepares a BSONObj describing an invocation of the replSetUpdatePosition command that can
@@ -441,6 +461,16 @@ namespace repl {
          * NotYetInitialized in the absence of a valid config. Also adds error info to "result".
          */
         virtual Status checkReplEnabledForCommand(BSONObjBuilder* result) = 0;
+
+        /**
+         * Connects an oplog reader to a viable sync source, using BackgroundSync object bgsync.
+         * When this function returns, reader is connected to a viable sync source or is left
+         * unconnected if no sync sources are currently available.  In legacy, bgsync's 
+         * _currentSyncTarget is also set appropriately.
+         **/
+        virtual void connectOplogReader(OperationContext* txn,
+                                        BackgroundSync* bgsync, 
+                                        OplogReader* reader) = 0;
 
     protected:
 

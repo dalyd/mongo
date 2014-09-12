@@ -63,7 +63,11 @@ namespace repl {
                 const OpTime& ts,
                 const WriteConcernOptions& writeConcern);
 
-        virtual ReplicationCoordinator::StatusAndDuration awaitReplicationOfLastOp(
+        virtual ReplicationCoordinator::StatusAndDuration awaitReplicationOfLastOpForClient(
+                const OperationContext* txn,
+                const WriteConcernOptions& writeConcern);
+
+        virtual ReplicationCoordinator::StatusAndDuration awaitReplicationOfLastOpApplied(
                 const OperationContext* txn,
                 const WriteConcernOptions& writeConcern);
 
@@ -71,11 +75,6 @@ namespace repl {
                                 bool force,
                                 const Milliseconds& waitTime,
                                 const Milliseconds& stepdownTime);
-
-        virtual Status stepDownAndWaitForSecondary(OperationContext* txn,
-                                                   const Milliseconds& initialWaitTime,
-                                                   const Milliseconds& stepdownTime,
-                                                   const Milliseconds& postStepdownWaitTime);
 
         virtual bool isMasterForReportingPurposes();
 
@@ -94,9 +93,13 @@ namespace repl {
 
         virtual Status setMyLastOptime(OperationContext* txn, const OpTime& ts);
 
+        virtual OpTime getMyLastOptime() const;
+
         virtual OID getElectionId();
 
-        virtual OID getMyRID();
+        virtual OID getMyRID() const;
+
+        virtual void setFollowerMode(const MemberState& newState);
 
         virtual void prepareReplSetUpdatePositionCommand(OperationContext* txn,
                                                          BSONObjBuilder* cmdBuilder);
@@ -152,6 +155,10 @@ namespace repl {
         virtual BSONObj getGetLastErrorDefault();
 
         virtual Status checkReplEnabledForCommand(BSONObjBuilder* result);
+
+        virtual void connectOplogReader(OperationContext* txn,
+                                        BackgroundSync* bgsync, 
+                                        OplogReader* r);
 
     private:
 

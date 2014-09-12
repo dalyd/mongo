@@ -28,37 +28,25 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/scoped_ptr.hpp>
-#include <boost/thread/thread.hpp>
-
+#include "mongo/db/concurrency/lock_mgr_test_help.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/db/concurrency/lock_mgr.h"
-#include "mongo/db/concurrency/lock_state.h"
-#include "mongo/util/log.h"
 
 
 namespace mongo {
 namespace newlm {
+    
+    TEST(LockerImpl, LockNoConflict) {
+        const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
-    class TrackingLockGrantNotification : public LockGrantNotification {
-    public:
-        TrackingLockGrantNotification() : numNotifies(0), lastResult(LOCK_INVALID) {
+        LockerImpl locker(1);
 
-        }
+        ASSERT(LOCK_OK == locker.lock(resId, MODE_X));
 
-        virtual void notify(const ResourceId& resId, LockResult result) {
-            numNotifies++;
-            lastResId = resId;
-            lastResult = result;
-        }
+        ASSERT(locker.isLockHeldForMode(resId, MODE_X));
+        ASSERT(locker.isLockHeldForMode(resId, MODE_S));
 
-    public:
-        int numNotifies;
-
-        ResourceId lastResId;
-        LockResult lastResult;
-    };
-
+        ASSERT(locker.unlock(resId));
+    }
    
     TEST(Locker, BasicLockSpeed) {
         Locker locker(1);
@@ -80,21 +68,35 @@ namespace newlm {
     TEST(Locker, BasicLockNoConflict) {
         Locker locker(1);
         TrackingLockGrantNotification notify;
-
-        const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
-
-        ASSERT(LOCK_OK == locker.lockExtended(resId, MODE_X, &notify));
-        ASSERT(locker.isLockHeldForMode(resId, MODE_X));
-        ASSERT(locker.isLockHeldForMode(resId, MODE_S));
-
-        locker.unlock(resId);
-
-        ASSERT(!locker.isLockHeldForMode(resId, MODE_NONE));
+        ASSERT(locker.isLockHeldForMode(resId, MODE_NONE));
     }
 
-    // Randomly acquires and releases locks, just to make sure that no assertions pop-up
-    TEST(Locker, RandomizedAcquireRelease) {
-        // TODO: Make sure to print the seed
+    TEST(LockerImpl, ReLockNoConflict) {
+        const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
+
+        LockerImpl locker(1);
+
+        ASSERT(LOCK_OK == locker.lock(resId, MODE_S));
+        ASSERT(LOCK_OK == locker.lock(resId, MODE_X));
+
+        ASSERT(!locker.unlock(resId));
+        ASSERT(locker.isLockHeldForMode(resId, MODE_X));
+
+        ASSERT(locker.unlock(resId));
+        ASSERT(locker.isLockHeldForMode(resId, MODE_NONE));
+    }
+
+    TEST(LockerImpl, ConflictWithTimeout) {
+        const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
+
+        LockerImpl locker1(1);
+        ASSERT(LOCK_OK == locker1.lock(resId, MODE_X));
+
+        LockerImpl locker2(2);
+        ASSERT(LOCK_TIMEOUT == locker2.lock(resId, MODE_S, 0));
+        ASSERT(locker2.isLockHeldForMode(resId, MODE_NONE));
+
+        ASSERT(locker1.unlock(resId));
     }
 
 } // namespace newlm

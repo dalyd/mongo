@@ -110,8 +110,8 @@ namespace {
             const TextStats* spec = static_cast<const TextStats*>(specific);
             return spec->keysExamined;
         }
-        else if (STAGE_COUNT == type) {
-            const CountStats* spec = static_cast<const CountStats*>(specific);
+        else if (STAGE_COUNT_SCAN == type) {
+            const CountScanStats* spec = static_cast<const CountScanStats*>(specific);
             return spec->keysExamined;
         }
         else if (STAGE_DISTINCT == type) {
@@ -162,8 +162,8 @@ namespace {
 
         // Some leaf nodes also provide info about the index they used.
         const SpecificStats* specific = stage->getSpecificStats();
-        if (STAGE_COUNT == stage->stageType()) {
-            const CountStats* spec = static_cast<const CountStats*>(specific);
+        if (STAGE_COUNT_SCAN == stage->stageType()) {
+            const CountScanStats* spec = static_cast<const CountScanStats*>(specific);
             ss << " " << spec->keyPattern;
         }
         else if (STAGE_DISTINCT == stage->stageType()) {
@@ -266,12 +266,21 @@ namespace mongo {
         }
         else if (STAGE_COLLSCAN == stats.stageType) {
             CollectionScanStats* spec = static_cast<CollectionScanStats*>(stats.specific.get());
+            bob->append("direction", spec->direction > 0 ? "forward" : "backward");
             if (verbosity >= Explain::EXEC_STATS) {
                 bob->appendNumber("docsExamined", spec->docsTested);
             }
         }
         else if (STAGE_COUNT == stats.stageType) {
             CountStats* spec = static_cast<CountStats*>(stats.specific.get());
+
+            if (verbosity >= Explain::EXEC_STATS) {
+                bob->appendNumber("nCounted", spec->nCounted);
+                bob->appendNumber("nSkipped", spec->nSkipped);
+            }
+        }
+        else if (STAGE_COUNT_SCAN == stats.stageType) {
+            CountScanStats* spec = static_cast<CountScanStats*>(stats.specific.get());
 
             if (verbosity >= Explain::EXEC_STATS) {
                 bob->appendNumber("keysExamined", spec->keysExamined);
@@ -291,6 +300,12 @@ namespace mongo {
                 bob->appendNumber("alreadyHasObj", spec->alreadyHasObj);
             }
         }
+        else if (STAGE_GROUP == stats.stageType) {
+            GroupStats* spec = static_cast<GroupStats*>(stats.specific.get());
+            if (verbosity >= Explain::EXEC_STATS) {
+                bob->appendNumber("nGroups", spec->nGroups);
+            }
+        }
         else if (STAGE_IDHACK == stats.stageType) {
             IDHackStats* spec = static_cast<IDHackStats*>(stats.specific.get());
             if (verbosity >= Explain::EXEC_STATS) {
@@ -307,6 +322,7 @@ namespace mongo {
 
             bob->append("keyPattern", spec->keyPattern);
             bob->appendBool("isMultiKey", spec->isMultiKey);
+            bob->append("direction", spec->direction > 0 ? "forward" : "backward");
 
             // Bounds can get large. Truncate to 1 MB.
             static const int kMaxBoundsSize = 1024 * 1024;
@@ -386,6 +402,20 @@ namespace mongo {
 
             bob->append("indexPrefix", spec->indexPrefix);
             bob->append("parsedTextQuery", spec->parsedTextQuery);
+        }
+        else if (STAGE_UPDATE == stats.stageType) {
+            UpdateStats* spec = static_cast<UpdateStats*>(stats.specific.get());
+
+            if (verbosity >= Explain::EXEC_STATS) {
+                bob->appendNumber("nMatched", spec->nMatched);
+                bob->appendNumber("nWouldModify", spec->nModified);
+                bob->appendBool("wouldInsert", spec->inserted);
+            }
+
+            if (verbosity == Explain::FULL) {
+                bob->appendBool("fastmod", spec->fastmod);
+                bob->appendBool("fastmodinsert", spec->fastmodinsert);
+            }
         }
 
         // We're done if there are no children.
@@ -511,23 +541,6 @@ namespace mongo {
         serverBob.append(StringData("os"), bOs.obj());
 
         serverBob.doneFast();
-    }
-
-    // static
-    void Explain::explainCountEmptyQuery(BSONObjBuilder* out) {
-        BSONObjBuilder plannerBob(out->subobjStart("queryPlanner"));
-
-        plannerBob.append("plannerVersion", QueryPlanner::kPlannerVersion);
-
-        plannerBob.append("winningPlan", "TRIVIAL_COUNT");
-
-        // Empty array of rejected plans.
-        BSONArrayBuilder allPlansBob(plannerBob.subarrayStart("rejectedPlans"));
-        allPlansBob.doneFast();
-
-        plannerBob.doneFast();
-
-        generateServerInfo(out);
     }
 
     // static

@@ -48,8 +48,12 @@
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
+
+    class Timer;
+
 namespace repl {
 
+    class OplogReader;
     class SyncSourceFeedback;
     class TopologyCoordinator;
 
@@ -96,7 +100,11 @@ namespace repl {
                 const OpTime& ts,
                 const WriteConcernOptions& writeConcern);
 
-        virtual ReplicationCoordinator::StatusAndDuration awaitReplicationOfLastOp(
+        virtual ReplicationCoordinator::StatusAndDuration awaitReplicationOfLastOpForClient(
+                const OperationContext* txn,
+                const WriteConcernOptions& writeConcern);
+
+        virtual ReplicationCoordinator::StatusAndDuration awaitReplicationOfLastOpApplied(
                 const OperationContext* txn,
                 const WriteConcernOptions& writeConcern);
 
@@ -104,11 +112,6 @@ namespace repl {
                                 bool force,
                                 const Milliseconds& waitTime,
                                 const Milliseconds& stepdownTime);
-
-        virtual Status stepDownAndWaitForSecondary(OperationContext* txn,
-                                                   const Milliseconds& initialWaitTime,
-                                                   const Milliseconds& stepdownTime,
-                                                   const Milliseconds& postStepdownWaitTime);
 
         virtual bool isMasterForReportingPurposes();
 
@@ -127,9 +130,13 @@ namespace repl {
 
         virtual Status setMyLastOptime(OperationContext* txn, const OpTime& ts);
 
+        virtual OpTime getMyLastOptime() const;
+
         virtual OID getElectionId();
 
-        virtual OID getMyRID();
+        virtual OID getMyRID() const;
+
+        virtual void setFollowerMode(const MemberState& newState);
 
         virtual void prepareReplSetUpdatePositionCommand(OperationContext* txn,
                                                          BSONObjBuilder* cmdBuilder);
@@ -188,6 +195,11 @@ namespace repl {
 
         virtual bool isReplEnabled() const;
 
+        virtual void connectOplogReader(OperationContext* txn,
+                                        BackgroundSync* bgsync,
+                                        OplogReader* r);
+
+        
         // ================== Members of replication code internal API ===================
 
         // This is a temporary hack to set the replset config to the config detected by the
@@ -210,6 +222,21 @@ namespace repl {
          * of calls via the executor.
          */
         void cancelHeartbeats();
+
+        /**
+         * Chooses a sync source.
+         * A wrapper that schedules _chooseNewSyncSource() through the Replication Executor and
+         * waits for its completion.
+         */
+        HostAndPort chooseNewSyncSource();
+
+        /**
+         * Blacklists 'host' until 'until'.
+         * A wrapper that schedules _blacklistSyncSource() through the Replication Executor and
+         * waits for its completion.
+         */
+        void blacklistSyncSource(const HostAndPort& host, Date_t until);
+
 
         // ================== Test support API ===================
 
@@ -299,11 +326,29 @@ namespace repl {
                                         bool activate,
                                         Status* result);
 
+        /**
+         * Bottom half of _setCurrentMemberState_forTest.
+         */
+        void _setCurrentMemberState_forTestFinish(const ReplicationExecutor::CallbackData& cbData,
+                                                  const MemberState& newState);
+
         /*
          * Returns the OpTime of the last applied operation on this node.
          */
         OpTime _getLastOpApplied();
         OpTime _getLastOpApplied_inlock();
+
+        /**
+         * Helper method for _awaitReplication that takes an already locked unique_lock and a
+         * Timer for timing the operation which has been counting since before the lock was
+         * acquired.
+         */
+        ReplicationCoordinator::StatusAndDuration _awaitReplication_inlock(
+                const Timer* timer,
+                boost::unique_lock<boost::mutex>* lock,
+                const OperationContext* txn,
+                const OpTime& ts,
+                const WriteConcernOptions& writeConcern);
 
         /*
          * Returns true if the given writeConcern is satisfied up to "optime" or is unsatisfiable.
@@ -326,7 +371,13 @@ namespace repl {
         Status _checkIfWriteConcernCanBeSatisfied_inlock(
                 const WriteConcernOptions& writeConcern) const;
 
-        OID _getMyRID_inlock();
+        OID _getMyRID_inlock() const;
+
+        /**
+         * Bottom half of setFollowerMode.
+         */
+        void _setFollowerModeFinish(const ReplicationExecutor::CallbackData& cbData,
+                                    const MemberState& newState);
 
         /**
          * Helper method for setLastOptime and setMyLastOptime that takes in a unique lock on
@@ -428,6 +479,25 @@ namespace repl {
          **/
         void _onElectCmdRunnerComplete(const ReplicationExecutor::CallbackData& cbData,
                                        const ReplicationExecutor::EventHandle& finishEvh);
+
+        /**
+         * Chooses a new sync source.  Must be scheduled as a callback.
+         * 
+         * Calls into the Topology Coordinator, which uses its current view of the set to choose
+         * the most appropriate sync source.
+         */
+        void _chooseNewSyncSource(const ReplicationExecutor::CallbackData& cbData,
+                                  HostAndPort* newSyncSource);
+
+        /**
+         * Adds 'host' to the sync source blacklist until 'until'. A blacklisted source cannot
+         * be chosen as a sync source.
+         *
+         * Must be scheduled as a callback.
+         */
+        void _blacklistSyncSource(const ReplicationExecutor::CallbackData& cbData,
+                                  const HostAndPort& host,
+                                  Date_t until);
 
 
         //

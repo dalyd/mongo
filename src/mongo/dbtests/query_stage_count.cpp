@@ -30,11 +30,11 @@
 
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/collection_scan.h"
 #include "mongo/db/exec/keep_mutations.h"
-#include "mongo/db/exec/count.h"
+#include "mongo/db/exec/count_scan.h"
 #include "mongo/db/exec/working_set.h"
-#include "mongo/db/instance.h"
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/operation_context_impl.h"
@@ -49,7 +49,7 @@ namespace QueryStageCount {
     class CountBase {
     public:
         CountBase() : _client(&_txn) {
-        
+
         }
 
         virtual ~CountBase() {
@@ -70,12 +70,12 @@ namespace QueryStageCount {
             _client.remove(ns(), obj);
         }
 
-        /* 
-         * Given a Count PlanStage object count, call work() on 
+        /*
+         * Given a CountScan PlanStage object count, call work() on
          * count until we reach IS_EOF.  Tally up how many objects
          * we've counted and return the count.
          */
-        int runCount(Count* count) {
+        int runCount(CountScan* count) {
             int countWorks = 0;
             WorkingSetID wsid;
 
@@ -93,7 +93,7 @@ namespace QueryStageCount {
             return collection->getIndexCatalog()->findIndexByKeyPattern(&_txn, obj);
         }
 
-        static const char* ns() { return "unittests.QueryStageCount"; }
+        static const char* ns() { return "unittests.QueryStageCountScan"; }
 
     protected:
         OperationContextImpl _txn;
@@ -120,7 +120,7 @@ namespace QueryStageCount {
             ctx.commit();
 
             // Set up the count stage
-            CountParams params;
+            CountScanParams params;
             params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
             verify(params.descriptor);
             params.startKey = BSON("a" << 1);
@@ -129,7 +129,7 @@ namespace QueryStageCount {
             params.endKeyInclusive = true;
 
             WorkingSet ws;
-            Count count(&_txn, params, &ws);
+            CountScan count(&_txn, params, &ws);
 
             int numCounted = runCount(&count);
             ASSERT_EQUALS(2, numCounted);
@@ -152,9 +152,9 @@ namespace QueryStageCount {
             // Add an index
             addIndex(BSON("a" << 1));
             ctx.commit();
- 
+
             // Set up the count stage
-            CountParams params;
+            CountScanParams params;
             params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
             params.startKey = BSON("" << 3);
             params.startKeyInclusive = true;
@@ -162,7 +162,7 @@ namespace QueryStageCount {
             params.endKeyInclusive = true;
 
             WorkingSet ws;
-            Count count(&_txn, params, &ws);
+            CountScan count(&_txn, params, &ws);
 
             int numCounted = runCount(&count);
             ASSERT_EQUALS(5, numCounted);
@@ -185,9 +185,9 @@ namespace QueryStageCount {
             // Add an index
             addIndex(BSON("a" << 1));
             ctx.commit();
- 
+
             // Set up the count stage
-            CountParams params;
+            CountScanParams params;
             params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
             params.startKey = BSON("" << 3);
             params.startKeyInclusive = false;
@@ -195,7 +195,7 @@ namespace QueryStageCount {
             params.endKeyInclusive = false;
 
             WorkingSet ws;
-            Count count(&_txn, params, &ws);
+            CountScan count(&_txn, params, &ws);
 
             int numCounted = runCount(&count);
             ASSERT_EQUALS(3, numCounted);
@@ -216,7 +216,7 @@ namespace QueryStageCount {
             ctx.commit();
 
             // Set up count, and run
-            CountParams params;
+            CountScanParams params;
             params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
             params.startKey = BSON("" << 2);
             params.startKeyInclusive = false;
@@ -224,8 +224,8 @@ namespace QueryStageCount {
             params.endKeyInclusive = false;
 
             WorkingSet ws;
-            Count count(&_txn, params, &ws);
-            
+            CountScan count(&_txn, params, &ws);
+
             int numCounted = runCount(&count);
             ASSERT_EQUALS(0, numCounted);
         }
@@ -246,7 +246,7 @@ namespace QueryStageCount {
             ctx.commit();
 
             // Set up count, and run
-            CountParams params;
+            CountScanParams params;
             params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
             params.startKey = BSON("" << 2);
             params.startKeyInclusive = false;
@@ -254,8 +254,8 @@ namespace QueryStageCount {
             params.endKeyInclusive = false;
 
             WorkingSet ws;
-            Count count(&_txn, params, &ws);
-            
+            CountScan count(&_txn, params, &ws);
+
             int numCounted = runCount(&count);
             ASSERT_EQUALS(0, numCounted);
         }
@@ -277,7 +277,7 @@ namespace QueryStageCount {
             ctx.commit();
 
             // Set up count, and run
-            CountParams params;
+            CountScanParams params;
             params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
             params.startKey = BSON("" << 2);
             params.startKeyInclusive = false;
@@ -285,8 +285,8 @@ namespace QueryStageCount {
             params.endKeyInclusive = true;
 
             WorkingSet ws;
-            Count count(&_txn, params, &ws);
-            
+            CountScan count(&_txn, params, &ws);
+
             int numCounted = runCount(&count);
             ASSERT_EQUALS(0, numCounted);
         }
@@ -309,7 +309,7 @@ namespace QueryStageCount {
             ctx.commit();
 
             // Set up count stage
-            CountParams params;
+            CountScanParams params;
             params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
             params.startKey = BSON("" << 2);
             params.startKeyInclusive = false;
@@ -317,7 +317,7 @@ namespace QueryStageCount {
             params.endKeyInclusive = true;
 
             WorkingSet ws;
-            Count count(&_txn, params, &ws);
+            CountScan count(&_txn, params, &ws);
             WorkingSetID wsid;
 
             int numCounted = 0;
@@ -361,7 +361,7 @@ namespace QueryStageCount {
             ctx.commit();
 
             // Set up count stage
-            CountParams params;
+            CountScanParams params;
             params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
             params.startKey = BSON("" << 2);
             params.startKeyInclusive = false;
@@ -369,7 +369,7 @@ namespace QueryStageCount {
             params.endKeyInclusive = true;
 
             WorkingSet ws;
-            Count count(&_txn, params, &ws);
+            CountScan count(&_txn, params, &ws);
             WorkingSetID wsid;
 
             int numCounted = 0;
@@ -386,6 +386,7 @@ namespace QueryStageCount {
 
             // Remove remaining objects
             remove(BSON("a" << GTE << 5));
+            ctx.commit();
 
             // Recover from yield
             count.restoreState(&_txn);
@@ -416,7 +417,7 @@ namespace QueryStageCount {
             ctx.commit();
 
             // Set up count stage
-            CountParams params;
+            CountScanParams params;
             params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
             params.startKey = BSON("" << 2);
             params.startKeyInclusive = false;
@@ -424,7 +425,7 @@ namespace QueryStageCount {
             params.endKeyInclusive = true;
 
             WorkingSet ws;
-            Count count(&_txn, params, &ws);
+            CountScan count(&_txn, params, &ws);
             WorkingSetID wsid;
 
             int numCounted = 0;
@@ -444,6 +445,7 @@ namespace QueryStageCount {
 
             // Insert one document after the end
             insert(BSON("a" << 6.5));
+            ctx.commit();
 
             // Recover from yield
             count.restoreState(&_txn);
@@ -474,7 +476,7 @@ namespace QueryStageCount {
             ctx.commit();
 
             // Set up count stage
-            CountParams params;
+            CountScanParams params;
             params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
             params.startKey = BSON("" << 2);
             params.startKeyInclusive = false;
@@ -482,7 +484,7 @@ namespace QueryStageCount {
             params.endKeyInclusive = true;
 
             WorkingSet ws;
-            Count count(&_txn, params, &ws);
+            CountScan count(&_txn, params, &ws);
             WorkingSetID wsid;
 
             int numCounted = 0;
@@ -499,6 +501,7 @@ namespace QueryStageCount {
 
             // Insert a document with two values for 'a'
             insert(BSON("a" << BSON_ARRAY(10 << 11)));
+            ctx.commit();
 
             // Recover from yield
             count.restoreState(&_txn);
@@ -525,15 +528,15 @@ namespace QueryStageCount {
                 insert(BSON("a" << 1 << "b" << i));
             }
             addIndex(BSON("a" << 1));
-            ctx.commit();
 
             // Mark several keys as 'unused'
             remove(BSON("a" << 1 << "b" << 0));
             remove(BSON("a" << 1 << "b" << 3));
             remove(BSON("a" << 1 << "b" << 4));
+            ctx.commit();
 
             // Ensure that count does not include unused keys
-            CountParams params;
+            CountScanParams params;
             params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
             params.startKey = BSON("" << 1);
             params.startKeyInclusive = true;
@@ -541,7 +544,7 @@ namespace QueryStageCount {
             params.endKeyInclusive = true;
 
             WorkingSet ws;
-            Count count(&_txn, params, &ws);
+            CountScan count(&_txn, params, &ws);
 
             int numCounted = runCount(&count);
             ASSERT_EQUALS(7, numCounted);
@@ -567,7 +570,7 @@ namespace QueryStageCount {
             ctx.commit();
 
             // Run count and check
-            CountParams params;
+            CountScanParams params;
             params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
             params.startKey = BSON("" << 0);
             params.startKeyInclusive = true;
@@ -575,7 +578,7 @@ namespace QueryStageCount {
             params.endKeyInclusive = true; // yes?
 
             WorkingSet ws;
-            Count count(&_txn, params, &ws);
+            CountScan count(&_txn, params, &ws);
 
             int numCounted = runCount(&count);
             ASSERT_EQUALS(9, numCounted);
@@ -598,7 +601,7 @@ namespace QueryStageCount {
             ctx.commit();
 
             // Set up count stage
-            CountParams params;
+            CountScanParams params;
             params.descriptor = getIndex(ctx.ctx().db(), BSON("a" << 1));
             params.startKey = BSON("" << 1);
             params.startKeyInclusive = true;
@@ -606,7 +609,7 @@ namespace QueryStageCount {
             params.endKeyInclusive = true;
 
             WorkingSet ws;
-            Count count(&_txn, params, &ws);
+            CountScan count(&_txn, params, &ws);
             WorkingSetID wsid;
 
             int numCounted = 0;
@@ -623,6 +626,7 @@ namespace QueryStageCount {
 
             // Mark the key at position 5 as 'unused'
             remove(BSON("a" << 1 << "b" << 5));
+            ctx.commit();
 
             // Recover from yield
             count.restoreState(&_txn);
