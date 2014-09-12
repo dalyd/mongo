@@ -65,12 +65,6 @@ namespace newlm {
       
     }
   
-    TEST(Locker, BasicLockNoConflict) {
-        Locker locker(1);
-        TrackingLockGrantNotification notify;
-        ASSERT(locker.isLockHeldForMode(resId, MODE_NONE));
-    }
-
     TEST(LockerImpl, ReLockNoConflict) {
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
