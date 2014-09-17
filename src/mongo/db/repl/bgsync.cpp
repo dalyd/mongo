@@ -42,6 +42,7 @@
 #include "mongo/db/repl/repl_coordinator_global.h"
 #include "mongo/db/repl/repl_coordinator_impl.h"
 #include "mongo/db/repl/rs.h"
+#include "mongo/db/repl/rs_rollback.h"
 #include "mongo/db/repl/rs_sync.h"
 #include "mongo/db/repl/rslog.h"
 #include "mongo/db/stats/timer_stats.h"
@@ -169,7 +170,7 @@ namespace repl {
             return;
         }
 
-        if (state.fatal() || state.startup()) {
+        if (state.startup()) {
             sleepsecs(5);
             return;
         }
@@ -240,7 +241,7 @@ namespace repl {
             return;
         }
 
-        if (isRollbackRequired(txn, r)) {
+        if (_rollbackIfNeeded(txn, r)) {
             stop();
             return;
         }
@@ -446,14 +447,14 @@ namespace repl {
             boost::unique_lock<boost::mutex> lock(_mutex);
             lastOpTimeFetched = _lastOpTimeFetched;
         }
-        Date_t now(curTimeMillis64());
-        OpTime oldestOpTimeSeen(now,0);
+        const OpTime sentinel(Milliseconds(curTimeMillis64()).total_seconds(), 0);
+        OpTime oldestOpTimeSeen= sentinel;
 
         while (true) {
             HostAndPort candidate = replCoordImpl->chooseNewSyncSource();
 
             if (candidate.empty()) {
-                if (oldestOpTimeSeen == OpTime(now,0)) {
+                if (oldestOpTimeSeen == sentinel) {
                     // If, in this invocation of connectOplogReader(), we did not successfully 
                     // connect to any node ahead of us,
                     // we apparently have no sync sources to connect to.
@@ -517,7 +518,7 @@ namespace repl {
 
     }
 
-    bool BackgroundSync::isRollbackRequired(OperationContext* txn, OplogReader& r) {
+    bool BackgroundSync::_rollbackIfNeeded(OperationContext* txn, OplogReader& r) {
         string hn = r.conn()->getServerAddress();
 
         if (!r.more()) {
@@ -532,7 +533,7 @@ namespace repl {
                 if (theirTS < _lastOpTimeFetched) {
                     log() << "replSet we are ahead of the sync source, will try to roll back"
                           << rsLog;
-                    theReplSet->syncRollback(txn, r);
+                    syncRollback(txn, theReplSet->lastOpTimeWritten, &r, _replCoord);
                     return true;
                 }
                 /* we're not ahead?  maybe our new query got fresher data.  best to come back and try again */
@@ -552,7 +553,7 @@ namespace repl {
         if( ts != _lastOpTimeFetched || h != _lastH ) {
             log() << "replSet our last op time fetched: " << _lastOpTimeFetched.toStringPretty() << rsLog;
             log() << "replset source's GTE: " << ts.toStringPretty() << rsLog;
-            theReplSet->syncRollback(txn, r);
+            syncRollback(txn, theReplSet->lastOpTimeWritten, &r, _replCoord);
             return true;
         }
 

@@ -139,7 +139,7 @@ namespace repl {
                                                   const Milliseconds& waitTime,
                                                   const Milliseconds& stepdownTime) {
         Status legacyStatus = _legacy.stepDown(txn, force, waitTime, stepdownTime);
-        Status implStatus = _impl.stepDown(txn, force, waitTime, stepdownTime);
+        //        Status implStatus = _impl.stepDown(txn, force, waitTime, stepdownTime);
         return legacyStatus;
     }
 
@@ -159,12 +159,12 @@ namespace repl {
         return legacyResponse;
     }
 
-    Status HybridReplicationCoordinator::canServeReadsFor(OperationContext* txn,
-                                                          const NamespaceString& ns,
-                                                          bool slaveOk) {
-        Status legacyStatus = _legacy.canServeReadsFor(txn, ns, slaveOk);
+    Status HybridReplicationCoordinator::checkCanServeReadsFor(OperationContext* txn,
+                                                               const NamespaceString& ns,
+                                                               bool slaveOk) {
+        Status legacyStatus = _legacy.checkCanServeReadsFor(txn, ns, slaveOk);
         // TODO(dannenberg) uncomment below once the impl state changes are full implemeneted
-        // Status implStatus = _impl.canServeReadsFor(txn, ns, slaveOk);
+        // Status implStatus = _impl.checkCanServeReadsFor(txn, ns, slaveOk);
         // invariant(legacyStatus == implStatus);
         return legacyStatus;
     }
@@ -364,11 +364,6 @@ namespace repl {
         return implResponse;
     }
 
-    void HybridReplicationCoordinator::waitUpToOneSecondForOptimeChange(const OpTime& ot) {
-        _legacy.waitUpToOneSecondForOptimeChange(ot);
-        //TODO(spencer) switch to _impl.waitUpToOneSecondForOptimeChange(ot); once implemented
-    }
-
     bool HybridReplicationCoordinator::buildsIndexes() {
         bool legacyResponse = _legacy.buildsIndexes();
         bool implResponse = _impl.buildsIndexes();
@@ -376,17 +371,14 @@ namespace repl {
         return legacyResponse;
     }
 
-    vector<BSONObj> HybridReplicationCoordinator::getHostsWrittenTo(const OpTime& op) {
-        vector<BSONObj> legacyResponse = _legacy.getHostsWrittenTo(op);
-        vector<BSONObj> implResponse = _impl.getHostsWrittenTo(op);
-        return legacyResponse;
+    vector<HostAndPort> HybridReplicationCoordinator::getHostsWrittenTo(const OpTime& op) {
+        vector<HostAndPort> implResponse = _impl.getHostsWrittenTo(op);
+        return implResponse;
     }
 
     Status HybridReplicationCoordinator::checkIfWriteConcernCanBeSatisfied(
             const WriteConcernOptions& writeConcern) const {
-        Status legacyStatus = _legacy.checkIfWriteConcernCanBeSatisfied(writeConcern);
-        Status implStatus = _impl.checkIfWriteConcernCanBeSatisfied(writeConcern);
-        return legacyStatus;
+        return _impl.checkIfWriteConcernCanBeSatisfied(writeConcern);
     }
 
     BSONObj HybridReplicationCoordinator::getGetLastErrorDefault() {

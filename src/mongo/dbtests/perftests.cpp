@@ -54,7 +54,6 @@
 #include "mongo/util/allocator.h"
 #include "mongo/util/checksum.h"
 #include "mongo/util/compress.h"
-#include "mongo/util/concurrency/qlock.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mmap.h"

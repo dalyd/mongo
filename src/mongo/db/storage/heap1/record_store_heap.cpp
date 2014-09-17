@@ -69,6 +69,9 @@ namespace mongo {
 
     HeapRecordStore::HeapRecord* HeapRecordStore::recordFor(const DiskLoc& loc) const {
         Records::const_iterator it = _records.find(loc);
+        if ( it == _records.end() ) {
+            error() << "HeapRecordStore::recordFor cannot find record for " << ns() << ":" << loc;
+        }
         invariant(it != _records.end());
         return reinterpret_cast<HeapRecord*>(it->second.get());
     }
@@ -434,7 +437,8 @@ namespace mongo {
     void HeapRecordIterator::saveState() {
     }
 
-    bool HeapRecordIterator::restoreState() {
+    bool HeapRecordIterator::restoreState(OperationContext* txn) {
+        _txn = txn;
         return !_killedByInvalidate;
     }
 
@@ -499,7 +503,7 @@ namespace mongo {
     void HeapRecordReverseIterator::saveState() {
     }
 
-    bool HeapRecordReverseIterator::restoreState() {
+    bool HeapRecordReverseIterator::restoreState(OperationContext* txn) {
         return !_killedByInvalidate;
     }
 

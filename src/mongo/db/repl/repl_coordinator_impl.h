@@ -120,9 +120,9 @@ namespace repl {
         virtual Status checkIfWriteConcernCanBeSatisfied(
                 const WriteConcernOptions& writeConcern) const;
 
-        virtual Status canServeReadsFor(OperationContext* txn,
-                                        const NamespaceString& ns,
-                                        bool slaveOk);
+        virtual Status checkCanServeReadsFor(OperationContext* txn,
+                                             const NamespaceString& ns,
+                                             bool slaveOk);
 
         virtual bool shouldIgnoreUniqueIndex(const IndexDescriptor* idx);
 
@@ -183,11 +183,9 @@ namespace repl {
         virtual Status processHandshake(const OperationContext* txn,
                                         const HandshakeArgs& handshake);
 
-        virtual void waitUpToOneSecondForOptimeChange(const OpTime& ot);
-
         virtual bool buildsIndexes();
 
-        virtual std::vector<BSONObj> getHostsWrittenTo(const OpTime& op);
+        virtual std::vector<HostAndPort> getHostsWrittenTo(const OpTime& op);
 
         virtual BSONObj getGetLastErrorDefault();
 
@@ -371,6 +369,17 @@ namespace repl {
         Status _checkIfWriteConcernCanBeSatisfied_inlock(
                 const WriteConcernOptions& writeConcern) const;
 
+        /**
+         * Helper for stepDown run within a ReplicationExecutor callback.  This method assumes
+         * it is running within a global shared lock, and thus that no writes are going on at the
+         * same time.
+         */
+        void _stepDownFinish(const ReplicationExecutor::CallbackData& cbData,
+                             bool force,
+                             const Milliseconds& waitTime,
+                             const Date_t& stepdownUntil,
+                             Status* result);
+
         OID _getMyRID_inlock() const;
 
         /**
@@ -469,16 +478,14 @@ namespace repl {
          * decides whether to continue election proceedings.
          * finishEvh is an event that is signaled when election is complete.
          **/
-        void _onFreshnessCheckComplete(const ReplicationExecutor::CallbackData& cbData,
-                                       const ReplicationExecutor::EventHandle& finishEvh);
+        void _onFreshnessCheckComplete(const ReplicationExecutor::EventHandle& finishEvh);
 
         /**
          * Callback called when the ElectCmdRunner has completed; checks the results and
          * decides whether to complete the election and change state to primary.
          * finishEvh is an event that is signaled when election is complete.
          **/
-        void _onElectCmdRunnerComplete(const ReplicationExecutor::CallbackData& cbData,
-                                       const ReplicationExecutor::EventHandle& finishEvh);
+        void _onElectCmdRunnerComplete(const ReplicationExecutor::EventHandle& finishEvh);
 
         /**
          * Chooses a new sync source.  Must be scheduled as a callback.
