@@ -633,45 +633,12 @@ namespace PerfTests {
         }
     };
 
-    QLock _qlock;
-
-    class qlock : public B {
-    public:
-        string name() { return "qlockr"; }
-        //virtual int howLongMillis() { return 500; }
-        virtual bool showDurStats() { return false; }
-        void timed() {
-            _qlock.lock_r();
-            _qlock.unlock_r();
-        }
-        void timed2(DBClientBase*) {
-            _qlock.lock_r();
-            _qlock.unlock_r();
-        }
-        virtual bool testThreaded() { return true; }
-    };
-    class qlockw : public B {
-    public:
-        string name() { return "qlockw"; }
-        //virtual int howLongMillis() { return 500; }
-        virtual bool showDurStats() { return false; }
-        virtual bool testThreaded() { return true; }
-        void timed() {
-            _qlock.lock_w();
-            _qlock.unlock_w();
-        }
-        void timed2(DBClientBase*) {
-            _qlock.lock_w();
-            _qlock.unlock_w();
-        }
-    };
-
 
 
     class locker_contestedX : public B {
     public:
         boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
-        boost::thread_specific_ptr<mongo::newlm::Locker> locker; 
+        boost::thread_specific_ptr<Locker> locker; 
         int count;
         string name() { return "locker_contestedX"; }
         virtual int howLongMillis() { return 500; }
@@ -680,14 +647,14 @@ namespace PerfTests {
         virtual void prep() {
             count = 1;
             resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
-            locker.reset(new mongo::newlm::Locker(1));
+            locker.reset(new mongo::newlm::LockerImpl());
         }
         
         virtual void prep2() {
             //std:ostringstream stream;
             //stream << boost::thread::getId();
             resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
-            locker.reset(new mongo::newlm::Locker(++count));
+            locker.reset(new mongo::newlm::LockerImpl());
         }
 
         void timed() {
@@ -704,7 +671,7 @@ namespace PerfTests {
     class locker_uncontestedX : public B {
     public:
         boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
-        boost::thread_specific_ptr<mongo::newlm::Locker> locker; 
+        boost::thread_specific_ptr<Locker> locker; 
         int count;
         string name() { return "locker_uncontestedX"; }
         virtual int howLongMillis() { return 500; }
@@ -713,7 +680,7 @@ namespace PerfTests {
         virtual void prep() {
             count = 1;
             resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
-            locker.reset(new mongo::newlm::Locker(1));
+            locker.reset(new mongo::newlm::LockerImpl(1));
         }
         
         virtual void prep2() {
@@ -721,7 +688,7 @@ namespace PerfTests {
             stream << boost::this_thread::get_id();
             
             resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection") + stream.str()));
-            locker.reset(new mongo::newlm::Locker(++count));
+            locker.reset(new mongo::newlm::LockerImpl(++count));
         }
 
         void timed() {
@@ -738,7 +705,7 @@ namespace PerfTests {
     class locker_contestedS : public B {
     public:
         boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
-        boost::thread_specific_ptr<mongo::newlm::Locker> locker; 
+        boost::thread_specific_ptr<Locker> locker; 
         int count;
         string name() { return "locker_contestedS"; }
         virtual int howLongMillis() { return 500; }
@@ -747,14 +714,14 @@ namespace PerfTests {
         virtual void prep() {
             count = 1;
             resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
-            locker.reset(new mongo::newlm::Locker(1));
+            locker.reset(new mongo::newlm::LockerImpl(1));
         }
         
         virtual void prep2() {
             //std:ostringstream stream;
             //stream << boost::thread::getId();
             resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
-            locker.reset(new mongo::newlm::Locker(++count));
+            locker.reset(new mongo::newlm::LockerImpl(++count));
         }
 
         void timed() {
@@ -771,7 +738,7 @@ namespace PerfTests {
     class locker_uncontestedS : public B {
     public:
         boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
-        boost::thread_specific_ptr<mongo::newlm::Locker> locker; 
+        boost::thread_specific_ptr<Locker> locker; 
         int count;
         string name() { return "locker_uncontestedS"; }
         virtual int howLongMillis() { return 500; }
@@ -780,7 +747,7 @@ namespace PerfTests {
         virtual void prep() {
             count = 1;
             resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
-            locker.reset(new mongo::newlm::Locker(1));
+            locker.reset(new mongo::newlm::LockerImpl(1));
         }
         
         virtual void prep2() {
@@ -788,7 +755,7 @@ namespace PerfTests {
             stream << boost::this_thread::get_id();
             
             resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection") + stream.str()));
-            locker.reset(new mongo::newlm::Locker(++count));
+            locker.reset(new mongo::newlm::LockerImpl(++count));
         }
 
         void timed() {
@@ -1491,43 +1458,41 @@ namespace PerfTests {
             }
             else {
                 add< Dummy >();
-                add< ChecksumTest >();
-                add< Compress >();
-                add< TLS >();
-#if defined(_WIN32)
-                add< TLS2 >();
-#endif
-                add< New8 >();
-                add< New128 >();
-                add< Throw< thr1 > >();
-                add< Throw< thr2 > >();
-                add< Throw< thr3 > >();
+//                 add< ChecksumTest >();
+//                 add< Compress >();
+//                 add< TLS >();
+// #if defined(_WIN32)
+//                 add< TLS2 >();
+// #endif
+//                 add< New8 >();
+//                 add< New128 >();
+//                 add< Throw< thr1 > >();
+//                 add< Throw< thr2 > >();
+//                 add< Throw< thr3 > >();
 
-#if !defined(__clang__) || !defined(MONGO_OPTIMIZED_BUILD)
-                // clang-3.2 (and earlier?) miscompiles this test when optimization is on (see
-                // SERVER-9767 and SERVER-11183 for additional details, including a link to the
-                // LLVM ticket and LLVM fix).
-                //
-                // Ideally, the test above would also say
-                // || (__clang_major__ > 3) || ((__clang_major__ == 3) && (__clang_minor__ > 2))
-                // so that the test would still run on known good vesrions of clang; see
-                // comments in SERVER-11183 for why that doesn't work.
-                //
-                // TODO: Remove this when we no longer need to support clang-3.2. We should
-                // also consider requiring clang > 3.2 in our configure tests once XCode 5 is
-                // ubiquitious.
-                add< Throw< thr4 > >();
-#endif
+// #if !defined(__clang__) || !defined(MONGO_OPTIMIZED_BUILD)
+//                 // clang-3.2 (and earlier?) miscompiles this test when optimization is on (see
+//                 // SERVER-9767 and SERVER-11183 for additional details, including a link to the
+//                 // LLVM ticket and LLVM fix).
+//                 //
+//                 // Ideally, the test above would also say
+//                 // || (__clang_major__ > 3) || ((__clang_major__ == 3) && (__clang_minor__ > 2))
+//                 // so that the test would still run on known good vesrions of clang; see
+//                 // comments in SERVER-11183 for why that doesn't work.
+//                 //
+//                 // TODO: Remove this when we no longer need to support clang-3.2. We should
+//                 // also consider requiring clang > 3.2 in our configure tests once XCode 5 is
+//                 // ubiquitious.
+//                 add< Throw< thr4 > >();
+// #endif
 
-                add< Timer >();
-                add< Sleep0Ms >();
+//                 add< Timer >();
+//                 add< Sleep0Ms >();
 #if defined(__USE_XOPEN2K)
                 add< Yield >();
 #endif
                 add< rlock >();
                 add< wlock >();
-                add< qlock >();
-                add< qlockw >();
                 add< locker_contestedX >();
                 add< locker_uncontestedX >();
                 add< locker_contestedS >();
@@ -1545,34 +1510,34 @@ namespace PerfTests {
 #ifdef RUNCOMPARESWAP
                 add< casspeed >();
 #endif
-                add< CTM >();
-                add< CTMicros >();
-                add< KeyTest >();
-                add< Bldr >();
-                add< StkBldr >();
-                add< BSONIter >();
-                add< BSONGetFields1 >();
-                add< BSONGetFields2 >();
-                //add< TaskQueueTest >();
-                add< InsertDup >();
-                add< Insert1 >();
-                add< InsertRandom >();
-                add< MoreIndexes<InsertRandom> >();
-                add< Update1 >();
-                add< MoreIndexes<Update1> >();
-                add< InsertBig >();
-                add< FailPointTest<false, false> >();
-                add< FailPointTest<true, false> >();
-                add< FailPointTest<true, true> >();
+//                 add< CTM >();
+//                 add< CTMicros >();
+//                 add< KeyTest >();
+//                 add< Bldr >();
+//                 add< StkBldr >();
+//                 add< BSONIter >();
+//                 add< BSONGetFields1 >();
+//                 add< BSONGetFields2 >();
+//                 //add< TaskQueueTest >();
+//                 add< InsertDup >();
+//                 add< Insert1 >();
+//                 add< InsertRandom >();
+//                 add< MoreIndexes<InsertRandom> >();
+//                 add< Update1 >();
+//                 add< MoreIndexes<Update1> >();
+//                 add< InsertBig >();
+//                 add< FailPointTest<false, false> >();
+//                 add< FailPointTest<true, false> >();
+//                 add< FailPointTest<true, true> >();
 
-                add< ReturnOKStatus >();
-                add< ReturnNotOKStatus >();
-                add< CopyOKStatus >();
-                add< CopyNotOKStatus >();
-#if __cplusplus >= 201103L
-                add< MoveOKStatus >();
-                add< MoveNotOKStatus >();
-#endif
+//                 add< ReturnOKStatus >();
+//                 add< ReturnNotOKStatus >();
+//                 add< CopyOKStatus >();
+//                 add< CopyNotOKStatus >();
+// #if __cplusplus >= 201103L
+//                 add< MoveOKStatus >();
+//                 add< MoveNotOKStatus >();
+// #endif
             }
         }
     } myall;
