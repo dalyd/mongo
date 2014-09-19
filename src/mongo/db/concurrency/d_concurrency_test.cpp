@@ -110,18 +110,6 @@ namespace mongo {
         }
     }
 
-    TEST(DConcurrency, TempReleaseGlobalRead) {
-        LockState ls;
-        Lock::GlobalRead globalRead(&ls);
-
-        {
-            Lock::TempRelease tempRelease(&ls);
-            ASSERT(!ls.isLocked());
-        }
-
-        ASSERT(ls.isR());
-    }
-
     TEST(DConcurrency, TempReleaseGlobalWrite) {
         LockState ls;
         Lock::GlobalWrite globalWrite(&ls);
@@ -132,6 +120,24 @@ namespace mongo {
         }
 
         ASSERT(ls.isW());
+    }
+
+    TEST(DConcurrency, DBReadTakesS) {
+        LockState ls;
+
+        Lock::DBRead dbRead(&ls, "db");
+
+        const newlm::ResourceId resIdDb(newlm::RESOURCE_DATABASE, string("db"));
+        ASSERT(ls.getLockMode(resIdDb) == newlm::MODE_S);
+    }
+
+    TEST(DConcurrency, DBWriteTakesX) {
+        LockState ls;
+
+        Lock::DBWrite dbWrite(&ls, "db");
+
+        const newlm::ResourceId resIdDb(newlm::RESOURCE_DATABASE, string("db"));
+        ASSERT(ls.getLockMode(resIdDb) == newlm::MODE_X);
     }
 
     TEST(DConcurrency, MultipleWriteDBLocksOnSameThread) {

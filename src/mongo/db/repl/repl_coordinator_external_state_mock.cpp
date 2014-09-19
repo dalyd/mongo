@@ -34,7 +34,7 @@
 #include "mongo/bson/oid.h"
 #include "mongo/db/client.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/operation_context_impl.h"
+#include "mongo/db/operation_context_noop.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/sequence_util.h"
 
@@ -42,8 +42,8 @@ namespace mongo {
 namespace repl {
 
     ReplicationCoordinatorExternalStateMock::ReplicationCoordinatorExternalStateMock()
-        : _localRsConfigDocument(Status(ErrorCodes::NoMatchingDocument,
-                                        "No local config document")),
+        : _localRsConfigDocument(ErrorCodes::NoMatchingDocument, "No local config document"),
+          _lastOpTimeAndHash(ErrorCodes::NoMatchingDocument, "No last oplog entry"),
          _canAcquireGlobalSharedLock(true),
          _connectionsClosed(false) {
     }
@@ -95,6 +95,18 @@ namespace repl {
         _localRsConfigDocument = localConfigDocument;
     }
 
+    StatusWith<ReplicationCoordinatorExternalState::OpTimeAndHash>
+    ReplicationCoordinatorExternalStateMock::loadLastOpTimeAndHash(
+            OperationContext* txn) {
+        return _lastOpTimeAndHash;
+    }
+
+    void ReplicationCoordinatorExternalStateMock::setLastOpTimeAndHash(
+            const StatusWith<OpTimeAndHash>& lastApplied) {
+
+        _lastOpTimeAndHash = lastApplied;
+    }
+
     void ReplicationCoordinatorExternalStateMock::closeClientConnections() {
         _connectionsClosed = true;
     }
@@ -112,11 +124,16 @@ namespace repl {
     ReplicationCoordinatorExternalStateMock::GlobalSharedLockAcquirer::GlobalSharedLockAcquirer(
             bool canAcquireLock) : _canAcquireLock(canAcquireLock) {}
 
-    ReplicationCoordinatorExternalStateMock::GlobalSharedLockAcquirer::~GlobalSharedLockAcquirer() {}
+    ReplicationCoordinatorExternalStateMock::GlobalSharedLockAcquirer::~GlobalSharedLockAcquirer() {
+    }
 
     bool ReplicationCoordinatorExternalStateMock::GlobalSharedLockAcquirer::try_lock(
             OperationContext* txn, const Milliseconds& timeout) {
         return _canAcquireLock;
+    }
+
+    OperationContext* ReplicationCoordinatorExternalStateMock::createOperationContext() {
+        return new OperationContextNoop;
     }
 } // namespace repl
 } // namespace mongo

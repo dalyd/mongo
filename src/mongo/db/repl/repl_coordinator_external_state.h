@@ -31,6 +31,7 @@
 #include <boost/scoped_ptr.hpp>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/bson/optime.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -56,6 +57,16 @@ namespace repl {
 
         class GlobalSharedLockAcquirer;
         class ScopedLocker;
+
+        /**
+         * Structure used to pass around information about oplog entry optimes and h values.
+         */
+        struct OpTimeAndHash {
+            OpTimeAndHash() {}
+            OpTimeAndHash(OpTime ot, long long h) : opTime(ot), hash(h) {}
+            OpTime opTime;
+            long long hash;
+        };
 
         ReplicationCoordinatorExternalState();
         virtual ~ReplicationCoordinatorExternalState();
@@ -110,6 +121,12 @@ namespace repl {
         virtual Status storeLocalConfigDocument(OperationContext* txn, const BSONObj& config) = 0;
 
         /**
+         * Gets the last optime and hash of an operation performed on this host, from stable
+         * storage.
+         */
+        virtual StatusWith<OpTimeAndHash> loadLastOpTimeAndHash(OperationContext* txn) = 0;
+
+        /**
          * Returns the HostAndPort of the remote client connected to us that initiated the operation
          * represented by "txn".
          */
@@ -126,6 +143,12 @@ namespace repl {
          * shared lock.
          */
         virtual GlobalSharedLockAcquirer* getGlobalSharedLockAcquirer() = 0;
+
+        /**
+         * Returns an OperationContext, owned by the caller, that may be used in methods of
+         * the same instance that require an OperationContext.
+         */
+        virtual OperationContext* createOperationContext() = 0;
     };
 
     /**
