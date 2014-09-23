@@ -40,6 +40,8 @@
 #include <boost/thread/thread.hpp>
 #include <iomanip>
 #include <fstream>
+#include <sstream>
+#include <string>
 
 #include "mongo/db/db.h"
 #include "mongo/db/dbdirectclient.h"
@@ -633,6 +635,56 @@ namespace PerfTests {
         }
     };
 
+
+    class locker_test : public B {
+    public:
+        boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
+        boost::thread_specific_ptr<Locker> locker; 
+        int count;
+        mongo::newlm::LockMode lockMode; // Need to initialize this
+
+        
+        virtual string name() { 
+            stringstream mode;
+            mode << lockMode;
+            return (string("locker_contested") + mode.str());}
+        virtual bool showDurStats() { return false; }
+        virtual bool testThreaded() { return true; }
+        virtual void prep() {
+            count = 1;
+            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
+            locker.reset(new mongo::newlm::LockerImpl());
+        }
+        
+        virtual void prep2() {
+            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
+            locker.reset(new mongo::newlm::LockerImpl());
+        }
+
+        void timed() {
+            locker->lock(*resId, lockMode);
+            locker->unlock(*resId);
+        }
+
+        void timed2(DBClientBase*) {
+            locker->lock(*resId, lockMode);
+            locker->unlock(*resId);
+        }
+
+    };
+
+    class locker_test_uncontested : public locker_test {
+    public:
+        string name() { return "locker_contestedX"; }
+
+        virtual void prep2() {
+            std::ostringstream stream;
+            stream << boost::this_thread::get_id();
+            
+            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection") + stream.str()));
+            locker.reset(new mongo::newlm::LockerImpl(++count));
+        }
+    };
 
 
     class locker_contestedX : public B {
