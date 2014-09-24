@@ -691,13 +691,11 @@ namespace PerfTests {
     public:
         boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
         boost::thread_specific_ptr<Locker> locker; 
-        int count;
         string name() { return "locker_contestedX"; }
         virtual int howLongMillis() { return 500; }
         virtual bool showDurStats() { return false; }
         virtual bool testThreaded() { return true; }
         virtual void prep() {
-            count = 1;
             resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
             locker.reset(new mongo::newlm::LockerImpl());
         }
@@ -715,11 +713,13 @@ namespace PerfTests {
         }
 
         void timed2(DBClientBase*) {
+            locker->lockGlobal(mongo::newlm::MODE_IX);
             locker->lock(*resId, mongo::newlm::MODE_X);
-            locker->unlock(*resId);
+            locker->unlockAll();
         }
 
     };
+
     class locker_uncontestedX : public B {
     public:
         boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
