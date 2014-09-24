@@ -640,7 +640,6 @@ namespace PerfTests {
     public:
         boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
         boost::thread_specific_ptr<Locker> locker; 
-        int count;
         mongo::newlm::LockMode lockMode; // Need to initialize this
         mongo::newlm::LockMode glockMode; // Need to initialize this
         
@@ -652,7 +651,6 @@ namespace PerfTests {
         virtual bool showDurStats() { return false; }
         virtual bool testThreaded() { return true; }
         virtual void prep() {
-            count = 1;
             resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
             locker.reset(new mongo::newlm::LockerImpl());
         }
@@ -692,144 +690,24 @@ namespace PerfTests {
         }
     };
 
-    // class locker_contestedX : public locker_test {
-    // public:
-    //     locker_contestedX() : locker_test () { lockMode = mongo::newlm::MODE_X; glockMode = mongo::newlm::MODE_IX;}
-    // };
-
-    class locker_contestedX : public B {
+    class locker_contestedX : public locker_test {
     public:
-        boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
-        boost::thread_specific_ptr<Locker> locker; 
-        string name() { return "locker_contestedX"; }
-        virtual int howLongMillis() { return 500; }
-        virtual bool showDurStats() { return false; }
-        virtual bool testThreaded() { return true; }
-        virtual void prep() {
-            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
-            locker.reset(new mongo::newlm::LockerImpl());
-        }
-        
-        virtual void prep2() {
-            //std:ostringstream stream;
-            //stream << boost::thread::getId();
-            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
-            locker.reset(new mongo::newlm::LockerImpl());
-        }
-
-        void timed() {
-            locker->lock(*resId, mongo::newlm::MODE_X);
-            locker->unlock(*resId);
-        }
-
-        void timed2(DBClientBase*) {
-            locker->lockGlobal(mongo::newlm::MODE_IX);
-            locker->lock(*resId, mongo::newlm::MODE_X);
-            locker->unlockAll();
-        }
-
+        locker_contestedX() : locker_test () { lockMode = mongo::newlm::MODE_X; glockMode = mongo::newlm::MODE_IX;}
     };
 
-    class locker_uncontestedX : public B {
+    class locker_contestedS : public locker_test {
     public:
-        boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
-        boost::thread_specific_ptr<Locker> locker; 
-        int count;
-        string name() { return "locker_uncontestedX"; }
-        virtual int howLongMillis() { return 500; }
-        virtual bool showDurStats() { return false; }
-        virtual bool testThreaded() { return true; }
-        virtual void prep() {
-            count = 1;
-            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
-            locker.reset(new mongo::newlm::LockerImpl(1));
-        }
-        
-        virtual void prep2() {
-            std::ostringstream stream;
-            stream << boost::this_thread::get_id();
-            
-            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection") + stream.str()));
-            locker.reset(new mongo::newlm::LockerImpl(++count));
-        }
-
-        void timed() {
-            locker->lock(*resId, mongo::newlm::MODE_X);
-            locker->unlock(*resId);
-        }
-
-        void timed2(DBClientBase*) {
-            locker->lock(*resId, mongo::newlm::MODE_X);
-            locker->unlock(*resId);
-        }
-
+        locker_contestedS() : locker_test () { lockMode = mongo::newlm::MODE_S; glockMode = mongo::newlm::MODE_IS;}
     };
-    class locker_contestedS : public B {
+
+    class locker_uncontestedX : public locker_test_uncontested {
     public:
-        boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
-        boost::thread_specific_ptr<Locker> locker; 
-        int count;
-        string name() { return "locker_contestedS"; }
-        virtual int howLongMillis() { return 500; }
-        virtual bool showDurStats() { return false; }
-        virtual bool testThreaded() { return true; }
-        virtual void prep() {
-            count = 1;
-            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
-            locker.reset(new mongo::newlm::LockerImpl(1));
-        }
-        
-        virtual void prep2() {
-            //std:ostringstream stream;
-            //stream << boost::thread::getId();
-            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
-            locker.reset(new mongo::newlm::LockerImpl(++count));
-        }
-
-        void timed() {
-            locker->lock(*resId, mongo::newlm::MODE_S);
-            locker->unlock(*resId);
-        }
-
-        void timed2(DBClientBase*) {
-            locker->lock(*resId, mongo::newlm::MODE_S);
-            locker->unlock(*resId);
-        }
-
+        locker_uncontestedX() : locker_test_uncontested () { lockMode = mongo::newlm::MODE_X; glockMode = mongo::newlm::MODE_IX;}
     };
-    class locker_uncontestedS : public B {
+
+    class locker_uncontestedS : public locker_test_uncontested {
     public:
-        boost::thread_specific_ptr<mongo::newlm::ResourceId> resId;
-        boost::thread_specific_ptr<Locker> locker; 
-        int count;
-        string name() { return "locker_uncontestedS"; }
-        virtual int howLongMillis() { return 500; }
-        virtual bool showDurStats() { return false; }
-        virtual bool testThreaded() { return true; }
-        virtual void prep() {
-            count = 1;
-            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection")));
-            locker.reset(new mongo::newlm::LockerImpl(1));
-        }
-        
-        virtual void prep2() {
-            std::ostringstream stream;
-            stream << boost::this_thread::get_id();
-            
-            resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection") + stream.str()));
-            locker.reset(new mongo::newlm::LockerImpl(++count));
-        }
-
-        void timed() {
-            locker->lock(*resId, mongo::newlm::MODE_S);
-            locker->unlock(*resId);
-        }
-
-        void timed2(DBClientBase*) {
-            locker->lock(*resId, mongo::newlm::MODE_S);
-            locker->unlock(*resId);
-        }
-
+        locker_uncontestedS() : locker_test_uncontested () { lockMode = mongo::newlm::MODE_S; glockMode = mongo::newlm::MODE_IS;}
     };
 
 #if 0
