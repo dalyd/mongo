@@ -674,6 +674,25 @@ namespace PerfTests {
 
     };
 
+    class glockerIX : public locker_test {
+    public:
+        virtual string name() { 
+            stringstream mode;
+            mode << glockMode;
+            return (string("glocker") + mode.str());}
+        
+        void timed() {
+            locker->lockGlobal(glockMode);
+            locker->unlockAll();
+        }
+
+        void timed2(DBClientBase*) {
+            locker->lockGlobal(glockMode);
+            locker->unlockAll();
+        }
+        
+    };
+
     class locker_test_uncontested : public locker_test {
     public:
         virtual string name() { 
@@ -688,6 +707,13 @@ namespace PerfTests {
             resId.reset(new mongo::newlm::ResourceId(mongo::newlm::RESOURCE_COLLECTION, std::string("TestDB.collection") + stream.str()));
             locker.reset(new mongo::newlm::LockerImpl());
         }
+    };
+
+
+    class glockerIS : public glockerIX {
+    public:
+        glockerIS() : glockerIX () { glockMode = mongo::newlm::MODE_IS;}
+
     };
 
     class locker_contestedX : public locker_test {
@@ -1432,6 +1458,8 @@ namespace PerfTests {
 #endif
                 add< rlock >();
                 add< wlock >();
+                add< glockerIX > ();
+                add< glockerIS > ();
                 add< locker_contestedX >();
                 add< locker_uncontestedX >();
                 add< locker_contestedS >();
