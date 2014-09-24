@@ -588,12 +588,17 @@ namespace {
         const Mode replMode = _getReplicationMode_inlock();
         if (replMode == modeNone || serverGlobalParams.configsvr) {
             // no replication check needed (validated above)
-            return StatusAndDuration(Status::OK(), Milliseconds(0));
+            return StatusAndDuration(Status::OK(), Milliseconds(timer->millis()));
         }
 
         if (writeConcern.wMode == "majority" && replMode == modeMasterSlave) {
             // with master/slave, majority is equivalent to w=1
-            return StatusAndDuration(Status::OK(), Milliseconds(0));
+            return StatusAndDuration(Status::OK(), Milliseconds(timer->millis()));
+        }
+
+        if (opTime.isNull()) {
+            // If waiting for the empty optime, always say it's been replicated.
+            return StatusAndDuration(Status::OK(), Milliseconds(timer->millis()));
         }
 
         // Must hold _mutex before constructing waitInfo as it will modify _replicationWaiterList
@@ -1396,6 +1401,21 @@ namespace {
             }
         }
         return hosts;
+    }
+
+    std::vector<HostAndPort> ReplicationCoordinatorImpl::getOtherNodesInReplSet() const {
+        boost::lock_guard<boost::mutex> lk(_mutex);
+        invariant(_settings.usingReplSets());
+
+        std::vector<HostAndPort> nodes;
+
+        for (int i = 0; i < _rsConfig.getNumMembers(); ++i) {
+            if (i == _thisMembersConfigIndex)
+                continue;
+
+            nodes.push_back(_rsConfig.getMemberAt(i).getHostAndPort());
+        }
+        return nodes;
     }
 
     Status ReplicationCoordinatorImpl::checkIfWriteConcernCanBeSatisfied(
