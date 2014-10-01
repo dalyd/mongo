@@ -991,7 +991,15 @@ namespace mongo {
 
         // we keep around SockAddr for connection life -- maybe MessagingPort
         // requires that?
-        server.reset(new SockAddr(_server.host().c_str(), _server.port()));
+        std::auto_ptr<SockAddr> serverSockAddr(new SockAddr(_server.host().c_str(),
+                                                            _server.port()));
+        if (!serverSockAddr->isValid()) {
+            errmsg = str::stream() << "couldn't initialize connection to host "
+                                   << _server.host().c_str() << ", address is invalid";
+            return false;
+        }
+
+        server.reset(serverSockAddr.release());
         p.reset(new MessagingPort( _so_timeout, _logLevel ));
 
         if (_server.host().empty() ) {
@@ -1311,10 +1319,6 @@ namespace mongo {
         say( toSend );
     }
 
-    auto_ptr<DBClientCursor> DBClientWithCommands::getIndexes( const string &ns ) {
-        return query( NamespaceString( ns ).getSystemIndexesCollection() , BSON( "ns" << ns ) );
-    }
-
     list<BSONObj> DBClientWithCommands::getIndexSpecs( const string &ns, int options ) {
         list<BSONObj> specs;
 
@@ -1342,7 +1346,9 @@ namespace mongo {
             }
         }
 
-        auto_ptr<DBClientCursor> cursor = getIndexes( ns );
+        // fallback to querying system.indexes
+        auto_ptr<DBClientCursor> cursor = query(NamespaceString(ns).getSystemIndexesCollection(),
+                                                BSON("ns" << ns));
         while ( cursor->more() ) {
             BSONObj spec = cursor->nextSafe();
             specs.push_back( spec.getOwned() );
@@ -1379,19 +1385,14 @@ namespace mongo {
     }
 
     void DBClientWithCommands::reIndex( const string& ns ) {
-        list<BSONObj> all;
-        auto_ptr<DBClientCursor> i = getIndexes( ns );
-        while ( i->more() ) {
-            all.push_back( i->next().getOwned() );
-        }
-
-        dropIndexes( ns );
-
-        for ( list<BSONObj>::iterator i=all.begin(); i!=all.end(); i++ ) {
-            BSONObj o = *i;
-            insert( NamespaceString( ns ).getSystemIndexesCollection() , o );
-        }
-
+        resetIndexCache();
+        BSONObj info;
+        uassert(18908,
+                str::stream() << "reIndex failed: " << info,
+                runCommand(nsToDatabase(ns),
+                           BSON("reIndex" << nsToCollectionSubstring(ns)),
+                           info)
+                );
     }
 
 

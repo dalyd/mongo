@@ -41,6 +41,7 @@
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/connections.h"
 #include "mongo/db/repl/handshake_args.h"
+#include "mongo/db/repl/is_master_response.h"
 #include "mongo/db/repl/master_slave.h"
 #include "mongo/db/repl/member.h"
 #include "mongo/db/repl/oplog.h" // for newRepl()
@@ -66,7 +67,7 @@ namespace mongo {
 namespace repl {
 
     LegacyReplicationCoordinator::LegacyReplicationCoordinator(const ReplSettings& settings) :
-            _settings(settings) {
+            _maintenanceMode(0), _settings(settings) {
         // this is ok but micros or combo with some rand() and/or 64 bits might be better --
         // imagine a restart and a clock correction simultaneously (very unlikely but possible...)
         _rbid = (int) curTimeMillis64();
@@ -98,9 +99,6 @@ namespace repl {
     }
 
     void LegacyReplicationCoordinator::shutdown() {
-        if (getReplicationMode() == modeReplSet) {
-            theReplSet->shutdown();
-        }
     }
 
     ReplSettings& LegacyReplicationCoordinator::getSettings() {
@@ -119,6 +117,10 @@ namespace repl {
     MemberState LegacyReplicationCoordinator::getCurrentMemberState() const {
         invariant(getReplicationMode() == modeReplSet);
         return theReplSet->state();
+    }
+
+    void LegacyReplicationCoordinator::clearSyncSourceBlacklist() {
+        theReplSet->clearVetoes();
     }
 
     ReplicationCoordinator::StatusAndDuration LegacyReplicationCoordinator::awaitReplication(
@@ -382,7 +384,10 @@ namespace {
                     invariant(_ridMemberMap.count(rid));
                     Member* mem = _ridMemberMap[rid];
                     invariant(mem);
-                    config = BSON("_id" << mem->id());
+                    config = BSON("_id" << mem->id() << "host" << mem->h().toString());
+                }
+                else if (getReplicationMode() == modeMasterSlave){
+                    config = BSON("host" << txn->getClient()->getRemote().toString());
                 }
                 LOG(2) << "received notification that node with RID " << rid << " and config "
                        << config << " has reached optime: " << ts;
@@ -423,7 +428,9 @@ namespace {
         boost::lock_guard<boost::mutex> lock(_mutex);
 
         SlaveOpTimeMap::const_iterator it(_slaveOpTimeMap.find(_myRID));
-        invariant(it != _slaveOpTimeMap.end());
+        if (it == _slaveOpTimeMap.end()) {
+            return OpTime(0,0);
+        }
         OpTime legacyMapOpTime = it->second;
         OpTime legacyOpTime = theReplSet->lastOpTimeWritten;
         // TODO(emilkie): SERVER-15209 
@@ -443,16 +450,28 @@ namespace {
         return _myRID;
     }
 
+    int LegacyReplicationCoordinator::getMyId() const {
+        invariant(theReplSet);
+        return theReplSet->myConfig()._id;
+    }
+
     void LegacyReplicationCoordinator::setFollowerMode(const MemberState& newState) {
+        if (newState.secondary() &&
+                theReplSet->state().recovering() &&
+                theReplSet->mgr->shouldBeRecoveringDueToAuthIssue()) {
+            // If tryToGoLiveAsSecondary is trying to take us from RECOVERING to SECONDARY, but we
+            // still have an authIssue, don't actually change states.
+            return;
+        }
         theReplSet->changeState(newState);
     }
 
     bool LegacyReplicationCoordinator::isWaitingForApplierToDrain() {
-        // TODO
-        return false;
+        return BackgroundSync::get()->isAssumingPrimary_inlock();
     }
 
     void LegacyReplicationCoordinator::signalDrainComplete() {
+        // nothing further to do
     }
 
     void LegacyReplicationCoordinator::prepareReplSetUpdatePositionCommand(
@@ -523,12 +542,57 @@ namespace {
         return Status::OK();
     }
 
+    void LegacyReplicationCoordinator::fillIsMasterForReplSet(IsMasterResponse* result) {
+        invariant(getSettings().usingReplSets());
+        if (getReplicationMode() != ReplicationCoordinator::modeReplSet
+                || getCurrentMemberState().removed()) {
+            result->markAsNoConfig();
+        }
+        else {
+            BSONObjBuilder resultBuilder;
+            theReplSet->fillIsMaster(resultBuilder);
+            Status status = result->initialize(resultBuilder.done());
+            fassert(18821, status);
+        }
+    }
+
     void LegacyReplicationCoordinator::processReplSetGetConfig(BSONObjBuilder* result) {
         result->append("config", theReplSet->config().asBson());
     }
 
+    bool LegacyReplicationCoordinator::_setMaintenanceMode_inlock(OperationContext* txn,
+                                                                  bool activate) {
+        if (theReplSet->state().primary()) {
+            return false;
+        }
+
+        if (activate) {
+            log() << "replSet going into maintenance mode (" << _maintenanceMode
+                  << " other tasks)" << rsLog;
+
+            _maintenanceMode++;
+            theReplSet->changeState(MemberState::RS_RECOVERING);
+        }
+        else if (_maintenanceMode > 0) {
+            _maintenanceMode--;
+            // no need to change state, syncTail will try to go live as a secondary soon
+
+            log() << "leaving maintenance mode (" << _maintenanceMode << " other tasks)" << rsLog;
+        }
+        else {
+            return false;
+        }
+
+        fassert(16844, _maintenanceMode >= 0);
+        return true;
+    }
+
     Status LegacyReplicationCoordinator::setMaintenanceMode(OperationContext* txn, bool activate) {
-        if (!theReplSet->setMaintenanceMode(txn, activate)) {
+        // Lock here to prevent state from changing between checking the state and changing it
+        Lock::GlobalWrite writeLock(txn->lockState());
+        boost::lock_guard<boost::mutex> lock(_mutex);
+
+        if (!_setMaintenanceMode_inlock(txn, activate)) {
             if (theReplSet->isPrimary()) {
                 return Status(ErrorCodes::NotSecondary, "primaries can't modify maintenance mode");
             }
@@ -540,7 +604,8 @@ namespace {
     }
 
     bool LegacyReplicationCoordinator::getMaintenanceMode() {
-        return theReplSet->getMaintenanceMode();
+        boost::lock_guard<boost::mutex> lock(_mutex);
+        return _maintenanceMode > 0;
     }
 
     Status LegacyReplicationCoordinator::processHeartbeat(const ReplSetHeartbeatArgs& args,
@@ -585,9 +650,9 @@ namespace {
         response->setHbMsg(theReplSet->hbmsg());
         response->setTime(Seconds(time(0)));
         response->setOpTime(theReplSet->lastOpTimeWritten.asDate());
-        const Member *syncTarget = BackgroundSync::get()->getSyncTarget();
-        if (syncTarget) {
-            response->setSyncingTo(syncTarget->fullName());
+        const HostAndPort syncTarget = BackgroundSync::get()->getSyncTarget();
+        if (!syncTarget.empty()) {
+            response->setSyncingTo(syncTarget.toString());
         }
 
         int v = theReplSet->config().version;
@@ -1013,12 +1078,27 @@ namespace {
         return _settings.usingReplSets() || _settings.slave || _settings.master;
     }
 
-    void LegacyReplicationCoordinator::connectOplogReader(OperationContext* txn, 
-                                                          BackgroundSync* bgsync,
-                                                          OplogReader* r) {
-        bgsync->getOplogReaderLegacy(txn, r);
+    HostAndPort LegacyReplicationCoordinator::chooseNewSyncSource() {
+        const Member* member = theReplSet->getMemberToSyncTo();
+        if (member) {
+            return member->h();
+        }
+        else {
+            return HostAndPort();
+        }
     }
 
+    void LegacyReplicationCoordinator::blacklistSyncSource(const HostAndPort& host, Date_t until) {
+        theReplSet->veto(host.toString(), until);
+    }
+
+    void LegacyReplicationCoordinator::resetLastOpTimeFromOplog(OperationContext* txn) {
+        theReplSet->loadLastOpTimeWritten(txn, false);
+    }
+
+    bool LegacyReplicationCoordinator::shouldChangeSyncSource(const HostAndPort& currentSource) {
+        return theReplSet->shouldChangeSyncTarget(currentSource);
+    }
     
 
 } // namespace repl

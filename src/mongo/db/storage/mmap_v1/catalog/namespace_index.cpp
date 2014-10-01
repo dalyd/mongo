@@ -38,6 +38,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/mmap_v1/catalog/namespace_details.h"
 #include "mongo/util/exit.h"
+#include "mongo/util/file.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -168,6 +169,35 @@ namespace mongo {
                     storageGlobalParams.lenForNewNsFiles >= 1024*1024);
             maybeMkdir();
             unsigned long long l = storageGlobalParams.lenForNewNsFiles;
+            log() << "allocating new ns file " << pathString << ", filling with zeroes..." << endl;
+
+            {
+                // Due to SERVER-15369 we need to explicitly write zero-bytes to the NS file.
+                const unsigned long long kBlockSize = 1024*1024;
+                invariant(l % kBlockSize == 0); // ns files can only be multiples of 1MB
+                const std::vector<char> zeros(kBlockSize, 0);
+
+                File file;
+                file.open(pathString.c_str());
+                massert(18825, str::stream() << "couldn't create file " << pathString, file.is_open());
+                for (fileofs ofs = 0; ofs < l && !file.bad(); ofs += kBlockSize ) {
+                    file.write(ofs, &zeros[0], kBlockSize);
+                }
+                if (file.bad()) {
+                    try {
+                        boost::filesystem::remove(pathString);
+                    } catch (const std::exception& e) {
+                        StringBuilder ss;
+                        ss << "error removing file: " << e.what();
+                        massert(18909, ss.str(), 0);
+                    }
+                }
+                else {
+                    file.fsync();
+                }
+                massert(18826, str::stream() << "failure writing file " << pathString, !file.bad() );
+            }
+
             if ( _f.create(pathString, l, true) ) {
                 // The writes done in this function must not be rolled back. If the containing
                 // UnitOfWork rolls back it should roll back to the state *after* these writes. This

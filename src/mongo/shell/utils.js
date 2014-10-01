@@ -145,6 +145,7 @@ jsTestOptions = function(){
         return Object.merge(_jsTestOptions,
                             { setParameters : TestData.setParameters,
                               setParametersMongos : TestData.setParametersMongos,
+                              storageEngine: TestData.storageEngine,
                               noJournal : TestData.noJournal,
                               noJournalPrealloc : TestData.noJournalPrealloc,
                               auth : TestData.auth,
@@ -886,7 +887,7 @@ _awaitRSHostViaRSMonitor = function(hostAddr, desiredState, rsName, timeout) {
             var stateReached = true;
             for(var prop in desiredState) {
                 if (isObject(desiredState[prop])) {
-                    if (!friendlyEqual(desiredState[prop], node[prop])) {
+                    if (!friendlyEqual(sortDoc(desiredState[prop]), sortDoc(node[prop]))) {
                         stateReached = false;
                         break;
                     }

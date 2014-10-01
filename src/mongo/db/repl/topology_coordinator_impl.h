@@ -130,6 +130,8 @@ namespace repl {
         virtual HostAndPort chooseNewSyncSource(Date_t now, 
                                                 const OpTime& lastOpApplied);
         virtual void blacklistSyncSource(const HostAndPort& host, Date_t until);
+        virtual void clearSyncSourceBlacklist();
+        virtual bool shouldChangeSyncSource(const HostAndPort& currentSource) const;
         virtual void setStepDownTime(Date_t newTime);
         virtual void setFollowerMode(MemberState::MS newMode);
         virtual void adjustMaintenanceCountBy(int inc);
@@ -161,6 +163,7 @@ namespace repl {
                                            const OpTime& lastOpApplied,
                                            BSONObjBuilder* response,
                                            Status* result);
+        virtual void fillIsMasterForReplSet(IsMasterResponse* response);
         virtual void prepareFreezeResponse(const ReplicationExecutor::CallbackData& data,
                                            Date_t now,
                                            int secs,
@@ -207,6 +210,12 @@ namespace repl {
         // TODO(spencer): Remove this once we can easily call for an election in unit tests to
         // set the current primary.
         void _setCurrentPrimaryForTest(int primaryIndex);
+
+        // Returns _electionTime.  Only used in unittests.
+        OpTime getElectionTime() const;
+
+        // Returns _electionId.  Only used in unittests.
+        OID getElectionId() const;
 
         // Returns _currentPrimaryIndex.  Only used in unittests.
         int getCurrentPrimaryIndex() const;
@@ -315,7 +324,7 @@ namespace repl {
 
         // "heartbeat message"
         // sent in requestHeartbeat respond in field "hbm"
-        char _hbmsg[256]; // we change this unlocked, thus not a std::string
+        std::string _hbmsg;
         Date_t _hbmsgTime; // when it was logged
         void _sethbmsg(const std::string& s, int logLevel = 0);
         // heartbeat msg to send to others; descriptive diagnostic info

@@ -125,6 +125,18 @@ namespace repl {
         virtual void blacklistSyncSource(const HostAndPort& host, Date_t until) = 0;
 
         /**
+         * Clears the list of potential sync sources we have blacklisted.
+         */
+        virtual void clearSyncSourceBlacklist() = 0;
+
+        /**
+         * Determines if a new sync source should be chosen, if a better candidate sync source is
+         * available.  If the current sync source's last optime is more than _maxSyncSourceLagSecs
+         * behind any syncable source, this function returns true.
+         */
+        virtual bool shouldChangeSyncSource(const HostAndPort& currentSource) const = 0;
+
+        /**
          * Sets the earliest time the current node will stand for election to "newTime".
          *
          * Does not affect the node's state or the process of any elections in flight.
@@ -191,6 +203,10 @@ namespace repl {
                                            const OpTime& lastOpApplied,
                                            BSONObjBuilder* response,
                                            Status* result) = 0;
+
+        // produce a reply to an ismaster request.  It is only valid to call this if we are a
+        // replset.
+        virtual void fillIsMasterForReplSet(IsMasterResponse* response) = 0;
 
         // produce a reply to a freeze request
         virtual void prepareFreezeResponse(const ReplicationExecutor::CallbackData& data,

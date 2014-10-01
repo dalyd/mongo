@@ -57,6 +57,8 @@ namespace repl {
 
         virtual MemberState getCurrentMemberState() const;
 
+        virtual void clearSyncSourceBlacklist();
+
         virtual ReplicationCoordinator::StatusAndDuration awaitReplication(
                 const OperationContext* txn,
                 const OpTime& ts,
@@ -98,6 +100,8 @@ namespace repl {
 
         virtual OID getMyRID() const;
 
+        virtual int getMyId() const;
+
         virtual void setFollowerMode(const MemberState& newState);
 
         virtual bool isWaitingForApplierToDrain();
@@ -112,6 +116,8 @@ namespace repl {
                 std::vector<BSONObj>* handshakes);
 
         virtual Status processReplSetGetStatus(BSONObjBuilder* result);
+
+        virtual void fillIsMasterForReplSet(IsMasterResponse* result);
 
         virtual void processReplSetGetConfig(BSONObjBuilder* result);
 
@@ -163,13 +169,19 @@ namespace repl {
 
         virtual bool isReplEnabled() const;
 
-        virtual void connectOplogReader(OperationContext* txn, 
-                                        BackgroundSync* bgsync,
-                                        OplogReader* r);
+        virtual HostAndPort chooseNewSyncSource();
+
+        virtual void blacklistSyncSource(const HostAndPort& host, Date_t until);
+
+        virtual void resetLastOpTimeFromOplog(OperationContext* txn);
+
+        virtual bool shouldChangeSyncSource(const HostAndPort& currentSource);
 
     private:
 
-        // Mutex that protects the _slaveOpTimeMap
+        bool _setMaintenanceMode_inlock(OperationContext* txn, bool activate);
+
+        // Mutex that protects the _slaveOpTimeMap, and _maintenceMode
         mutable boost::mutex _mutex;
 
         // Map from RID to Member pointer for replica set nodes
@@ -180,6 +192,9 @@ namespace repl {
         // TODO(spencer): change to unordered_map
         typedef std::map<OID, OpTime> SlaveOpTimeMap;
         SlaveOpTimeMap _slaveOpTimeMap;
+
+        // Count of active callers into maintenance mode
+        int _maintenanceMode;
 
         // Rollback id. used to check if a rollback happened during some interval of time
         // TODO: ideally this should only change on rollbacks NOT on mongod restarts also.

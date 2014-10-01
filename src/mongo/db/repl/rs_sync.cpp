@@ -35,7 +35,6 @@
 #include "third_party/murmurhash3/MurmurHash3.h"
 
 #include "mongo/base/counter.h"
-#include "mongo/db/catalog/database.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/fsync.h"
 #include "mongo/db/commands/server_status.h"
@@ -50,6 +49,7 @@
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/repl_coordinator_global.h"
 #include "mongo/db/repl/rs.h"
+#include "mongo/db/repl/rs_initialsync.h"
 #include "mongo/db/repl/rslog.h"
 #include "mongo/db/repl/sync_tail.h"
 #include "mongo/db/server_parameters.h"
@@ -61,46 +61,6 @@
 
 namespace mongo {
 namespace repl {
-
-    /* should be in RECOVERING state on arrival here.
-    */
-    void ReplSetImpl::tryToGoLiveAsASecondary(OperationContext* txn) {
-        if (getGlobalReplicationCoordinator()->getMaintenanceMode()) {
-            // we're not actually going live
-            return;
-        }
-
-        lock rsLock( this );
-
-        // if we're blocking sync, don't change state
-        if (_blockSync) {
-            return;
-        }
-
-        // if we're fsync-and-locked, don't bother checking
-        if (lockedForWriting()) {
-            return;
-        }
-
-        Lock::GlobalWrite writeLock(txn->lockState());
-
-        // Only state RECOVERING can transition to SECONDARY.
-        MemberState state(getGlobalReplicationCoordinator()->getCurrentMemberState());
-        if (!state.recovering()) {
-            return;
-        }
-
-        OpTime minvalid = getMinValid(txn);
-        if (minvalid > getGlobalReplicationCoordinator()->getMyLastOptime()) {
-            sethbmsg(str::stream() << "still syncing, not yet to minValid optime " <<
-                     minvalid.toString());
-            return;
-        }
-
-        sethbmsg("");
-        getGlobalReplicationCoordinator()->setFollowerMode(MemberState::RS_SECONDARY);
-    }
-
 
     Status ReplSetImpl::forceSyncFrom(const string& host, BSONObjBuilder* result) {
         lock lk(this);
@@ -155,9 +115,9 @@ namespace repl {
         }
 
         // record the previous member we were syncing from
-        const Member *prev = BackgroundSync::get()->getSyncTarget();
-        if (prev) {
-            result->append("prevSyncTarget", prev->fullName());
+        const HostAndPort prev = BackgroundSync::get()->getSyncTarget();
+        if (!prev.empty()) {
+            result->append("prevSyncTarget", prev.toString());
         }
 
         // finally, set the new target
@@ -170,7 +130,8 @@ namespace repl {
         return _forceSyncTarget != 0;
     }
 
-    bool ReplSetImpl::shouldChangeSyncTarget(const OpTime& targetOpTime) const {
+    bool ReplSetImpl::shouldChangeSyncTarget(const HostAndPort& currentTarget) {
+        OpTime targetOpTime = findByName(currentTarget.toString())->hbinfo().opTime;
         for (Member *m = _members.head(); m; m = m->next()) {
             if (m->syncable() &&
                 targetOpTime.getSecs()+maxSyncSourceLagSecs < m->hbinfo().opTime.getSecs()) {
@@ -181,22 +142,19 @@ namespace repl {
                 return true;
             }
         }
-
+        if (gotForceSync()) {
+            return true;
+        }
         return false;
     }
 
     void ReplSetImpl::_syncThread() {
         StateBox::SP sp = box.get();
-        if (sp.state.primary() || _blockSync) {
+        if (sp.state.primary()) {
             sleepsecs(1);
             return;
         }
-
-        bool initialSyncRequested = false;
-        {
-            boost::unique_lock<boost::mutex> lock(theReplSet->initialSyncMutex);
-            initialSyncRequested = theReplSet->initialSyncRequested;
-        }
+        bool initialSyncRequested = BackgroundSync::get()->getInitialSyncRequestedFlag();
         // Check criteria for doing an initial sync:
         // 1. If the oplog is empty, do an initial sync
         // 2. If minValid has _initialSyncFlag set, do an initial sync
@@ -214,22 +172,8 @@ namespace repl {
         tail.oplogApplication();
     }
 
-    bool ReplSetImpl::resync(OperationContext* txn, string& errmsg) {
-        changeState(MemberState::RS_RECOVERING);
-
-        WriteUnitOfWork wunit(txn);
-        Client::Context ctx(txn, "local");
-
-        ctx.db()->dropCollection(txn, "local.oplog.rs");
-        {
-            boost::unique_lock<boost::mutex> lock(theReplSet->initialSyncMutex);
-            theReplSet->initialSyncRequested = true;
-        }
-        getGlobalReplicationCoordinator()->setMyLastOptime(txn, OpTime());
+    void ReplSetImpl::clearVetoes() {
         _veto.clear();
-
-        wunit.commit();
-        return true;
     }
 
     void ReplSetImpl::syncThread() {
@@ -262,27 +206,11 @@ namespace repl {
     }
 
     void startSyncThread() {
-        static int n;
-        if( n != 0 ) {
-            log() << "replSet ERROR : more than one sync thread?" << rsLog;
-            verify( n == 0 );
-        }
-        n++;
-
         Client::initThread("rsSync");
         replLocalAuth();
         theReplSet->syncThread();
         cc().shutdown();
     }
 
-    void ReplSetImpl::blockSync(bool block) {
-        // RS lock is already taken in Manager::checkAuth
-        _blockSync = block;
-        if (_blockSync) {
-            // syncing is how we get into SECONDARY state, so we'll be stuck in
-            // RECOVERING until we unblock
-            changeState(MemberState::RS_RECOVERING);
-        }
-    }
 } // namespace repl
 } // namespace mongo

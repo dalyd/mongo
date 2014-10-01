@@ -56,10 +56,7 @@ namespace mongo {
     */
     class Database {
     public:
-        // you probably need to be in dbHolderMutex when constructing this
-        Database(OperationContext* txn,
-                 const StringData& name,
-                 DatabaseCatalogEntry* dbEntry ); // not owner here
+        Database(const StringData& name, DatabaseCatalogEntry* dbEntry);
 
         // must call close first
         ~Database();
@@ -90,11 +87,6 @@ namespace mongo {
         const char* getProfilingNS() const { return _profileName.c_str(); }
 
         void getStats( OperationContext* opCtx, BSONObjBuilder* output, double scale = 1 );
-
-        long long getIndexSizeForCollection( OperationContext* opCtx,
-                                             Collection* collections,
-                                             BSONObjBuilder* details = NULL,
-                                             int scale = 1 );
 
         const DatabaseCatalogEntry* getDatabaseCatalogEntry() const;
 

@@ -659,7 +659,6 @@ serverOnlyFiles = [ "db/background.cpp",
                     "db/repl/oplog.cpp",
                     "db/repl/oplogreader.cpp",
                     "db/repl/repl_coordinator_external_state_impl.cpp",
-                    "db/repl/repl_coordinator_hybrid.cpp",
                     "db/repl/repl_coordinator_legacy.cpp",
                     "db/repl/repl_info.cpp",
                     "db/repl/repl_set_health_poll_task.cpp",
@@ -747,6 +746,8 @@ mongosLibraryFiles = [
     "s/commands_admin.cpp",
     "s/commands_public.cpp",
     "s/commands/auth_schema_upgrade_s.cpp",
+    "s/commands/cluster_explain_cmd.cpp",
+    "s/commands/cluster_find_cmd.cpp",
     "s/commands/cluster_index_filter_cmd.cpp",
     "s/commands/cluster_merge_chunks_cmd.cpp",
     "s/commands/cluster_plan_cache_cmd.cpp",
@@ -765,6 +766,7 @@ env.Library( "mongoscore",
              mongosLibraryFiles,
              LIBDEPS=['db/auth/authmongos',
                       'db/fts/ftsmongos',
+                      'db/query/explain_common',
                       'db/query/lite_parsed_query',
                       's/cluster_ops',
                       's/cluster_write_op_conversion',
@@ -1022,6 +1024,7 @@ env.Library("alltools",
                      "$BUILD_DIR/mongo/db/repl/replmocks"])
 
 normalTools = [ "dump", "restore", "export", "import", "shim", "stat", "top", "oplog" ]
+rewrittenTools = [ "mongodump", "mongorestore", "mongoexport", "mongoimport", "mongostat", "mongotop", "bsondump", "mongofiles", "mongooplog" ]
 env.Alias( "tools", [ "#/${PROGPREFIX}mongo" + name + "${PROGSUFFIX}" for name in normalTools ] )
 for name in normalTools:
     env.Install( '#/', env.Program("mongo" + name,
@@ -1275,9 +1278,29 @@ def installBinary( e, name ):
     if nix:
         e.AddPostAction( inst, 'chmod 755 $TARGET' )
 
-for t in ["mongo" + x for x in normalTools] + ["mongofiles", "bsondump", "mongoperf" ]:
-    installBinary( env, t )
-    env.Alias("tools", '#/' + add_exe(t))
+def installExternalBinary( e, name ):
+    global distBinaries
+
+    name = env.File( "#/%s" % add_exe(name) )
+
+    distBinaries.append(name)
+    inst = e.Install( "$INSTALL_DIR/bin", name )
+
+    if nix:
+        e.AddPostAction( inst, 'chmod 755 $TARGET' )
+
+if has_option("use-new-tools"):
+    for t in rewrittenTools:
+        installExternalBinary(env, "src/mongo-tools/" + t)
+
+    # old tools + tools not rewritten yet
+    for t in ["mongoperf", "mongoshim"]:
+        installBinary( env, t )
+        env.Alias("tools", '#/' + add_exe(t))
+else:
+    for t in ["mongo" + x for x in normalTools] + ["mongofiles", "bsondump", "mongoperf" ]:
+        installBinary( env, t )
+        env.Alias("tools", '#/' + add_exe(t))
 
 env.Alias("tools", "#/" + add_exe("perftest"))
 env.Alias("tools", "#/" + add_exe("mongobridge"))
@@ -1321,7 +1344,7 @@ module_banner_transforms = ["--transform %s=$SERVER_DIST_BASENAME" % d for d in 
 # within the archive (e.g. { "src/mongo/db/modules/enterprise/docs": "snmp"})
 archive_addition_transforms = []
 for full_dir, archive_dir in env["ARCHIVE_ADDITION_DIR_MAP"].items():
-  archive_addition_transforms.append("--transform %s=$SERVER_DIST_BASENAME/%s" % 
+  archive_addition_transforms.append("--transform \"%s=$SERVER_DIST_BASENAME/%s\"" %
                                      (full_dir, archive_dir))
 
 env.Command(
@@ -1331,6 +1354,8 @@ env.Command(
     module_banner_transforms + [
             '--transform ${str(Dir(BUILD_DIR))}/mongo/stripped=$SERVER_DIST_BASENAME/bin',
             '--transform ${str(Dir(BUILD_DIR))}/mongo=$SERVER_DIST_BASENAME/bin',
+            '--transform ${str(Dir(BUILD_DIR))}/mongo/stripped/src/mongo-tools=$SERVER_DIST_BASENAME/bin',
+            '--transform src/mongo-tools=$SERVER_DIST_BASENAME/bin',
             '${TEMPFILE(SOURCES[1:])}']))
 
 #final alias

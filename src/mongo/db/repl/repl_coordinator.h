@@ -51,6 +51,7 @@ namespace repl {
 
     class BackgroundSync;
     class HandshakeArgs;
+    class IsMasterResponse;
     class OplogReader;
     class ReplSetHeartbeatArgs;
     class ReplSetHeartbeatResponse;
@@ -134,6 +135,11 @@ namespace repl {
          * It is invalid to call this unless getReplicationMode() == modeReplSet.
          */
         virtual MemberState getCurrentMemberState() const = 0;
+
+        /**
+         * Clears the list of sync sources we have blacklisted.
+         */
+        virtual void clearSyncSourceBlacklist() = 0;
 
         /**
          * Blocks the calling thread for up to writeConcern.wTimeout millis, or until "ts" has been
@@ -271,6 +277,11 @@ namespace repl {
         virtual OID getMyRID() const = 0;
 
         /**
+         * Returns the id for this node as specified in the current replica set configuration.
+         */
+        virtual int getMyId() const = 0;
+
+        /**
          * Sets this node into a specific follower mode.
          *
          * It is an error to call this method if the node's topology coordinator would not
@@ -289,7 +300,7 @@ namespace repl {
         /**
          * Returns true if the coordinator wants the applier to pause application.
          *
-         * If this returns true, the applier should call signalDrainComplete() when it when it has
+         * If this returns true, the applier should call signalDrainComplete() when it has
          * completed draining its operation buffer and no further ops are being applied.
          */
         virtual bool isWaitingForApplierToDrain() = 0;
@@ -324,6 +335,12 @@ namespace repl {
          * Handles an incoming replSetGetStatus command. Adds BSON to 'result'.
          */
         virtual Status processReplSetGetStatus(BSONObjBuilder* result) = 0;
+
+        /**
+         * Handles an incoming isMaster command for a replica set node.  Should not be
+         * called on a master-slave or standalone node.
+         */
+        virtual void fillIsMasterForReplSet(IsMasterResponse* result) = 0;
 
         /**
          * Handles an incoming replSetGetConfig command. Adds BSON to 'result'.
@@ -488,14 +505,26 @@ namespace repl {
         virtual Status checkReplEnabledForCommand(BSONObjBuilder* result) = 0;
 
         /**
-         * Connects an oplog reader to a viable sync source, using BackgroundSync object bgsync.
-         * When this function returns, reader is connected to a viable sync source or is left
-         * unconnected if no sync sources are currently available.  In legacy, bgsync's 
-         * _currentSyncTarget is also set appropriately.
-         **/
-        virtual void connectOplogReader(OperationContext* txn,
-                                        BackgroundSync* bgsync, 
-                                        OplogReader* reader) = 0;
+         * Chooses a viable sync source, or, if none available, returns empty HostAndPort.
+         */
+        virtual HostAndPort chooseNewSyncSource() = 0;
+
+        /**
+         * Blacklists choosing 'host' as a sync source until time 'until'.
+         */
+        virtual void blacklistSyncSource(const HostAndPort& host, Date_t until) = 0;
+
+        /**
+         * Loads the optime from the last op in the oplog into the coordinator's lastOpApplied
+         * value.
+         */
+        virtual void resetLastOpTimeFromOplog(OperationContext* txn) = 0;
+
+        /**
+         * Determines if a new sync source should be considered.
+         * currentSource: the current sync source
+         */
+        virtual bool shouldChangeSyncSource(const HostAndPort& currentSource) = 0;
 
     protected:
 

@@ -26,7 +26,7 @@
  * it in the license file.
  */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/pipeline/document_source.h"
 
@@ -37,7 +37,7 @@
 #include "mongo/db/query/find_constants.h"
 #include "mongo/db/storage_options.h"
 #include "mongo/s/d_state.h"
-#include "mongo/s/stale_exception.h" // for SendStaleConfigException
+
 
 namespace mongo {
 
@@ -165,7 +165,7 @@ namespace mongo {
             massert(17392, "No _exec. Were we disposed before explained?", _exec);
 
             _exec->restoreState(pExpCtx->opCtx);
-            explainStatus = Explain::explainStages(_exec.get(), Explain::QUERY_PLANNER,
+            explainStatus = Explain::explainStages(_exec.get(), ExplainCommon::QUERY_PLANNER,
                                                    &explainBuilder);
             _exec->saveState();
         }
