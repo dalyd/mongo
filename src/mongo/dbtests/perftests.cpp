@@ -721,21 +721,6 @@ namespace PerfTests {
         locker_contestedX() : locker_test () { lockMode = mongo::newlm::MODE_X; glockMode = mongo::newlm::MODE_IX;}
     };
 
-    class locker_contestedX_no_intent : public locker_test {
-    public:
-        locker_contestedX_no_intent() : locker_test () { lockMode = mongo::newlm::MODE_X; glockMode = mongo::newlm::MODE_IX;}
-
-        void timed() {
-            locker->lock(*resId, lockMode);
-            locker->unlockAll();
-        }
-
-        void timed2(DBClientBase*) {
-            locker->lock(*resId, lockMode);
-            locker->unlockAll();
-        }
-    };
-
     class locker_contestedS : public locker_test {
     public:
         locker_contestedS() : locker_test () { lockMode = mongo::newlm::MODE_S; glockMode = mongo::newlm::MODE_IS;}
@@ -1476,7 +1461,6 @@ namespace PerfTests {
                 add< glockerIX > ();
                 add< glockerIS > ();
                 add< locker_contestedX >();
-                add< locker_contestedX_no_intent>();
                 add< locker_uncontestedX >();
                 add< locker_contestedS >();
                 add< locker_uncontestedS >();
