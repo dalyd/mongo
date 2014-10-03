@@ -43,7 +43,13 @@ namespace CountTests {
 
     class Base {
     public:
-        Base() : lk(_txn.lockState(), ns()), _wunit(&_txn), _context(&_txn, ns()) {
+// <<<<<<< HEAD
+//         Base() : lk(_txn.lockState(), ns()), _wunit(&_txn), _context(&_txn, ns()) {
+// =======
+        Base() : lk(_txn.lockState(), ns()),
+                     _context(&_txn, ns()),
+                     _client(&_txn) {
+	  //>>>>>>> f2daf8a... Revert "SERVER-14668: Replace uses of DBWrite lock with DBLock"
             _database = _context.db();
             _collection = _database->getCollection( &_txn, ns() );
             if ( _collection ) {
@@ -94,10 +100,14 @@ namespace CountTests {
         }
 
         OperationContextImpl _txn;
+<<<<<<< HEAD
 
     private:
         Lock::DBWrite lk;
         WriteUnitOfWork _wunit;
+=======
+        Lock::DBWrite lk;
+>>>>>>> f2daf8a... Revert "SERVER-14668: Replace uses of DBWrite lock with DBLock"
 
         Client::Context _context;
 

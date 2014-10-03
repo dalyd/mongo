@@ -324,12 +324,29 @@ namespace {
                 // (always checked in the first iteration of this do-while loop, because
                 // ops is empty)
                 if (ops.empty() || now > lastTimeChecked) {
+		  //<<<<<<< HEAD
                     {
                         boost::unique_lock<boost::mutex> lock(theReplSet->initialSyncMutex);
                         if (theReplSet->initialSyncRequested) {
                             // got a resync command
                             return;
                         }
+// =======
+//                     BackgroundSync* bgsync = BackgroundSync::get();
+//                     if (bgsync->getInitialSyncRequestedFlag()) {
+//                         // got a resync command
+//                         Lock::DBWrite lk(txn.lockState(), "local");
+//                         WriteUnitOfWork wunit(&txn);
+//                         Client::Context ctx(&txn, "local");
+
+//                         ctx.db()->dropCollection(&txn, "local.oplog.rs");
+//                         replCoord->setMyLastOptime(&txn, OpTime());
+//                         replCoord->clearSyncSourceBlacklist();
+//                         bgsync->stop();
+//                         wunit.commit();
+
+//                         return;
+			//>>>>>>> f2daf8a... Revert "SERVER-14668: Replace uses of DBWrite lock with DBLock"
                     }
                     lastTimeChecked = now;
                     // can we become secondary?

@@ -1402,7 +1402,10 @@ namespace QueryTests {
         CollectionInternalBase( const char *nsLeaf ) :
           CollectionBase( nsLeaf ),
           _lk(_txn.lockState(), ns() ),
-          _wunit( &_txn ),
+// <<<<<<< HEAD
+//           _wunit( &_txn ),
+// =======
+// >>>>>>> f2daf8a... Revert "SERVER-14668: Replace uses of DBWrite lock with DBLock"
           _ctx(&_txn, ns()) {
         }
         ~CollectionInternalBase() {
@@ -1411,7 +1414,10 @@ namespace QueryTests {
 
     private:
         Lock::DBWrite _lk;
-        WriteUnitOfWork _wunit;
+// <<<<<<< HEAD
+//         WriteUnitOfWork _wunit;
+// =======
+// >>>>>>> f2daf8a... Revert "SERVER-14668: Replace uses of DBWrite lock with DBLock"
         Client::Context _ctx;
     };
     
