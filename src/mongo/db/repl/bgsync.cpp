@@ -108,7 +108,8 @@ namespace {
                                        _appliedBuffer(true),
                                        _assumingPrimary(false),
                                        _replCoord(getGlobalReplicationCoordinator()),
-                                       _initialSyncRequestedFlag(false) {
+                                       _initialSyncRequestedFlag(false),
+                                       _indexPrefetchConfig(PREFETCH_ALL) {
     }
 
     BackgroundSync* BackgroundSync::get() {
@@ -155,8 +156,7 @@ namespace {
     }
 
     void BackgroundSync::_producerThread() {
-        MemberState state = _replCoord->getCurrentMemberState();
-
+        const MemberState state = _replCoord->getCurrentMemberState();
         // we want to pause when the state changes to primary
         if (_replCoord->isWaitingForApplierToDrain() || state.primary()) {
             if (!_pause) {
@@ -166,7 +166,9 @@ namespace {
             return;
         }
 
+        // TODO(spencer): Use a condition variable to await loading a config.
         if (state.startup()) {
+            // Wait for a config to be loaded
             sleepsecs(1);
             return;
         }
@@ -338,7 +340,7 @@ namespace {
 
     bool BackgroundSync::shouldChangeSyncSource() {
         // is it even still around?
-        if (_syncSourceReader.getHost().empty()) {
+        if (getSyncTarget().empty() || _syncSourceReader.getHost().empty()) {
             return true;
         }
 
@@ -493,7 +495,6 @@ namespace {
     }
 
     void BackgroundSync::loadLastAppliedHash(OperationContext* txn) {
-        Lock::DBRead lk(txn->lockState(), rsoplog);
         BSONObj oplogEntry;
         try {
             if (!Helpers::getLast(txn, rsoplog, oplogEntry)) {

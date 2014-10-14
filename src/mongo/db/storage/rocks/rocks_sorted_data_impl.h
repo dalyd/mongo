@@ -30,6 +30,8 @@
 
 #include "mongo/db/storage/sorted_data_interface.h"
 
+#include <atomic>
+
 #include <rocksdb/db.h>
 
 #include "mongo/bson/ordering.h"
@@ -62,7 +64,8 @@ namespace mongo {
     class RocksSortedDataImpl : public SortedDataInterface {
         MONGO_DISALLOW_COPYING( RocksSortedDataImpl );
     public:
-        RocksSortedDataImpl( rocksdb::DB* db, rocksdb::ColumnFamilyHandle* cf, Ordering order );
+        RocksSortedDataImpl(rocksdb::DB* db, boost::shared_ptr<rocksdb::ColumnFamilyHandle> cf,
+                            Ordering order);
 
         virtual SortedDataBuilderInterface* getBulkBuilder(OperationContext* txn, bool dupsAllowed);
 
@@ -81,6 +84,8 @@ namespace mongo {
 
         virtual Status touch(OperationContext* txn) const;
 
+        virtual long long numEntries(OperationContext* txn) const;
+
         virtual Cursor* newCursor(OperationContext* txn, int direction) const;
 
         virtual Status initAsEmpty(OperationContext* txn);
@@ -96,21 +101,36 @@ namespace mongo {
     private:
         typedef DiskLoc RecordId;
 
-        RocksRecoveryUnit* _getRecoveryUnit( OperationContext* opCtx ) const;
-
         rocksdb::DB* _db; // not owned
 
         // Each index is stored as a single column family, so this stores the handle to the
         // relevant column family
-        rocksdb::ColumnFamilyHandle* _columnFamily; // not owned
+        boost::shared_ptr<rocksdb::ColumnFamilyHandle> _columnFamily;
 
         // used to construct RocksCursors
         const Ordering _order;
 
-        /**
-         * Creates an error code message out of a key
-         */
-        std::string dupKeyError(const BSONObj& key) const;
+        std::atomic<long long> _numEntries;
+
+        class ChangeNumEntries : public RecoveryUnit::Change {
+        public:
+            ChangeNumEntries(std::atomic<long long>* numEntries, bool increase)
+                : _numEntries(numEntries), _increase(increase) {}
+
+            void commit() {
+                if (_increase) {
+                    _numEntries->fetch_add(1);
+                } else {
+                    _numEntries->fetch_sub(1);
+                }
+            }
+
+            void rollback() {}
+
+        private:
+            std::atomic<long long>* _numEntries;
+            bool _increase;
+        };
     };
 
 } // namespace mongo

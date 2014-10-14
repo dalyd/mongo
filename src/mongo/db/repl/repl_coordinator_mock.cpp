@@ -65,6 +65,10 @@ namespace repl {
         invariant(false);
     }
 
+    Seconds ReplicationCoordinatorMock::getSlaveDelaySecs() const {
+        return Seconds(0);
+    }
+
     void ReplicationCoordinatorMock::clearSyncSourceBlacklist() {}
 
     ReplicationCoordinator::StatusAndDuration ReplicationCoordinatorMock::awaitReplication(
@@ -147,7 +151,8 @@ namespace repl {
         return 0;
     }
 
-    void ReplicationCoordinatorMock::setFollowerMode(const MemberState& newState) {
+    bool ReplicationCoordinatorMock::setFollowerMode(const MemberState& newState) {
+        return true;
     }
 
     bool ReplicationCoordinatorMock::isWaitingForApplierToDrain() {

@@ -438,22 +438,6 @@ var authCommandsLib = {
             ]
         },
         {
-            testname: "closeAllDatabases",
-            command: {closeAllDatabases: "x"},
-            skipSharded: true,
-            testcases: [
-                {
-                    runOnDb: adminDbName,
-                    roles: roles_hostManager,
-                    privileges: [
-                        { resource: {cluster: true}, actions: ["closeAllDatabases"] }
-                    ]
-                },
-                { runOnDb: firstDbName, roles: {} },
-                { runOnDb: secondDbName, roles: {} }
-            ]
-        },
-        {
             testname: "collMod",
             command: {collMod: "foo", usePowerOf2Sizes: true},
             setup: function (db) { db.foo.save( {} ); },
@@ -1410,6 +1394,77 @@ var authCommandsLib = {
                 },
                 { runOnDb: firstDbName, roles: {} },
                 { runOnDb: secondDbName, roles: {} }
+            ]
+        },
+        {
+            testname: "listCollections",
+            command: {listCollections: 1},
+            setup: function (db) {
+                db.x.insert({_id: 5});
+                db.y.insert({_id: 6});
+            },
+            teardown: function (db) {
+                db.x.drop();
+                db.y.drop();
+            },
+            testcases: [
+                {
+                    runOnDb: firstDbName,
+                    roles: {
+                        read: 1,
+                        readAnyDatabase: 1,
+                        readWrite: 1,
+                        readWriteAnyDatabase: 1,
+                        clusterAdmin: 1,
+                        clusterMonitor: 1,
+                        clusterManager: 1,
+                        dbAdmin: 1,
+                        dbAdminAnyDatabase: 1,
+                        dbOwner: 1,
+                        backup: 1,
+                        restore: 1,
+                        root: 1,
+                        __system: 1
+                    },
+                    privileges: [
+                        {
+                            resource: {db: firstDbName, collection: ""},
+                            actions: ["listCollections"]
+                        }
+                    ]
+                }
+            ]
+        },
+        {
+            testname: "listIndexes",
+            command: {listIndexes: "x"},
+            setup: function (db) {
+                db.x.insert({_id: 5});
+                db.x.insert({_id: 6});
+            },
+            teardown: function (db) { db.x.drop(); },
+            testcases: [
+                {
+                    runOnDb: firstDbName,
+                    roles: {
+                        read: 1,
+                        readAnyDatabase: 1,
+                        readWrite: 1,
+                        readWriteAnyDatabase: 1,
+                        dbAdmin: 1,
+                        dbAdminAnyDatabase: 1,
+                        dbOwner: 1,
+                        backup: 1,
+                        root: 1,
+                        __system: 1
+                    },
+                    privileges: [
+                        {
+                            resource: {db: firstDbName, collection: ""},
+                            actions: ["listIndexes"]
+                        }
+                    ]
+                }
             ]
         },
         {

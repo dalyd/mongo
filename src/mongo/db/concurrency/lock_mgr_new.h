@@ -47,8 +47,7 @@
 namespace mongo {
 
     class Locker;
-
-namespace newlm {
+    struct LockHead;
 
     /**
      * Lock modes.
@@ -59,8 +58,8 @@ namespace newlm {
      *   Requested Mode | MODE_NONE  MODE_IS   MODE_IX  MODE_S   MODE_X  |
      *     MODE_IS      |      +        +         +        +        -    |
      *     MODE_IX      |      +        +         +        -        -    |
-     *     MODE_S       |      +        +         -        +        -
-     *     MODE_X       |      +        -         -        -        -
+     *     MODE_S       |      +        +         -        +        -    |
+     *     MODE_X       |      +        -         -        -        -    |
      */
     enum LockMode {
         MODE_NONE       = 0,
@@ -74,9 +73,6 @@ namespace newlm {
         // Counts the entries in the LockMode enumeration. Used for array size allocations, etc.
         LockModesCount   = 5,
     };
-
-    // To ensure lock modes are not added without updating the counts
-    BOOST_STATIC_ASSERT(LockModesCount == MODE_X + 1);
 
 
     /**
@@ -171,17 +167,11 @@ namespace newlm {
         /**
          * Used for initialization of a LockRequest, which might have been retrieved from cache.
          */
-        void initNew(const ResourceId& resourceId, Locker* locker, LockGrantNotification* notify);
+        void initNew(Locker* locker, LockGrantNotification* notify);
 
         //
         // These fields are maintained by the Locker class
         //
-
-        // Id of the resource for which this request applies. The only reason it is here is we can
-        // locate the lock object during unlock. This can be solved either by having a pointer to
-        // the LockHead (which should be alive as long as there are LockRequests on it, or by
-        // requiring resource id to be passed on unlock, along with the lock request).
-        ResourceId resourceId;
 
         // This is the Locker, which created this LockRequest. Pointer is not owned, just
         // referenced. Must outlive the LockRequest.
@@ -196,6 +186,11 @@ namespace newlm {
         //
         // These fields are owned and maintained by the LockManager class
         //
+
+        // Pointer to the lock to which this request belongs, or null if this request has not yet
+        // been assigned to a lock. The LockHead should be alive as long as there are LockRequests
+        // on it, so it is safe to have this pointer hanging around.
+        LockHead* lock;
 
         // The reason intrusive linked list is used instead of the std::list class is to allow
         // for entries to be removed from the middle of the list in O(1) time, if they are known
@@ -218,67 +213,6 @@ namespace newlm {
         // How many times has LockManager::lock been called for this request. Locks are released
         // when their recursive count drops to zero.
         unsigned recursiveCount;
-    };
-
-
-    /**
-     * There is one of these objects per each resource which has a lock on it.
-     *
-     * Not thread-safe and should only be accessed under the LockManager's bucket lock.
-     */
-    struct LockHead {
-
-        LockHead(const ResourceId& resId);
-        ~LockHead();
-
-        // Increments the granted/requested counts and maintains the grantedModes/requestedModes
-        // masks respectively. The count argument can only be -1 or 1, because we always change the
-        // modes one at a time.
-        enum ChangeModeCountAction {
-            Increment = 1, Decrement = -1
-        };
-
-        void changeGrantedModeCount(LockMode mode, ChangeModeCountAction action);
-        void changeRequestedModeCount(LockMode mode, ChangeModeCountAction count);
-
-
-        // Id of the resource which this lock protects
-        const ResourceId resourceId;
-
-
-        //
-        // Granted queue
-        //
-
-        // The head of the doubly-linked list of granted or converting requests
-        LockRequest* grantedQueue;
-
-        // Counts the grants and coversion counts for each of the supported lock modes. These
-        // counts should exactly match the aggregated granted modes on the granted list.
-        uint32_t grantedCounts[LockModesCount];
-
-        // Bit-mask of the granted + converting modes on the granted queue. Maintained in lock-step
-        // with the grantedCounts array.
-        uint32_t grantedModes;
-
-
-        //
-        // Conflict queue
-        //
-
-        // Doubly-linked list of requests, which have not been granted yet because they conflict
-        // with the set of granted modes. The reason to have both begin and end pointers is to make
-        // the FIFO scheduling easier (queue at begin and take from the end).
-        LockRequest* conflictQueueBegin;
-        LockRequest* conflictQueueEnd;
-
-        // Counts the conflicting requests for each of the lock modes. These counts should exactly
-        // match the aggregated requested modes on the conflicts list.
-        uint32_t conflictCounts[LockModesCount];
-
-        // Bit-mask of the requested modes on the conflict queue. Maintained in lock-step with the
-        // conflictCounts array.
-        uint32_t conflictModes;
     };
 
 
@@ -346,6 +280,16 @@ namespace newlm {
          */
         void downgrade(LockRequest* request, LockMode newMode);
 
+        /**
+         * Iterates through all buckets and deletes all locks, which have no requests on them. This
+         * call is kind of expensive and should only be used for reducing the memory footprint of
+         * the lock manager.
+         */
+        void cleanupUnusedLocks();
+
+        /**
+         * Dumps the contents of all locks to the log.
+         */
         void dump() const;
 
 
@@ -366,8 +310,8 @@ namespace newlm {
         };
 
         /**
-         * Retrieves a LockHead for the particular resource. The particular bucket must have been
-         * locked before calling this function.
+         * Retrieves the bucket in which the particular resource must reside. There is no need to
+         * hold a lock when calling this function.
          */
         LockBucket* _getBucket(const ResourceId& resId);
 
@@ -383,8 +327,11 @@ namespace newlm {
          * MUST be called under the lock bucket's spin lock.
          *
          * @param lock Lock whose grant state should be recalculated.
+         * @param checkConflictQueue Whether to go through the conflict queue. This is an
+         *          optimisation in that we only need to check the conflict queue if one of the
+         *          granted modes, which was conflicting before became zero.
          */
-        void _onLockModeChanged(LockHead* lock);
+        void _onLockModeChanged(LockHead* lock, bool checkConflictQueue);
 
         unsigned _numLockBuckets;
         LockBucket* _lockBuckets;
@@ -393,5 +340,4 @@ namespace newlm {
         bool _noCheckForLeakedLocksTestOnly;
     };
 
-} // namespace newlm
 } // namespace mongo

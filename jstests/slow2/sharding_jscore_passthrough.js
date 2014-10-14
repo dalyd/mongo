@@ -24,8 +24,6 @@ files.forEach(function(x) {
     //                  the ShardingTest setup.  SERVER-1440.
 
     // cursor8: cursorInfo different/meaningless(?) in mongos.
-    //          closeAllDatabases may not work through mongos
-    //          SERVER-1441.
     //          deal with cursorInfo in mongos SERVER-1442.
 
     // dbcase: Database names are case-insensitive under ShardingTest?
@@ -114,6 +112,7 @@ files.forEach(function(x) {
         'loglong|' +
         'logpath|' +
         'notablescan|' +
+        'collection_truncate|' + // relies on emptycapped test command which isn't in mongos
         'compact.*|' +
         'check_shard_index|' +
         'bench_test.*|' +
@@ -128,6 +127,7 @@ files.forEach(function(x) {
         'top|' +
         'touch1|' +
         'dbcase|' + // undo after fixing SERVER-11735
+        'dbcase2|' + // undo after fixing SERVER-11735
         'stats' + // tests db.stats().dataFileVersion, which doesn't appear in sharded db.stats()
         ')\.js$');
 

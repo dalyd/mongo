@@ -26,6 +26,8 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
+
 #include "mongo/db/mongod_options.h"
 
 #include <boost/filesystem.hpp>
@@ -1179,6 +1181,18 @@ namespace mongo {
 
         setGlobalReplSettings(replSettings);
         return Status::OK();
+    }
+
+namespace {
+    repl::ReplSettings globalReplSettings;
+} // namespace
+
+    void setGlobalReplSettings(const repl::ReplSettings& settings) {
+        globalReplSettings = settings;
+    }
+
+    const repl::ReplSettings& getGlobalReplSettings() {
+        return globalReplSettings;
     }
 
 } // namespace mongo

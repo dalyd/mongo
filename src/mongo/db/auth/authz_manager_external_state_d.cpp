@@ -70,24 +70,17 @@ namespace mongo {
         }
     }
 
-    Status AuthzManagerExternalStateMongod::getAllDatabaseNames(
-                OperationContext* txn, std::vector<std::string>* dbnames) {
-        StorageEngine* storageEngine = getGlobalEnvironment()->getGlobalStorageEngine();
-        storageEngine->listDatabases(dbnames);
-        return Status::OK();
-    }
-
     Status AuthzManagerExternalStateMongod::findOne(
             OperationContext* txn,
             const NamespaceString& collectionName,
             const BSONObj& query,
             BSONObj* result) {
 
-        Client::ReadContext ctx(txn, collectionName.ns());
+        AutoGetCollectionForRead ctx(txn, collectionName);
 
         BSONObj found;
         if (Helpers::findOne(txn,
-                             ctx.ctx().db()->getCollection(txn, collectionName),
+                             ctx.getCollection(),
                              query,
                              found)) {
             *result = found.getOwned();

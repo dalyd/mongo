@@ -49,14 +49,14 @@ namespace {
 } // namespace
 
     void clearInitialSyncFlag(OperationContext* txn) {
-        Lock::DBLock lk(txn->lockState(), "local", newlm::MODE_X);
+        Lock::DBLock lk(txn->lockState(), "local", MODE_X);
         WriteUnitOfWork wunit(txn);
         Helpers::putSingleton(txn, minvalidNS, BSON("$unset" << initialSyncFlag));
         wunit.commit();
     }
 
     void setInitialSyncFlag(OperationContext* txn) {
-        Lock::DBLock lk(txn->lockState(), "local", newlm::MODE_X);
+        Lock::DBLock lk(txn->lockState(), "local", MODE_X);
         WriteUnitOfWork wunit(txn);
         Helpers::putSingleton(txn, minvalidNS, BSON("$set" << initialSyncFlag));
         wunit.commit();
@@ -64,7 +64,6 @@ namespace {
 
     bool getInitialSyncFlag() {
         OperationContextImpl txn; // XXX?
-        Lock::DBRead lk (txn.lockState(), "local");
         BSONObj mv;
         if (Helpers::getSingleton(&txn, minvalidNS, mv)) {
             return mv[initialSyncFlagString].trueValue();
@@ -73,14 +72,13 @@ namespace {
     }
 
     void setMinValid(OperationContext* ctx, OpTime ts) {
-        Lock::DBLock lk(ctx->lockState(), "local", newlm::MODE_X);
+        Lock::DBLock lk(ctx->lockState(), "local", MODE_X);
         WriteUnitOfWork wunit(ctx);
         Helpers::putSingleton(ctx, minvalidNS, BSON("$set" << BSON("ts" << ts)));
         wunit.commit();
     }
 
     OpTime getMinValid(OperationContext* txn) {
-        Lock::DBRead lk(txn->lockState(), "local.replset.minvalid");
         BSONObj mv;
         if (Helpers::getSingleton(txn, minvalidNS, mv)) {
             return mv["ts"]._opTime();

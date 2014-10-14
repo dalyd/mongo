@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "mongo/db/background.h"
+#include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/index_builder.h"
@@ -103,7 +104,7 @@ namespace mongo {
 
         CmdDropIndexes() : Command("dropIndexes", false, "deleteIndexes") { }
         bool run(OperationContext* txn, const string& dbname, BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& anObjBuilder, bool fromRepl) {
-            Lock::DBLock dbXLock(txn->lockState(), dbname, newlm::MODE_X);
+            Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
             WriteUnitOfWork wunit(txn);
             bool ok = wrappedRun(txn, dbname, jsobj, errmsg, anObjBuilder);
             if (!ok) {
@@ -239,7 +240,7 @@ namespace mongo {
 
             LOG(0) << "CMD: reIndex " << toDeleteNs << endl;
 
-            Lock::DBLock dbXLock(txn->lockState(), dbname, newlm::MODE_X);
+            Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
             Client::Context ctx(txn, toDeleteNs);
 
             Collection* collection = ctx.db()->getCollection( txn, toDeleteNs );

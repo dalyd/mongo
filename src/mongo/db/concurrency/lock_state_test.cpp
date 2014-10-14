@@ -36,12 +36,11 @@
 
 
 namespace mongo {
-namespace newlm {
     
     TEST(LockerImpl, LockNoConflict) {
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
-        LockerImpl locker(1);
+        LockerImpl<true> locker(1);
         locker.lockGlobal(MODE_IX);
 
         ASSERT(LOCK_OK == locker.lock(resId, MODE_X));
@@ -75,7 +74,7 @@ namespace newlm {
     TEST(LockerImpl, ReLockNoConflict) {
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
-        LockerImpl locker(1);
+        LockerImpl<true> locker(1);
         locker.lockGlobal(MODE_IX);
 
         ASSERT(LOCK_OK == locker.lock(resId, MODE_S));
@@ -93,11 +92,11 @@ namespace newlm {
     TEST(LockerImpl, ConflictWithTimeout) {
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
-        LockerImpl locker1(1);
+        LockerImpl<true> locker1(1);
         ASSERT(LOCK_OK == locker1.lockGlobal(MODE_IX));
         ASSERT(LOCK_OK == locker1.lock(resId, MODE_X));
 
-        LockerImpl locker2(2);
+        LockerImpl<true> locker2(2);
         ASSERT(LOCK_OK == locker2.lockGlobal(MODE_IX));
         ASSERT(LOCK_TIMEOUT == locker2.lock(resId, MODE_S, 0));
 
@@ -109,8 +108,26 @@ namespace newlm {
         ASSERT(locker2.unlockAll());
     }
 
+    TEST(LockerImpl, ConflictUpgradeWithTimeout) {
+        const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
+
+        LockerImpl<true> locker1(1);
+        ASSERT(LOCK_OK == locker1.lockGlobal(MODE_IS));
+        ASSERT(LOCK_OK == locker1.lock(resId, MODE_S));
+
+        LockerImpl<true> locker2(2);
+        ASSERT(LOCK_OK == locker2.lockGlobal(MODE_IS));
+        ASSERT(LOCK_OK == locker2.lock(resId, MODE_S));
+
+        // Try upgrading locker 1, which should block and timeout
+        ASSERT(LOCK_TIMEOUT == locker1.lock(resId, MODE_X, 1));
+
+        locker1.unlockAll();
+        locker2.unlockAll();
+    }
+
     TEST(Locker, ReadTransaction) {
-        LockerImpl locker(1);
+        LockerImpl<true> locker(1);
 
         locker.lockGlobal(MODE_IS);
         locker.unlockAll();
@@ -129,7 +146,7 @@ namespace newlm {
         const ResourceId resIdRecordS(RESOURCE_DOCUMENT, 1);
         const ResourceId resIdRecordX(RESOURCE_DOCUMENT, 2);
 
-        LockerImpl locker(1);
+        LockerImpl<true> locker(1);
 
         locker.lockGlobal(MODE_IX);
         {
@@ -152,12 +169,12 @@ namespace newlm {
             locker.endWriteUnitOfWork();
 
             {
-                newlm::AutoYieldFlushLockForMMAPV1Commit flushLockYield(&locker);
+                AutoYieldFlushLockForMMAPV1Commit flushLockYield(&locker);
 
                 // This block simulates the flush/remap thread
                 {
-                    LockerImpl flushLocker(2);
-                    newlm::AutoAcquireFlushLockForMMAPV1Commit flushLockAcquire(&flushLocker);
+                    LockerImpl<true> flushLocker(2);
+                    AutoAcquireFlushLockForMMAPV1Commit flushLockAcquire(&flushLocker);
                 }
             }
 
@@ -169,12 +186,12 @@ namespace newlm {
     }
 
     /**
-     * Test that saveLockState works by examining the output.
+     * Test that saveLockerImpl<true> works by examining the output.
      */
     TEST(Locker, saveAndRestoreGlobal) {
         Locker::LockSnapshot lockInfo;
 
-        LockerImpl locker(1);
+        LockerImpl<true> locker(1);
 
         // No lock requests made, no locks held.
         locker.saveLockStateAndUnlock(&lockInfo);
@@ -202,7 +219,7 @@ namespace newlm {
     TEST(Locker, saveAndRestoreGlobalAcquiredTwice) {
         Locker::LockSnapshot lockInfo;
 
-        LockerImpl locker(1);
+        LockerImpl<true> locker(1);
 
         // No lock requests made, no locks held.
         locker.saveLockStateAndUnlock(&lockInfo);
@@ -223,12 +240,12 @@ namespace newlm {
     }
 
     /**
-     * Tests that restoreLockState works by locking a db and collection and saving + restoring.
+     * Tests that restoreLockerImpl<true> works by locking a db and collection and saving + restoring.
      */
     TEST(Locker, saveAndRestoreDBAndCollection) {
         Locker::LockSnapshot lockInfo;
 
-        LockerImpl locker(1);
+        LockerImpl<true> locker(1);
 
         const ResourceId resIdDatabase(RESOURCE_DATABASE, std::string("TestDB"));
         const ResourceId resIdCollection(RESOURCE_COLLECTION, std::string("TestDB.collection"));
@@ -253,5 +270,4 @@ namespace newlm {
         locker.unlockAll();
     }
 
-} // namespace newlm
 } // namespace mongo

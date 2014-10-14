@@ -127,8 +127,9 @@ namespace mongo {
     class MoveTimingHelper {
     public:
         MoveTimingHelper( const string& where , const string& ns , BSONObj min , BSONObj max ,
-                          int total , string* cmdErrmsg )
-            : _where( where ) , _ns( ns ) , _next( 0 ) , _total( total ) , _cmdErrmsg( cmdErrmsg ) {
+                          int total, string* cmdErrmsg, string toShard, string fromShard )
+            : _where( where ) , _ns( ns ) , _to( toShard ), _from( fromShard ), _next( 0 ),
+            _total( total ) , _cmdErrmsg( cmdErrmsg ) {
             _b.append( "min" , min );
             _b.append( "max" , max );
         }
@@ -137,6 +138,12 @@ namespace mongo {
             // even if logChange doesn't throw, bson does
             // sigh
             try {
+                if ( !_to.empty() ){
+                    _b.append( "to", _to );
+                }
+                if ( !_from.empty() ){
+                    _b.append( "from", _from );
+                }
                 if ( _next != _total ) {
                     _b.append( "note" , "aborted" );
                 }
@@ -184,6 +191,8 @@ namespace mongo {
 
         string _where;
         string _ns;
+        string _to;
+        string _from;
 
         int _next;
         int _total; // expected # of steps
@@ -396,10 +405,10 @@ namespace mongo {
             long long size = 0;
 
             {
-                Client::ReadContext cx(txn, _ns);
+                AutoGetCollectionForRead ctx(txn, _ns);
 
-                xfer( txn, cx.ctx().db(), &_deleted, b, "deleted", size, false );
-                xfer( txn, cx.ctx().db(), &_reload, b, "reload", size, true );
+                xfer(txn, ctx.getDb(), &_deleted, b, "deleted", size, false);
+                xfer(txn, ctx.getDb(), &_reload, b, "reload", size, true);
             }
 
             b.append( "size" , size );
@@ -418,8 +427,8 @@ namespace mongo {
                               long long maxChunkSize,
                               string& errmsg,
                               BSONObjBuilder& result ) {
-            Client::ReadContext ctx(txn, _ns);
-            Collection* collection = ctx.ctx().db()->getCollection( txn, _ns );
+            AutoGetCollectionForRead ctx(txn, _ns);
+            Collection* collection = ctx.getCollection();
             if ( !collection ) {
                 errmsg = "ns not found, should be impossible";
                 return false;
@@ -429,8 +438,8 @@ namespace mongo {
             WorkingSet* ws = new WorkingSet();
             DeleteNotificationStage* dns = new DeleteNotificationStage();
             // Takes ownership of 'ws' and 'dns'.
-            PlanExecutor* deleteNotifyExec = new PlanExecutor(ws, dns, collection);
-            deleteNotifyExec->registerExecInternalPlan();
+            PlanExecutor* deleteNotifyExec = new PlanExecutor(txn, ws, dns, collection);
+            deleteNotifyExec->registerExec();
             _deleteNotifyExec.reset(deleteNotifyExec);
 
             // Allow multiKey based on the invariant that shard keys must be single-valued.
@@ -452,6 +461,9 @@ namespace mongo {
 
             auto_ptr<PlanExecutor> exec(
                 InternalPlanner::indexScan(txn, collection, idx, min, max, false));
+            // We can afford to yield here because any change to the base data that we might
+            // miss is already being queued and will migrate in the 'transferMods' stage.
+            exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
 
             // use the average object size to estimate how many objects a full chunk would carry
             // do that while traversing the chunk's range using the sharding index, below
@@ -515,9 +527,9 @@ namespace mongo {
 
             int allocSize;
             {
-                Client::ReadContext ctx(txn, _ns);
-                Collection* collection = ctx.ctx().db()->getCollection( txn, _ns );
-                verify( collection );
+                AutoGetCollectionForRead ctx(txn, _ns);
+                Collection* collection = ctx.getCollection();
+                invariant(collection);
                 scoped_spinlock lk( _trackerLocks );
                 allocSize =
                     std::min(BSONObjMaxUserSize,
@@ -528,8 +540,8 @@ namespace mongo {
             while ( 1 ) {
                 bool filledBuffer = false;
                 
-                Client::ReadContext ctx(txn, _ns);
-                Collection* collection = ctx.ctx().db()->getCollection( txn, _ns );
+                AutoGetCollectionForRead ctx(txn, _ns);
+                Collection* collection = ctx.getCollection();
 
                 scoped_spinlock lk( _trackerLocks );
                 set<DiskLoc>::iterator i = _cloneLocs.begin();
@@ -540,7 +552,11 @@ namespace mongo {
                     invariant( collection );
 
                     DiskLoc dl = *i;
-                    BSONObj o = collection->docFor( txn, dl );
+                    BSONObj o;
+                    if ( !collection->findDoc( txn, dl, &o ) ) {
+                        // doc was deleted
+                        continue;
+                    }
 
                     // use the builder size instead of accumulating 'o's size so that we take into consideration
                     // the overhead of BSONArray indices, and *always* append one doc
@@ -564,10 +580,13 @@ namespace mongo {
         }
 
         void aboutToDelete( const DiskLoc& dl ) {
-            // not needed right now
-            // but trying to prevent a future bug
-            scoped_spinlock lk( _trackerLocks ); 
+            // Even though above we call findDoc to check for existance
+            // that check only works for non-mmapv1 engines, and this is needed
+            // for mmapv1.
 
+            // lock not needed right now
+            // but trying to prevent a future bug
+            scoped_spinlock lk( _trackerLocks );
             _cloneLocs.erase( dl );
         }
 
@@ -679,7 +698,6 @@ namespace mongo {
                 return empty;
             }
             virtual StageType stageType() const {
-                invariant( false );
                 return STAGE_NOTIFY_DELETE;
             }
         };
@@ -949,7 +967,8 @@ namespace mongo {
                 return false;
             }
 
-            MoveTimingHelper timing( "from" , ns , min , max , 6 /* steps */ , &errmsg );
+            MoveTimingHelper timing( "from" , ns , min , max , 6 /* steps */ , &errmsg,
+                toShardName, fromShardName );
 
             log() << "received moveChunk request: " << cmdObj << migrateLog;
 
@@ -972,13 +991,13 @@ namespace mongo {
             collLock.setLockMessage(str::stream() << "migrating chunk [" << minKey << ", " << maxKey
                                                   << ") in " << ns);
 
-            if (!collLock.tryAcquire(&errmsg)) {
+            Status acquisitionStatus = collLock.tryAcquire();
+            if (!acquisitionStatus.isOK()) {
+                errmsg = stream() << "could not acquire collection lock for " << ns
+                                  << " to migrate chunk [" << minKey << "," << maxKey << ")"
+                                  << causedBy(acquisitionStatus);
 
-                errmsg = str::stream() << "could not acquire collection lock for " << ns
-                                       << " to migrate chunk [" << minKey << "," << maxKey << ")"
-                                       << causedBy(errmsg);
-
-                warning() << errmsg;
+                warning() << errmsg << endl;
                 return false;
             }
 
@@ -1224,11 +1243,10 @@ namespace mongo {
             }
 
             // Ensure distributed lock still held
-            string lockHeldMsg;
-            bool lockHeld = collLock.verifyLockHeld(&lockHeldMsg);
-            if ( !lockHeld ) {
+            Status lockStatus = collLock.checkStatus();
+            if (!lockStatus.isOK()) {
                 errmsg = str::stream() << "not entering migrate critical section because "
-                                       << lockHeldMsg;
+                                       << lockStatus.toString();
                 warning() << errmsg << endl;
                 return false;
             }
@@ -1244,7 +1262,7 @@ namespace mongo {
                 myVersion.incMajor();
 
                 {
-                    Lock::DBLock lk(txn->lockState(), nsToDatabaseSubstring(ns), newlm::MODE_X);
+                    Lock::DBLock lk(txn->lockState(), nsToDatabaseSubstring(ns), MODE_X);
                     verify( myVersion > shardingState.getVersion( ns ) );
 
                     // bump the metadata's version up and "forget" about the chunk being moved
@@ -1658,7 +1676,7 @@ namespace mongo {
 
             if ( getState() != DONE ) {
                 // Unprotect the range if needed/possible on unsuccessful TO migration
-                Lock::DBLock lk(txn->lockState(), nsToDatabaseSubstring(ns), newlm::MODE_X);
+                Lock::DBLock lk(txn->lockState(), nsToDatabaseSubstring(ns), MODE_X);
                 string errMsg;
                 if (!shardingState.forgetPending(txn, ns, min, max, epoch, &errMsg)) {
                     warning() << errMsg << endl;
@@ -1679,7 +1697,7 @@ namespace mongo {
                   << " at epoch " << epoch.toString() << endl;
 
             string errmsg;
-            MoveTimingHelper timing( "to" , ns , min , max , 5 /* steps */ , &errmsg );
+            MoveTimingHelper timing( "to" , ns , min , max , 5 /* steps */ , &errmsg, "", "" );
 
             ScopedDbConnection conn(from);
             conn->getLastError(); // just test connection
@@ -1716,7 +1734,7 @@ namespace mongo {
                     indexSpecs.insert(indexSpecs.begin(), indexes.begin(), indexes.end());
                 }
 
-                Lock::DBLock lk(txn->lockState(),  nsToDatabaseSubstring(ns), newlm::MODE_X);
+                Lock::DBLock lk(txn->lockState(),  nsToDatabaseSubstring(ns), MODE_X);
                 Client::Context ctx(txn,  ns);
                 Database* db = ctx.db();
                 Collection* collection = db->getCollection( txn, ns );
@@ -1801,7 +1819,7 @@ namespace mongo {
 
                 {
                     // Protect the range by noting that we're now starting a migration to it
-                    Lock::DBLock lk(txn->lockState(), nsToDatabaseSubstring(ns), newlm::MODE_X);
+                    Lock::DBLock lk(txn->lockState(), nsToDatabaseSubstring(ns), MODE_X);
                     if (!shardingState.notePending(txn, ns, min, max, epoch, &errmsg)) {
                         warning() << errmsg << endl;
                         setState(FAIL);
@@ -2101,7 +2119,7 @@ namespace mongo {
                         }
                     }
 
-                    Lock::DBLock lk(txn->lockState(), nsToDatabaseSubstring(ns), newlm::MODE_X);
+                    Lock::DBLock lk(txn->lockState(), nsToDatabaseSubstring(ns), MODE_X);
                     Client::Context ctx(txn, ns);
 
                     if (serverGlobalParams.moveParanoia) {

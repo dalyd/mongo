@@ -46,7 +46,7 @@ namespace repl {
             const ReplicaSetConfig& rsConfig,
             int selfIndex,
             const std::vector<HostAndPort>& targets,
-            long long round)
+            OID round)
         : _actualResponses(0),
           _sufficientResponsesReceived(false),
           _rsConfig(rsConfig),
@@ -65,13 +65,14 @@ namespace repl {
 
         const MemberConfig& selfConfig = _rsConfig.getMemberAt(_selfIndex);
         std::vector<ReplicationExecutor::RemoteCommandRequest> requests;
-        const BSONObj replSetElectCmd =
-            BSON("replSetElect" << 1 <<
-                 "set" << _rsConfig.getReplSetName() <<
-                 "who" << selfConfig.getHostAndPort().toString() <<
-                 "whoid" << selfConfig.getId() <<
-                 "cfgver" << _rsConfig.getConfigVersion() <<
-                 "round" << _round);
+        BSONObjBuilder electCmdBuilder;
+        electCmdBuilder.append("replSetElect", 1);
+        electCmdBuilder.append("set", _rsConfig.getReplSetName());
+        electCmdBuilder.append("who", selfConfig.getHostAndPort().toString());
+        electCmdBuilder.append("whoid", selfConfig.getId());
+        electCmdBuilder.appendIntOrLL("cfgver", _rsConfig.getConfigVersion());
+        electCmdBuilder.append("round", _round);
+        const BSONObj replSetElectCmd = electCmdBuilder.obj();
 
         // Schedule a RemoteCommandRequest for each non-DOWN node
         for (std::vector<HostAndPort>::const_iterator it = _targets.begin();
@@ -94,6 +95,9 @@ namespace repl {
             return true;
         }
         if (_receivedVotes >= _rsConfig.getMajorityNumber()) {
+            return true;
+        }
+        if (_receivedVotes < 0) {
             return true;
         }
         if (_actualResponses == _targets.size()) {
@@ -137,8 +141,7 @@ namespace repl {
             const std::vector<HostAndPort>& targets,
             const stdx::function<void ()>& onCompletion) {
 
-        const long long round(executor->nextRandomInt64(std::numeric_limits<int64_t>::max()));
-        _algorithm.reset(new Algorithm(currentConfig, selfIndex, targets, round));
+        _algorithm.reset(new Algorithm(currentConfig, selfIndex, targets, OID::gen()));
         _runner.reset(new ScatterGatherRunner(_algorithm.get()));
         return _runner->start(executor, onCompletion);
     }

@@ -26,6 +26,8 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/concurrency/lock_mgr_new.h"
@@ -38,48 +40,146 @@
 
 
 namespace mongo {
-namespace newlm {
+
+    namespace {
+
+        /**
+         * Map of conflicts. 'LockConflictsTable[newMode] & existingMode != 0' means that a new
+         * request with the given 'newMode' conflicts with an existing request with mode
+         * 'existingMode'.
+         */
+        static const int LockConflictsTable[] = {
+            // MODE_NONE
+            0,
+
+            // MODE_IS
+            (1 << MODE_X),
+
+            // MODE_IX
+            (1 << MODE_S) | (1 << MODE_X),
+
+            // MODE_S
+            (1 << MODE_IX) | (1 << MODE_X),
+
+            // MODE_X
+            (1 << MODE_S) | (1 << MODE_X) | (1 << MODE_IS) | (1 << MODE_IX),
+        };
+
+        /**
+         * Maps the mode id to a string.
+         */
+        static const char* LockNames[] = {
+            "NONE", "IS", "IX", "S", "X"
+        };
+
+        // Helper functions for the lock modes
+        inline bool conflicts(LockMode newMode, uint32_t existingModesMask) {
+            return (LockConflictsTable[newMode] & existingModesMask) != 0;
+        }
+
+        inline uint32_t modeMask(LockMode mode) {
+            return 1 << mode;
+        }
+
+        inline const char* modeName(LockMode mode) {
+            return LockNames[mode];
+        }
+
+        /**
+         * Maps the resource id to a human-readable string.
+         */
+        static const char* ResourceTypeNames[] = {
+            "Invalid",
+            "Global",
+            "MMAPV1Flush",
+            "Database",
+            "Collection",
+            "Document",
+        };
+
+        inline const char* resourceTypeName(ResourceType resourceType) {
+            return ResourceTypeNames[resourceType];
+        }
+    }
+
 
     /**
-     * Map of conflicts. 'LockConflictsTable[newMode] & existingMode != 0' means that a new request
-     * with the given 'newMode' conflicts with an existing request with mode 'existingMode'.
+     * There is one of these objects per each resource which has a lock on it.
+     *
+     * Not thread-safe and should only be accessed under the LockManager's bucket lock.
      */
-    static const int LockConflictsTable[] = {
-        // MODE_NONE
-        0,
+    struct LockHead {
 
-        // MODE_IS
-        (1 << MODE_X),
+        LockHead(const ResourceId& resId);
+        ~LockHead();
 
-        // MODE_IX
-        (1 << MODE_S) | (1 << MODE_X),
+        // Used by the changeGrantedModeCount/changeConflictModeCount methods to indicate whether
+        // the particular mode is coming or going away.
+        enum ChangeModeCountAction {
+            Increment = 1, Decrement = -1
+        };
 
-        // MODE_S
-        (1 << MODE_IX) | (1 << MODE_X),
+        // Methods to maintain the granted queue
+        void changeGrantedModeCount(LockMode mode, ChangeModeCountAction action);
+        void addToGrantedQueue(LockRequest* request);
+        void removeFromGrantedQueue(LockRequest* request);
 
-        // MODE_X
-        (1 << MODE_S) | (1 << MODE_X) | (1 << MODE_IS) | (1 << MODE_IX),
+        // Methods to maintain the conflict queue
+        void changeConflictModeCount(LockMode mode, ChangeModeCountAction count);
+        void addToConflictQueue(LockRequest* request);
+        void removeFromConflictQueue(LockRequest* request);
+
+
+        // Id of the resource which this lock protects
+        const ResourceId resourceId;
+
+
+        //
+        // Granted queue
+        //
+
+        // The head of the doubly-linked list of granted or converting requests
+        LockRequest* grantedQueue;
+
+        // Counts the grants and coversion counts for each of the supported lock modes. These
+        // counts should exactly match the aggregated modes on the granted list.
+        uint32_t grantedCounts[LockModesCount];
+
+        // Bit-mask of the granted + converting modes on the granted queue. Maintained in lock-step
+        // with the grantedCounts array.
+        uint32_t grantedModes;
+
+
+        //
+        // Conflict queue
+        //
+
+        // Doubly-linked list of requests, which have not been granted yet because they conflict
+        // with the set of granted modes. The reason to have both begin and end pointers is to make
+        // the FIFO scheduling easier (queue at begin and take from the end).
+        LockRequest* conflictQueueBegin;
+        LockRequest* conflictQueueEnd;
+
+        // Counts the conflicting requests for each of the lock modes. These counts should exactly
+        // match the aggregated modes on the conflicts list.
+        uint32_t conflictCounts[LockModesCount];
+
+        // Bit-mask of the conflict modes on the conflict queue. Maintained in lock-step with the
+        // conflictCounts array.
+        uint32_t conflictModes;
+
+
+        //
+        // Conversion
+        //
+
+        // Counts the number of requests on the granted queue, which have requested any kind of
+        // conflicting conversion and are blocked (i.e. all requests which are currently
+        // STATUS_CONVERTING). This is an optimization for unlocking in that we do not need to
+        // check the granted queue for requests in STATUS_CONVERTING if this count is zero. This
+        // saves cycles in the regular case and only burdens the less-frequent lock upgrade case.
+        uint32_t conversionsCount;
     };
-
-    /**
-     * Maps the mode id to a string.
-     */
-    static const char* LockNames[] = {
-        "NONE", "IS", "IX", "S", "X"
-    };
-
-    // Helper functions for the lock modes
-    inline bool conflicts(LockMode newMode, uint32_t existingModesMask) {
-        return (LockConflictsTable[newMode] & existingModesMask) != 0;
-    }
-
-    inline uint32_t modeMask(LockMode mode) {
-        return 1 << mode;
-    }
-
-    inline const char* modeName(LockMode mode) {
-        return LockNames[mode];
-    }
 
 
     //
@@ -87,13 +187,14 @@ namespace newlm {
     //
 
     LockManager::LockManager() : _noCheckForLeakedLocksTestOnly(false) {
-        // TODO: Generate this based on the # of CPUs. For now, use 1 bucket to make debugging
-        // easier.
-        _numLockBuckets = 1;
+        //  Have more buckets than CPUs to reduce contention on lock and caches
+        _numLockBuckets = 128;
         _lockBuckets = new LockBucket[_numLockBuckets];
     }
 
     LockManager::~LockManager() {
+        cleanupUnusedLocks();
+
         for (unsigned i = 0; i < _numLockBuckets; i++) {
             LockBucket* bucket = &_lockBuckets[i];
 
@@ -139,11 +240,12 @@ namespace newlm {
         else {
             // Lock is not free
             lock = it->second;
-
-            invariant(lock->grantedQueue != NULL);
-            invariant(lock->grantedModes != 0);
         }
 
+        // Sanity check if requests are being reused
+        invariant(request->lock == NULL || request->lock == lock);
+
+        request->lock = lock;
         request->recursiveCount++;
 
         if (request->status == LockRequest::STATUS_NEW) {
@@ -155,44 +257,19 @@ namespace newlm {
                 request->mode = mode;
                 request->convertMode = MODE_NONE;
 
-                // Put it on the wait queue. This is the place where various policies could be
+                // Put it on the conflict queue. This is the place where various policies could be
                 // applied for where in the wait queue does a request go.
-                if (lock->conflictQueueBegin == NULL) {
-                    invariant(lock->conflictQueueEnd == NULL);
-
-                    request->prev = NULL;
-                    request->next = NULL;
-
-                    lock->conflictQueueBegin = request;
-                    lock->conflictQueueEnd = request;
-                }
-                else {
-                    invariant(lock->conflictQueueEnd != NULL);
-
-                    request->prev = lock->conflictQueueEnd;
-                    request->next = NULL;
-
-                    lock->conflictQueueEnd->next = request;
-                    lock->conflictQueueEnd = request;
-                }
-
-                lock->changeRequestedModeCount(mode, LockHead::Increment);
+                lock->addToConflictQueue(request);
+                lock->changeConflictModeCount(mode, LockHead::Increment);
 
                 return LOCK_WAITING;
             }
             else {  // No conflict, new request
-                request->prev = NULL;
-                request->next = lock->grantedQueue;
                 request->status = LockRequest::STATUS_GRANTED;
                 request->mode = mode;
                 request->convertMode = MODE_NONE;
 
-                if (lock->grantedQueue != NULL) {
-                    lock->grantedQueue->prev = request;
-                }
-
-                lock->grantedQueue = request;
-
+                lock->addToGrantedQueue(request);
                 lock->changeGrantedModeCount(mode, LockHead::Increment);
 
                 return LOCK_OK;
@@ -227,12 +304,13 @@ namespace newlm {
             // T2 requests lock L in X
             // T1 then upgrades L from IS -> S
             //
-            // Because the check does not look into the requested modes bitmap, it will grant L
-            // to T1 in S mode, instead of block, which would otherwise cause deadlock.
+            // Because the check does not look into the conflict modes bitmap, it will grant L to
+            // T1 in S mode, instead of block, which would otherwise cause deadlock.
             if (conflicts(mode, grantedModesWithoutCurrentRequest)) {
                 request->status = LockRequest::STATUS_CONVERTING;
                 request->convertMode = mode;
 
+                lock->conversionsCount++;
                 lock->changeGrantedModeCount(request->convertMode, LockHead::Increment);
 
                 return LOCK_WAITING;
@@ -248,6 +326,8 @@ namespace newlm {
     }
 
     bool LockManager::unlock(LockRequest* request) {
+        invariant(request->lock);
+
         // Fast path for decrementing multiple references of the same lock. It is safe to do this
         // without locking, because 1) all calls for the same lock request must be done on the same
         // thread and 2) if there are lock requests hanging of a given LockHead, then this lock
@@ -257,45 +337,20 @@ namespace newlm {
             return false;
         }
 
-        LockBucket* bucket = _getBucket(request->resourceId);
+        LockHead* lock = request->lock;
+
+        LockBucket* bucket = _getBucket(lock->resourceId);
         scoped_spinlock scopedLock(bucket->mutex);
-
-        LockHeadMap::iterator it = bucket->data.find(request->resourceId);
-
-        // We should not have empty locks in the LockManager and should never try to unlock a lock
-        // that's not been acquired previously
-        invariant(it != bucket->data.end());
-
-        LockHead* lock = it->second;
 
         invariant(lock->grantedQueue != NULL);
         invariant(lock->grantedModes != 0);
-
-        bool grantedModesChanged = false;
 
         if (request->status == LockRequest::STATUS_WAITING) {
             // This cancels a pending lock request
             invariant(request->recursiveCount == 0);
 
-            // Remove from the conflict queue
-            if (request->prev != NULL) {
-                request->prev->next = request->next;
-            }
-            else {
-                lock->conflictQueueBegin = request->next;
-            }
-
-            if (request->next != NULL) {
-                request->next->prev = request->prev;
-            }
-            else {
-                lock->conflictQueueEnd = request->prev;
-            }
-
-            request->prev = NULL;
-            request->next = NULL;
-
-            lock->changeRequestedModeCount(request->mode, LockHead::Decrement);
+            lock->removeFromConflictQueue(request);
+            lock->changeConflictModeCount(request->mode, LockHead::Decrement);
         }
         else if (request->status == LockRequest::STATUS_CONVERTING) {
             // This cancels a pending convert request
@@ -305,56 +360,34 @@ namespace newlm {
             // brings it back to the previous granted mode.
             request->status = LockRequest::STATUS_GRANTED;
 
+            lock->conversionsCount--;
             lock->changeGrantedModeCount(request->convertMode, LockHead::Decrement);
-            grantedModesChanged = true;
 
             request->convertMode = MODE_NONE;
+
+            _onLockModeChanged(lock, lock->grantedCounts[request->convertMode] == 0);
         }
         else if (request->status == LockRequest::STATUS_GRANTED) {
-            // This releases an existing lock
+            // This releases a currently held lock and is the most common path, so it should be
+            // as efficient as possible.
             invariant(request->recursiveCount == 0);
 
             // Remove from the granted list
-            if (request->prev != NULL) {
-                request->prev->next = request->next;
-            }
-            else {
-                lock->grantedQueue = request->next;
-            }
-
-            if (request->next != NULL) {
-                request->next->prev = request->prev;
-            }
-
+            lock->removeFromGrantedQueue(request);
             lock->changeGrantedModeCount(request->mode, LockHead::Decrement);
-            grantedModesChanged = true;
+
+            _onLockModeChanged(lock, lock->grantedCounts[request->mode] == 0);
         }
         else {
             // Invalid request status
             invariant(false);
         }
 
-        // Granted modes did not change, so nothing to be done
-        if (grantedModesChanged) {
-            _onLockModeChanged(lock);
-
-            // If some locks have been granted then there should be something on the grantedQueue and
-            // vice versa (sanity check that either one or the other is true).
-            invariant((lock->grantedModes == 0) ^ (lock->grantedQueue != NULL));
-
-            // This lock is no longer in use
-            if (lock->grantedModes == 0) {
-                bucket->data.erase(it);
-
-                // TODO: As an optimization, we could keep a cache of pre-allocated LockHead objects
-                delete lock;
-            }
-        }
-
         return (request->recursiveCount == 0);
     }
 
     void LockManager::downgrade(LockRequest* request, LockMode newMode) {
+        invariant(request->lock);
         invariant(request->status == LockRequest::STATUS_GRANTED);
         invariant(request->recursiveCount > 0);
 
@@ -363,16 +396,10 @@ namespace newlm {
         invariant((LockConflictsTable[request->mode] | LockConflictsTable[newMode]) 
                                 == LockConflictsTable[request->mode]);
 
-        LockBucket* bucket = _getBucket(request->resourceId);
+        LockHead* lock = request->lock;
+
+        LockBucket* bucket = _getBucket(lock->resourceId);
         scoped_spinlock scopedLock(bucket->mutex);
-
-        LockHeadMap::iterator it = bucket->data.find(request->resourceId);
-
-        // We should not have empty locks in the LockManager and should never try to unlock a lock
-        // that's not been acquired previously
-        invariant(it != bucket->data.end());
-
-        LockHead* lock = it->second;
 
         invariant(lock->grantedQueue != NULL);
         invariant(lock->grantedModes != 0);
@@ -381,17 +408,46 @@ namespace newlm {
         lock->changeGrantedModeCount(request->mode, LockHead::Decrement);
         request->mode = newMode;
 
-        _onLockModeChanged(it->second);
+        _onLockModeChanged(lock, true);
+    }
+
+    void LockManager::cleanupUnusedLocks() {
+        for (unsigned i = 0; i < _numLockBuckets; i++) {
+            LockBucket* bucket = &_lockBuckets[i];
+            scoped_spinlock scopedLock(bucket->mutex);
+
+            LockHeadMap::iterator it = bucket->data.begin();
+            while (it != bucket->data.end()) {
+                LockHead* lock = it->second;
+                if (lock->grantedModes == 0) {
+                    invariant(lock->grantedModes == 0);
+                    invariant(lock->grantedQueue == NULL);
+                    invariant(lock->conflictModes == 0);
+                    invariant(lock->conflictQueueBegin == NULL);
+                    invariant(lock->conflictQueueEnd == NULL);
+                    invariant(lock->conversionsCount == 0);
+
+                    bucket->data.erase(it++);
+                    delete lock;
+                }
+                else {
+                    it++;
+                }
+            }
+        }
     }
 
     void LockManager::setNoCheckForLeakedLocksTestOnly(bool newValue) {
         _noCheckForLeakedLocksTestOnly = newValue;
     }
 
-    void LockManager::_onLockModeChanged(LockHead* lock) {
+    void LockManager::_onLockModeChanged(LockHead* lock, bool checkConflictQueue) {
         // Unblock any converting requests (because conversions are still counted as granted and
         // are on the granted queue).
-        for (LockRequest* iter = lock->grantedQueue; iter != NULL; iter = iter->next) {
+        for (LockRequest* iter = lock->grantedQueue;
+            (iter != NULL) && (lock->conversionsCount > 0);
+            iter = iter->next) {
+
             // Conversion requests are going in a separate queue
             if (iter->status == LockRequest::STATUS_CONVERTING) {
                 invariant(iter->convertMode != 0);
@@ -418,22 +474,24 @@ namespace newlm {
                 }
 
                 if (!conflicts(iter->convertMode, grantedModesWithoutCurrentRequest)) {
-                    lock->changeGrantedModeCount(iter->convertMode, LockHead::Increment);
+                    lock->conversionsCount--;
                     lock->changeGrantedModeCount(iter->mode, LockHead::Decrement);
+                    iter->status = LockRequest::STATUS_GRANTED;
                     iter->mode = iter->convertMode;
+                    iter->convertMode = MODE_NONE;
 
                     iter->notify->notify(lock->resourceId, LOCK_OK);
                 }
-            }
-            else {
-                invariant(iter->status == LockRequest::STATUS_GRANTED);
             }
         }
 
         // Grant any conflicting requests, which might now be unblocked
         LockRequest* iterNext = NULL;
 
-        for (LockRequest* iter = lock->conflictQueueBegin; iter != NULL; iter = iterNext) {
+        for (LockRequest* iter = lock->conflictQueueBegin;
+             (iter != NULL) && checkConflictQueue;
+             iter = iterNext) {
+
             invariant(iter->status == LockRequest::STATUS_WAITING);
 
             // Store the actual next pointer, because we muck with the iter below and move it to
@@ -442,39 +500,21 @@ namespace newlm {
 
             if (conflicts(iter->mode, lock->grantedModes)) continue;
 
-            if (iter->prev != NULL) {
-                iter->prev->next = iter->next;
-            }
-            else {
-                lock->conflictQueueBegin = iter->next;
-            }
-
-            if (iter->next != NULL) {
-                iter->next->prev = iter->prev;
-            }
-            else {
-                lock->conflictQueueEnd = iter->prev;
-            }
-
-            // iter is detached from the granted queue at this point
-            iter->next = NULL;
-            iter->prev = NULL;
-
             iter->status = LockRequest::STATUS_GRANTED;
 
-            iter->next = lock->grantedQueue;
-
-            if (lock->grantedQueue != NULL) {
-                lock->grantedQueue->prev = iter;
-            }
-
-            lock->grantedQueue = iter;
+            lock->removeFromConflictQueue(iter);
+            lock->addToGrantedQueue(iter);
 
             lock->changeGrantedModeCount(iter->mode, LockHead::Increment);
-            lock->changeRequestedModeCount(iter->mode, LockHead::Decrement);
+            lock->changeConflictModeCount(iter->mode, LockHead::Decrement);
 
             iter->notify->notify(lock->resourceId, LOCK_OK);
         }
+
+        // This is a convenient place to check that the state of the two request queues is in sync
+        // with the bitmask on the modes.
+        invariant((lock->grantedModes == 0) ^ (lock->grantedQueue != NULL));
+        invariant((lock->conflictModes == 0) ^ (lock->conflictQueueBegin != NULL));
     }
 
     LockManager::LockBucket* LockManager::_getBucket(const ResourceId& resId) {
@@ -482,6 +522,8 @@ namespace newlm {
     }
 
     void LockManager::dump() const {
+        log() << "Dumping LockManager @ " << static_cast<const void*>(this) << '\n';
+
         for (unsigned i = 0; i < _numLockBuckets; i++) {
             LockBucket* bucket = &_lockBuckets[i];
             scoped_spinlock scopedLock(bucket->mutex);
@@ -491,16 +533,17 @@ namespace newlm {
     }
 
     void LockManager::_dumpBucket(const LockBucket* bucket) const {
+        StringBuilder sb;
+
         LockHeadMap::const_iterator it = bucket->data.begin();
         while (it != bucket->data.end()) {
             const LockHead* lock = it->second;
-            StringBuilder sb;
-            sb << '\n' << "Lock " << lock << ": " << lock->resourceId.toString() << '\n';
+            sb << "Lock @ " << lock << ": " << lock->resourceId.toString() << '\n';
 
             sb << "GRANTED:\n";
             for (const LockRequest* iter = lock->grantedQueue; iter != NULL; iter = iter->next) {
                 sb << '\t'
-                    << iter->locker->getId() << " @ " << iter->locker << ": "
+                    << "LockRequest " << iter->locker->getId() << " @ " << iter->locker << ": "
                     << "Mode = " << modeName(iter->mode) << "; "
                     << "ConvertMode = " << modeName(iter->convertMode) << "; "
                     << '\n';
@@ -514,16 +557,18 @@ namespace newlm {
                  iter = iter->next) {
 
                 sb << '\t'
-                    << iter->locker->getId() << " @ " << iter->locker << ": "
+                    << "LockRequest " << iter->locker->getId() << " @ " << iter->locker << ": "
                     << "Mode = " << modeName(iter->mode) << "; "
                     << "ConvertMode = " << modeName(iter->convertMode) << "; "
                     << '\n';
             }
 
-            log() << sb.str();
+            sb << '\n';
 
             it++;
         }
+
+        log() << sb.str();
     }
 
 
@@ -537,14 +582,18 @@ namespace newlm {
         _type = type;
         _hashId = stringDataHashFunction(ns) % 0x1fffffffffffffffULL;
 
+#ifdef _DEBUG
         _nsCopy = ns.toString();
+#endif
     }
 
     ResourceId::ResourceId(ResourceType type, const std::string& ns) {
         _type = type;
         _hashId = stringDataHashFunction(ns) % 0x1fffffffffffffffULL;
 
+#ifdef _DEBUG
         _nsCopy = ns;
+#endif
     }
 
     ResourceId::ResourceId(ResourceType type, uint64_t hashId) {
@@ -552,9 +601,16 @@ namespace newlm {
         _hashId = hashId;
     }
 
-    std::string ResourceId::toString() const {
+    string ResourceId::toString() const {
         StringBuilder ss;
-        ss << "{" << _fullHash << ": " << _type << ", " << _hashId << ", " << _nsCopy << "}";
+        ss << "{" << _fullHash << ": " << resourceTypeName(static_cast<ResourceType>(_type))
+           << ", " << _hashId;
+
+#ifdef _DEBUG
+        ss << ", " << _nsCopy;
+#endif
+
+        ss << "}";
 
         return ss.str();
     }
@@ -570,7 +626,8 @@ namespace newlm {
           grantedModes(0),
           conflictQueueBegin(NULL),
           conflictQueueEnd(NULL),
-          conflictModes(0) {
+          conflictModes(0),
+          conversionsCount(0) {
 
         memset(grantedCounts, 0, sizeof(grantedCounts));
         memset(conflictCounts, 0, sizeof(conflictCounts));
@@ -602,7 +659,7 @@ namespace newlm {
         }
     }
 
-    void LockHead::changeRequestedModeCount(LockMode mode, ChangeModeCountAction action) {
+    void LockHead::changeConflictModeCount(LockMode mode, ChangeModeCountAction action) {
         if (action == Increment) {
             invariant(conflictCounts[mode] >= 0);
             if (++conflictCounts[mode] == 1) {
@@ -620,18 +677,88 @@ namespace newlm {
         }
     }
 
+    void LockHead::addToGrantedQueue(LockRequest* request) {
+        invariant(request->next == NULL);
+        invariant(request->prev == NULL);
+
+        request->next = grantedQueue;
+
+        if (grantedQueue != NULL) {
+            grantedQueue->prev = request;
+        }
+
+        grantedQueue = request;
+    }
+
+    void LockHead::removeFromGrantedQueue(LockRequest* request) {
+        if (request->prev != NULL) {
+            request->prev->next = request->next;
+        }
+        else {
+            grantedQueue = request->next;
+        }
+
+        if (request->next != NULL) {
+            request->next->prev = request->prev;
+        }
+
+        request->prev = NULL;
+        request->next = NULL;
+    }
+
+    void LockHead::addToConflictQueue(LockRequest* request) {
+        invariant(request->next == NULL);
+        invariant(request->prev == NULL);
+
+        if (conflictQueueBegin == NULL) {
+            invariant(conflictQueueEnd == NULL);
+
+            request->prev = NULL;
+            request->next = NULL;
+
+            conflictQueueBegin = request;
+            conflictQueueEnd = request;
+        }
+        else {
+            invariant(conflictQueueEnd != NULL);
+
+            request->prev = conflictQueueEnd;
+            request->next = NULL;
+
+            conflictQueueEnd->next = request;
+            conflictQueueEnd = request;
+        }
+    }
+
+    void LockHead::removeFromConflictQueue(LockRequest* request) {
+        if (request->prev != NULL) {
+            request->prev->next = request->next;
+        }
+        else {
+            conflictQueueBegin = request->next;
+        }
+
+        if (request->next != NULL) {
+            request->next->prev = request->prev;
+        }
+        else {
+            conflictQueueEnd = request->prev;
+        }
+
+        request->prev = NULL;
+        request->next = NULL;
+    }
+
 
     //
     // LockRequest
     //
 
-    void LockRequest::initNew(const ResourceId& resourceId,
-                              Locker* locker,
-                              LockGrantNotification* notify) {
-        this->resourceId = resourceId;
+    void LockRequest::initNew(Locker* locker, LockGrantNotification* notify) {
         this->locker = locker;
-        this->notify = notify;        
+        this->notify = notify;
 
+        lock = NULL;
         prev = NULL;
         next = NULL;
         status = STATUS_NEW;
@@ -640,5 +767,4 @@ namespace newlm {
         recursiveCount = 0;
     }
 
-} // namespace newlm
 } // namespace mongo

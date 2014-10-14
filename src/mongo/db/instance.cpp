@@ -83,6 +83,7 @@
 #include "mongo/util/goodies.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/quick_exit.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -620,13 +621,30 @@ namespace mongo {
         UpdateExecutor executor(&request, &op.debug());
         uassertStatusOK(executor.prepare());
 
-        Lock::DBLock lk(txn->lockState(), ns.db(), newlm::MODE_X);
-        Client::Context ctx(txn,  ns );
+        {
+            //  Tentatively take an intent lock, fix up if we need to create the collection
+            Lock::DBLock dbLock(txn->lockState(), ns.db(), MODE_IX);
+            Lock::CollectionLock colLock(txn->lockState(), ns.ns(), MODE_IX);
+            Client::Context ctx(txn, ns);
 
-        UpdateResult res = executor.execute(ctx.db());
+            //  The common case: no implicit collection creation
+            if (!upsert || ctx.db()->getCollection(txn, ns) != NULL) {
+                UpdateResult res = executor.execute(ctx.db());
 
-        // for getlasterror
-        lastError.getSafe()->recordUpdate( res.existing , res.numMatched , res.upserted );
+                // for getlasterror
+                lastError.getSafe()->recordUpdate( res.existing , res.numMatched , res.upserted );
+                return;
+            }
+        }
+
+        //  This is an upsert into a non-existing database, so need an exclusive lock
+        //  to avoid deadlock
+        {
+            Lock::DBLock dbLock(txn->lockState(), ns.db(), MODE_X);
+            Client::Context ctx(txn, ns);
+            UpdateResult res = executor.execute(ctx.db());
+            lastError.getSafe()->recordUpdate( res.existing , res.numMatched , res.upserted );
+        }
     }
 
     void receivedDelete(OperationContext* txn, Message& m, CurOp& op) {
@@ -654,7 +672,8 @@ namespace mongo {
         DeleteExecutor executor(&request);
         uassertStatusOK(executor.prepare());
 
-        Lock::DBLock lk(txn->lockState(), ns.db(), newlm::MODE_X);
+        Lock::DBLock dbLocklk(txn->lockState(), ns.db(), MODE_IX);
+        Lock::CollectionLock colLock(txn->lockState(), ns.ns(), MODE_IX);
         Client::Context ctx(txn, ns);
 
         long long n = executor.execute(ctx.db());
@@ -913,11 +932,38 @@ namespace mongo {
             uassertStatusOK(status);
         }
 
-        Lock::DBLock lk(txn->lockState(), nsString.db(), newlm::MODE_X);
+        const int notMasterCodeForInsert = 10058; // This is different from ErrorCodes::NotMaster
+        {
+            const bool isIndexBuild = (nsToCollectionSubstring(ns) == "system.indexes");
+            const LockMode mode = isIndexBuild ? MODE_X : MODE_IX;
+            Lock::DBLock dbLock(txn->lockState(), nsString.db(), mode);
+            Lock::CollectionLock collLock(txn->lockState(), nsString.ns(), mode);
+
+            // CONCURRENCY TODO: is being read locked in big log sufficient here?
+            // writelock is used to synchronize stepdowns w/ writes
+            uassert(notMasterCodeForInsert, "not master",
+                    repl::getGlobalReplicationCoordinator()->canAcceptWritesForDatabase(nsString.db()));
+
+            Client::Context ctx(txn, ns);
+            if (mode == MODE_X || ctx.db()->getCollection(txn, nsString)) {
+                if (multi.size() > 1) {
+                    const bool keepGoing = d.reservedField() & InsertOption_ContinueOnError;
+                    insertMulti(txn, ctx, keepGoing, ns, multi, op);
+                } else {
+                    checkAndInsert(txn, ctx, ns, multi[0]);
+                    globalOpCounters.incInsertInWriteLock(1);
+                    op.debug().ninserted = 1;
+                }
+                return;
+            }
+        }
+
+        // Collection didn't exist so try again with MODE_X
+        Lock::DBLock dbLock(txn->lockState(), nsString.db(), MODE_X);
 
         // CONCURRENCY TODO: is being read locked in big log sufficient here?
         // writelock is used to synchronize stepdowns w/ writes
-        uassert(10058 , "not master",
+        uassert(notMasterCodeForInsert, "not master",
                 repl::getGlobalReplicationCoordinator()->canAcceptWritesForDatabase(nsString.db()));
 
         Client::Context ctx(txn, ns);
@@ -1005,14 +1051,14 @@ namespace mongo {
 
 #ifdef _WIN32
         // Windows Service Controller wants to be told when we are down,
-        //  so don't call ::_exit() yet, or say "really exiting now"
+        //  so don't call quickExit() yet, or say "really exiting now"
         //
         if ( rc == EXIT_WINDOWS_SERVICE_STOP ) {
             return;
         }
 #endif
 
-        ::_exit(rc);
+        quickExit(rc);
     }
 
     // ----- BEGIN Diaglog -----

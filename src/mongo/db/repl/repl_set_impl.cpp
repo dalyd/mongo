@@ -379,21 +379,6 @@ namespace {
                       << " is not present in the current repl set config" << rsLog;
             }
         }
-
-        // Figure out indexPrefetch setting
-        std::string& prefetch = getGlobalReplicationCoordinator()->getSettings().rsIndexPrefetch;
-        if (!prefetch.empty()) {
-            IndexPrefetchConfig prefetchConfig = PREFETCH_ALL;
-            if (prefetch == "none")
-                prefetchConfig = PREFETCH_NONE;
-            else if (prefetch == "_id_only")
-                prefetchConfig = PREFETCH_ID_ONLY;
-            else if (prefetch == "all")
-                prefetchConfig = PREFETCH_ALL;
-            else
-                warning() << "unrecognized indexPrefetch setting: " << prefetch << endl;
-            setIndexPrefetchConfig(prefetchConfig);
-        }
     }
 
     ReplSetImpl::ReplSetImpl() :
@@ -402,8 +387,7 @@ namespace {
         _hbmsgTime(0),
         _self(0),
         _maintenanceMode(0),
-        mgr(0),
-        _indexPrefetchConfig(PREFETCH_ALL) {
+        mgr(0) {
     }
 
     void ReplSetImpl::loadLastOpTimeWritten(OperationContext* txn, bool quiet) {
@@ -417,15 +401,6 @@ namespace {
         else {
             getGlobalReplicationCoordinator()->setMyLastOptime(txn, OpTime());
         }
-    }
-
-    OpTime ReplSetImpl::getEarliestOpTimeWritten() const {
-        OperationContextImpl txn; // XXX?
-        Lock::DBRead lk(txn.lockState(), rsoplog);
-        BSONObj o;
-        uassert(17347, "Problem reading earliest entry from oplog",
-                Helpers::getFirst(&txn, rsoplog, o));
-        return o["ts"]._opTime();
     }
 
     // call after constructing to start - returns fairly quickly after launching its threads

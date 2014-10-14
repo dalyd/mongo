@@ -25,6 +25,8 @@
  *    then also delete it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
+
 #include "mongo/base/owned_pointer_map.h"
 #include "mongo/platform/random.h"
 #include "mongo/s/balancer_policy.h"
@@ -306,10 +308,12 @@ namespace mongo {
                 if ( ! m ) 
                     break;
 
-                if ( m->chunk.min["x"].numberInt() < 7 )
+                if ( m->chunk.min["x"].numberInt() < 7 ) {
                     ASSERT_EQUALS( "shard0" , m->to );
-                else
+                }
+                else {
                     ASSERT_EQUALS( "shard2" , m->to );
+                }
 
                 moveChunk( chunks, m );
             }

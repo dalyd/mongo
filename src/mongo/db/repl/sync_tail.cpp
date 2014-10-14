@@ -48,6 +48,7 @@
 #include "mongo/db/repl/rslog.h"
 #include "mongo/db/stats/timer_stats.h"
 #include "mongo/db/operation_context_impl.h"
+#include "mongo/util/exit.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 
@@ -123,7 +124,7 @@ namespace repl {
             lk.reset(new Lock::GlobalWrite(txn->lockState()));
         } else {
             // DB level lock for this operation
-            lk.reset(new Lock::DBLock(txn->lockState(), nsToDatabaseSubstring(ns), newlm::MODE_X));
+            lk.reset(new Lock::DBLock(txn->lockState(), nsToDatabaseSubstring(ns), MODE_X));
         }
 
         Client::Context ctx(txn, ns);
@@ -146,11 +147,8 @@ namespace repl {
                 // one possible tweak here would be to stay in the read lock for this database 
                 // for multiple prefetches if they are for the same database.
                 OperationContextImpl txn;
-                Client::ReadContext ctx(&txn, ns);
-                prefetchPagesForReplicatedOp(&txn,
-                                             ctx.ctx().db(),
-                                             theReplSet->getIndexPrefetchConfig(),
-                                             op);
+                AutoGetCollectionForRead ctx(&txn, ns);
+                prefetchPagesForReplicatedOp(&txn, ctx.getDb(), op);
             }
             catch (const DBException& e) {
                 LOG(2) << "ignoring exception in prefetchOp(): " << e.what() << endl;
@@ -227,11 +225,13 @@ namespace repl {
 
     /* applies oplog from "now" until endOpTime using the applier threads for initial sync*/
     void SyncTail::_applyOplogUntil(OperationContext* txn, const OpTime& endOpTime) {
+        unsigned long long bytesApplied = 0;
+        unsigned long long entriesApplied = 0;
         while (true) {
             OpQueue ops;
             OperationContextImpl ctx;
 
-            while (!tryPopAndWaitForMore(&ops)) {
+            while (!tryPopAndWaitForMore(&ops, getGlobalReplicationCoordinator())) {
                 // nothing came back last time, so go again
                 if (ops.empty()) continue;
 
@@ -263,43 +263,52 @@ namespace repl {
 
             const BSONObj lastOp = ops.back().getOwned();
 
+            // Tally operation information
+            bytesApplied += ops.getSize();
+            entriesApplied += ops.getDeque().size();
+
             multiApply(ops.getDeque());
             OpTime lastOpTime = applyOpsToOplog(&ops.getDeque());
 
             // if the last op applied was our end, return
             if (lastOpTime == endOpTime) {
+                LOG(1) << "SyncTail applied " << entriesApplied
+                       << " entries (" << bytesApplied << " bytes)"
+                       << " and finished at opTime " << endOpTime.toStringPretty();
                 return;
             }
         } // end of while (true)
     }
 
 namespace {
-    void tryToGoLiveAsASecondary(OperationContext* txn) {
+    void tryToGoLiveAsASecondary(OperationContext* txn, ReplicationCoordinator* replCoord) {
         Lock::GlobalRead readLock(txn->lockState());
 
-        if (getGlobalReplicationCoordinator()->getMaintenanceMode()) {
+        if (replCoord->getMaintenanceMode()) {
             // we're not actually going live
             return;
         }
 
         // Only state RECOVERING can transition to SECONDARY.
-        MemberState state(getGlobalReplicationCoordinator()->getCurrentMemberState());
+        MemberState state(replCoord->getCurrentMemberState());
         if (!state.recovering()) {
             return;
         }
 
         OpTime minvalid = getMinValid(txn);
-        if (minvalid > getGlobalReplicationCoordinator()->getMyLastOptime()) {
+        if (minvalid > replCoord->getMyLastOptime()) {
             return;
         }
 
-        getGlobalReplicationCoordinator()->setFollowerMode(MemberState::RS_SECONDARY);
+        replCoord->setFollowerMode(MemberState::RS_SECONDARY);
     }
 }
 
     /* tail an oplog.  ok to return, will be re-called. */
     void SyncTail::oplogApplication() {
-        while( 1 ) {
+        ReplicationCoordinator* replCoord = getGlobalReplicationCoordinator();
+
+        while(!inShutdown()) {
             OpQueue ops;
             OperationContextImpl txn;
 
@@ -307,11 +316,6 @@ namespace {
             int lastTimeChecked = 0;
 
             do {
-                if (theReplSet->isPrimary()) {
-                    massert(16620, "there are ops to sync, but I'm primary", ops.empty());
-                    return;
-                }
-
                 int now = batchTimer.seconds();
 
                 // apply replication batch limits
@@ -328,13 +332,13 @@ namespace {
                     BackgroundSync* bgsync = BackgroundSync::get();
                     if (bgsync->getInitialSyncRequestedFlag()) {
                         // got a resync command
-                        Lock::DBLock lk(txn.lockState(), "local", newlm::MODE_X);
+                        Lock::DBLock lk(txn.lockState(), "local", MODE_X);
                         WriteUnitOfWork wunit(&txn);
                         Client::Context ctx(&txn, "local");
 
                         ctx.db()->dropCollection(&txn, "local.oplog.rs");
-                        getGlobalReplicationCoordinator()->setMyLastOptime(&txn, OpTime());
-                        getGlobalReplicationCoordinator()->clearSyncSourceBlacklist();
+                        replCoord->setMyLastOptime(&txn, OpTime());
+                        replCoord->clearSyncSourceBlacklist();
                         bgsync->stop();
                         wunit.commit();
 
@@ -344,7 +348,7 @@ namespace {
                     // can we become secondary?
                     // we have to check this before calling mgr, as we must be a secondary to
                     // become primary
-                    tryToGoLiveAsASecondary(&txn);
+                    tryToGoLiveAsASecondary(&txn, replCoord);
 
                     // TODO(emilkie): This can be removed once we switch over from legacy;
                     // this code is what moves 1-node sets to PRIMARY state.
@@ -352,8 +356,9 @@ namespace {
                     // replset there are no heartbeat threads, so we do it here to be sure.  this is
                     // relevant if the singleton member has done a stepDown() and needs to come back
                     // up.
-                    if (theReplSet->config().members.size() == 1 &&
-                        theReplSet->myConfig().potentiallyHot()) {
+                    if (theReplSet &&
+                            theReplSet->config().members.size() == 1 &&
+                            theReplSet->myConfig().potentiallyHot()) {
                         Manager* mgr = theReplSet->mgr;
                         // When would mgr be null?  During replsettest'ing, in which case we should
                         // fall through and actually apply ops as if we were a real secondary.
@@ -366,7 +371,7 @@ namespace {
                     }
                 }
 
-                const int slaveDelaySecs = theReplSet->myConfig().slaveDelay;
+                const int slaveDelaySecs = replCoord->getSlaveDelaySecs().total_seconds();
                 if (!ops.empty() && slaveDelaySecs > 0) {
                     const BSONObj& lastOp = ops.getDeque().back();
                     const unsigned int opTimestampSecs = lastOp["ts"]._opTime().getSecs();
@@ -380,17 +385,28 @@ namespace {
                     }
                 }
                 // keep fetching more ops as long as we haven't filled up a full batch yet
-            } while (!tryPopAndWaitForMore(&ops) && // tryPopAndWaitForMore returns true 
-                                                    // when we need to end a batch early
-                   (ops.getSize() < replBatchLimitBytes));
+            } while (!tryPopAndWaitForMore(&ops, replCoord) && // tryPopAndWaitForMore returns true 
+                                                               // when we need to end a batch early
+                   (ops.getSize() < replBatchLimitBytes) &&
+                   !inShutdown());
 
             // For pausing replication in tests
             while (MONGO_FAIL_POINT(rsSyncApplyStop)) {
                 sleepmillis(0);
             }
 
+            if (ops.empty()) {
+                continue;
+            }
+
             const BSONObj& lastOp = ops.getDeque().back();
             handleSlaveDelay(lastOp);
+
+            if (replCoord->getCurrentMemberState().primary() && 
+                !replCoord->isWaitingForApplierToDrain()) {
+                severe() << "attempting to replicate ops while primary";
+                fassertFailed(28527);
+            }
 
             // Set minValid to the last op to be applied in this next batch.
             // This will cause this node to go into RECOVERING state
@@ -403,7 +419,9 @@ namespace {
             applyOpsToOplog(&ops.getDeque());
 
             // If we're just testing (no manager), don't keep looping if we exhausted the bgqueue
-            if (!theReplSet->mgr) {
+            // TODO(spencer): Remove repltest.cpp dbtest or make this work with the new replication
+            // coordinator
+            if (theReplSet && !theReplSet->mgr) {
                 BSONObj op;
                 if (!peek(&op)) {
                     return;
@@ -419,7 +437,7 @@ namespace {
     // This function also blocks 1 second waiting for new ops to appear in the bgsync
     // queue.  We can't block forever because there are maintenance things we need
     // to periodically check in the loop.
-    bool SyncTail::tryPopAndWaitForMore(SyncTail::OpQueue* ops) {
+    bool SyncTail::tryPopAndWaitForMore(SyncTail::OpQueue* ops, ReplicationCoordinator* replCoord) {
         BSONObj op;
         // Check to see if there are ops waiting in the bgsync queue
         bool peek_success = peek(&op);
@@ -427,6 +445,7 @@ namespace {
         if (!peek_success) {
             // if we don't have anything in the queue, wait a bit for something to appear
             if (ops->empty()) {
+                replCoord->signalDrainComplete();
                 // block up to 1 second
                 _networkQueue->waitForMore();
                 return false;
@@ -481,7 +500,7 @@ namespace {
         OpTime lastOpTime;
         {
             OperationContextImpl txn; // XXX?
-            Lock::DBLock lk(txn.lockState(), "local", newlm::MODE_X);
+            Lock::DBLock lk(txn.lockState(), "local", MODE_X);
             WriteUnitOfWork wunit(&txn);
 
             while (!ops->empty()) {
@@ -499,16 +518,17 @@ namespace {
     }
 
     void SyncTail::handleSlaveDelay(const BSONObj& lastOp) {
-        int sd = theReplSet->myConfig().slaveDelay;
+        ReplicationCoordinator* replCoord = getGlobalReplicationCoordinator();
+        int slaveDelaySecs = replCoord->getSlaveDelaySecs().total_seconds();
 
         // ignore slaveDelay if the box is still initializing. once
         // it becomes secondary we can worry about it.
-        if( sd && theReplSet->isSecondary() ) {
+        if( slaveDelaySecs > 0 && replCoord->getCurrentMemberState().secondary() ) {
             const OpTime ts = lastOp["ts"]._opTime();
             long long a = ts.getSecs();
             long long b = time(0);
             long long lag = b - a;
-            long long sleeptime = sd - lag;
+            long long sleeptime = slaveDelaySecs - lag;
             if( sleeptime > 0 ) {
                 uassert(12000, "rs slaveDelay differential too big check clocks and systems",
                         sleeptime < 0x40000000);
@@ -516,15 +536,15 @@ namespace {
                     sleepsecs((int) sleeptime);
                 }
                 else {
-                    log() << "replSet slavedelay sleep long time: " << sleeptime << rsLog;
+                    warning() << "replSet slavedelay causing a long sleep of " << sleeptime
+                              << " seconds" << rsLog;
                     // sleep(hours) would prevent reconfigs from taking effect & such!
                     long long waitUntil = b + sleeptime;
-                    while( 1 ) {
+                    while(time(0) < waitUntil) {
                         sleepsecs(6);
-                        if( time(0) >= waitUntil )
-                            break;
 
-                        if( theReplSet->myConfig().slaveDelay != sd ) // reconf
+                        // Handle reconfigs that changed the slave delay
+                        if (replCoord->getSlaveDelaySecs().total_seconds() != slaveDelaySecs)
                             break;
                     }
                 }

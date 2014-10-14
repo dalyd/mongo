@@ -61,7 +61,8 @@ namespace mongo {
 
         // Parse the command BSON to a LiteParsedQuery.
         LiteParsedQuery* rawLpq;
-        Status lpqStatus = LiteParsedQuery::make(fullns, cmdObj, &rawLpq);
+        bool isExplain = true;
+        Status lpqStatus = LiteParsedQuery::make(fullns, cmdObj, isExplain, &rawLpq);
         if (!lpqStatus.isOK()) {
             return lpqStatus;
         }
@@ -76,7 +77,7 @@ namespace mongo {
         vector<Strategy::CommandResult> shardResults;
         STRATEGY->commandOp(dbname,
                             explainCmdBob.obj(),
-                            0,
+                            lpq->getOptions().toInt(),
                             fullns,
                             lpq->getFilter(),
                             &shardResults);

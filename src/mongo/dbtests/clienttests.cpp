@@ -142,30 +142,24 @@ namespace ClientTests {
             db.insert(ns(), BSON("x" << 1 << "y" << 2));
             db.insert(ns(), BSON("x" << 2 << "y" << 2));
 
-            Collection* collection = ctx.ctx().db()->getCollection( &txn, ns() );
+            Collection* collection = ctx.getCollection();
             ASSERT( collection );
             IndexCatalog* indexCatalog = collection->getIndexCatalog();
 
             ASSERT_EQUALS(1, indexCatalog->numIndexesReady(&txn));
             // _id index
-            ASSERT_EQUALS(1U, db.count("test.system.indexes"));
-            // test.buildindex
-            // test.buildindex_$id
-            // test.system.indexes
-            ASSERT_EQUALS(3U, db.count("test.system.namespaces"));
+            ASSERT_EQUALS(1U, db.getIndexSpecs(ns()).size());
 
             db.ensureIndex(ns(), BSON("y" << 1), true);
 
             ASSERT_EQUALS(1, indexCatalog->numIndexesReady(&txn));
-            ASSERT_EQUALS(1U, db.count("test.system.indexes"));
-            ASSERT_EQUALS(3U, db.count("test.system.namespaces"));
+            ASSERT_EQUALS(1U, db.getIndexSpecs(ns()).size());
 
             db.ensureIndex(ns(), BSON("x" << 1), true);
             ctx.commit();
 
             ASSERT_EQUALS(2, indexCatalog->numIndexesReady(&txn));
-            ASSERT_EQUALS(2U, db.count("test.system.indexes"));
-            ASSERT_EQUALS(4U, db.count("test.system.namespaces"));
+            ASSERT_EQUALS(2U, db.getIndexSpecs(ns()).size());
         }
     };
 

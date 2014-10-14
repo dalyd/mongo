@@ -42,25 +42,8 @@ namespace mongo {
     class PlanStage;
     class PlanExecutor;
     struct PlanStageStats;
+    class PlanYieldPolicy;
     class WorkingSet;
-
-    /**
-     * RAII approach to ensuring that plan executors are deregistered.
-     *
-     * While retrieving the first batch of results, newRunQuery manually registers the executor with
-     * ClientCursor.  Certain query execution paths, namely $where, can throw an exception.  If we
-     * fail to deregister the executor, we will call invalidate/kill on the
-     * still-registered-yet-deleted executor.
-     *
-     * For any subsequent calls to getMore, the executor is already registered with ClientCursor
-     * by virtue of being cached, so this exception-proofing is not required.
-     */
-    struct ScopedExecutorRegistration {
-        ScopedExecutorRegistration(PlanExecutor* exec);
-        ~ScopedExecutorRegistration();
-
-        PlanExecutor* const _exec;
-    };
 
     /**
      * A PlanExecutor is the abstraction that knows how to crank a tree of stages into execution.
@@ -92,9 +75,38 @@ namespace mongo {
         };
 
         /**
-         * Helper method to aid in displaying an ExecState for debug or other recreational purposes.
+         * The yielding policy of the plan executor.  By default, a runner does not yield itself
+         * (YIELD_MANUAL).
          */
-        static std::string statestr(ExecState s);
+        enum YieldPolicy {
+            // Any call to getNext() may yield.  In particular, the runner may be killed during any
+            // call to getNext().  If this occurs, getNext() will return RUNNER_DEAD.
+            YIELD_AUTO,
+
+            // Owner must yield manually if yields are requested.  How to yield yourself:
+            //
+            // 0. Let's say you have PlanExecutor* exec.
+            //
+            // 1. Register your PlanExecutor with ClientCursor. Registered executors are informed
+            // about DiskLoc deletions and namespace invalidation, as well as other important
+            // events. Do this either by  calling registerExec() on the executor. This can be done
+            // once you get your executor, or could be done per-yield.
+            //
+            // 2. Call exec->saveState() before you yield.
+            //
+            // 3. Call Yield::yieldAllLocks(), passing in the executor's OperationContext*. This
+            // causes the executor to give up its locks and block so that it goes to the back of
+            // the scheduler's queue.
+            //
+            // 4. Call exec->restoreState() before using the executor again.
+            //
+            // 5. The next call to exec->getNext() may return DEAD.
+            //
+            // 6. Make sure the executor gets deregistered from ClientCursor. PlanExecutor does
+            // this in an RAII fashion when it is destroyed, or you can explicity call
+            // unregisterExec() on the PlanExecutor.
+            YIELD_MANUAL,
+        };
 
         //
         // Constructors / destructor.
@@ -106,27 +118,40 @@ namespace mongo {
          * Right now this is only for idhack updates which neither canonicalize
          * nor go through normal planning.
          */
-        PlanExecutor(WorkingSet* ws, PlanStage* rt, const Collection* collection);
+        PlanExecutor(OperationContext* opCtx,
+                     WorkingSet* ws,
+                     PlanStage* rt,
+                     const Collection* collection);
 
         /**
          * Used when we have a NULL collection and no canonical query. In this case,
          * we need to explicitly pass a namespace to the plan executor.
          */
-        PlanExecutor(WorkingSet* ws, PlanStage* rt, std::string ns);
+        PlanExecutor(OperationContext* opCtx,
+                     WorkingSet* ws,
+                     PlanStage* rt,
+                     std::string ns);
 
         /**
          * Used when there is a canonical query but no query solution (e.g. idhack
          * queries, queries against a NULL collection, queries using the subplan stage).
          */
-        PlanExecutor(WorkingSet* ws, PlanStage* rt, CanonicalQuery* cq,
+        PlanExecutor(OperationContext* opCtx,
+                     WorkingSet* ws,
+                     PlanStage* rt,
+                     CanonicalQuery* cq,
                      const Collection* collection);
 
         /**
          * The constructor for the normal case, when you have both a canonical query
          * and a query solution.
          */
-        PlanExecutor(WorkingSet* ws, PlanStage* rt, QuerySolution* qs,
-                     CanonicalQuery* cq, const Collection* collection);
+        PlanExecutor(OperationContext* opCtx,
+                     WorkingSet* ws,
+                     PlanStage* rt,
+                     QuerySolution* qs,
+                     CanonicalQuery* cq,
+                     const Collection* collection);
 
         ~PlanExecutor();
 
@@ -158,6 +183,11 @@ namespace mongo {
          * Return the NS that the query is running over.
          */
         const std::string& ns();
+
+        /**
+         * Return the OperationContext that the plan is currently executing within.
+         */
+        OperationContext* getOpCtx() const;
 
         /**
          * Generates a tree of stats objects with a separate lifetime from the execution
@@ -224,19 +254,20 @@ namespace mongo {
          * receives notifications for events that happen while yielding any locks.
          *
          * Deregistration happens automatically when this plan executor is destroyed.
-         *
-         * Used just for internal plans:
-         *  -- InternalPlanner::collectionScan(...) (see internal_plans.h)
-         *  -- InternalPlanner::indexScan(...) (see internal_plans.h)
-         *  -- getOplogStartHack(...) (see new_find.cpp)
-         *  -- storeCurrentLocs(...) (see d_migrate.cpp)
          */
-        void registerExecInternalPlan();
+        void registerExec();
 
         /**
-         * If we're yielding locks, the database we're operating over or any collection we're relying on
-         * may be dropped.  When this happens all cursors and plan executors on that database and
-         * collection are killed or deleted in some fashion. (This is how the _killed gets set.)
+         * Unregister this PlanExecutor. Normally you want the PlanExecutor to be registered
+         * for its lifetime, and you shouldn't have to call this explicitly.
+         */
+        void deregisterExec();
+
+        /**
+         * If we're yielding locks, the database we're operating over or any collection we're
+         * relying on may be dropped.  When this happens all cursors and plan executors on that
+         * database and collection are killed or deleted in some fashion. (This is how _killed
+         * gets set.)
          */
         void kill();
 
@@ -247,11 +278,50 @@ namespace mongo {
          */
         void invalidate(const DiskLoc& dl, InvalidationType type);
 
+        /**
+         * Helper method to aid in displaying an ExecState for debug or other recreational purposes.
+         */
+        static std::string statestr(ExecState s);
+
+        /**
+         * Change the yield policy of the PlanExecutor to 'policy'. If 'registerExecutor' is true,
+         * and the yield policy is YIELD_AUTO, then the plan executor gets registered to receive
+         * notifications of events from other threads.
+         *
+         * Everybody who sets the policy to YIELD_AUTO really wants to call registerExec()
+         * immediately after EXCEPT commands that create cursors...so we expose the ability to
+         * register (or not) here, rather than require all users to have yet another RAII object.
+         * Only cursor-creating things like new_find.cpp set registerExecutor to false.
+         */
+        void setYieldPolicy(YieldPolicy policy, bool registerExecutor = true);
+
     private:
+        /**
+         * RAII approach to ensuring that plan executors are deregistered.
+         *
+         * While retrieving the first batch of results, newRunQuery manually registers the executor
+         * with ClientCursor.  Certain query execution paths, namely $where, can throw an exception.
+         * If we fail to deregister the executor, we will call invalidate/kill on the
+         * still-registered-yet-deleted executor.
+         *
+         * For any subsequent calls to getMore, the executor is already registered with ClientCursor
+         * by virtue of being cached, so this exception-proofing is not required.
+         */
+        struct ScopedExecutorRegistration {
+            ScopedExecutorRegistration(PlanExecutor* exec);
+            ~ScopedExecutorRegistration();
+
+            PlanExecutor* const _exec;
+        };
+
         /**
          * Initialize the namespace using either the canonical query or the collection.
          */
         void initNs();
+
+        // The OperationContext that we're executing within.  We need this in order to release
+        // locks.
+        OperationContext* _opCtx;
 
         // Collection over which this plan executor runs. Used to resolve record ids retrieved by
         // the plan stages. The collection must not be destroyed while there are active plans.
@@ -271,6 +341,10 @@ namespace mongo {
         // Did somebody drop an index we care about or the namespace we're looking at?  If so,
         // we'll be killed.
         bool _killed;
+
+        // If the yield policy is YIELD_AUTO, this is used to enforce automatic yielding. The plan
+        // may yield on any call to getNext() if this is non-NULL.
+        boost::scoped_ptr<PlanYieldPolicy> _yieldPolicy;
     };
 
 }  // namespace mongo

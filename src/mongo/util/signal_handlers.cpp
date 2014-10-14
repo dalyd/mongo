@@ -26,6 +26,8 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/util/signal_handlers.h"
@@ -44,6 +46,7 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/exit_code.h"
 #include "mongo/util/log.h"
+#include "mongo/util/quick_exit.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/signal_handlers_synchronous.h"
 #include "mongo/util/signal_win32.h"
@@ -174,7 +177,7 @@ namespace {
                 break;
             case SIGQUIT:
                 log() << "Received SIGQUIT; terminating.";
-                _exit(EXIT_ABRUPT);
+                quickExit(EXIT_ABRUPT);
             default:
                 // interrupt/terminate signal
                 log() << "got signal " << actualSignal << " (" << strsignal( actualSignal )

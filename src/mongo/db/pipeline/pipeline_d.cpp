@@ -26,7 +26,7 @@
  * it in the license file.
  */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/pipeline/pipeline_d.h"
 
@@ -63,8 +63,8 @@ namespace {
         }
 
         bool isCapped(const NamespaceString& ns) {
-            Client::ReadContext ctx(_ctx->opCtx, ns.ns());
-            Collection* collection = ctx.ctx().db()->getCollection(_ctx->opCtx, ns);
+            AutoGetCollectionForRead ctx(_ctx->opCtx, ns.ns());
+            Collection* collection = ctx.getCollection();
             return collection && collection->isCapped();
         }
 
@@ -74,14 +74,13 @@ namespace {
     };
 }
 
-    boost::shared_ptr<PlanExecutor> PipelineD::prepareCursorSource(
+    shared_ptr<PlanExecutor> PipelineD::prepareCursorSource(
             OperationContext* txn,
             Collection* collection,
             const intrusive_ptr<Pipeline>& pPipeline,
             const intrusive_ptr<ExpressionContext>& pExpCtx) {
         // get the full "namespace" name
         const string& fullName = pExpCtx->ns.ns();
-        pExpCtx->opCtx->lockState()->assertAtLeastReadLocked(fullName);
 
         // We will be modifying the source vector as we go
         Pipeline::SourceContainer& sources = pPipeline->sources;
@@ -209,7 +208,10 @@ namespace {
         }
 
 
-        // DocumentSourceCursor expects a yielding PlanExecutor that has had its state saved.
+        // DocumentSourceCursor expects a yielding PlanExecutor that has had its state saved. We
+        // pass "false" here to indicate that the PlanExecutor should not register itself: instead
+        // the output PlanExecutor will get registered with a ClientCursor.
+        exec->setYieldPolicy(PlanExecutor::YIELD_AUTO, false);
         exec->saveState();
 
         // Put the PlanExecutor into a DocumentSourceCursor and add it to the front of the pipeline.

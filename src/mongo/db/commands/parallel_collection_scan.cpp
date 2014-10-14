@@ -74,11 +74,9 @@ namespace mongo {
 
             NamespaceString ns( dbname, cmdObj[name].String() );
 
-            Client::ReadContext ctx(txn, ns.ns());
+            AutoGetCollectionForRead ctx(txn, ns.ns());
 
-            Database* db = ctx.ctx().db();
-            Collection* collection = db->getCollection( txn, ns );
-
+            Collection* collection = ctx.getCollection();
             if ( !collection )
                 return appendCommandStatus( result,
                                             Status( ErrorCodes::NamespaceNotFound,
@@ -105,7 +103,17 @@ namespace mongo {
                 WorkingSet* ws = new WorkingSet();
                 MultiIteratorStage* mis = new MultiIteratorStage(txn, ws, collection);
                 // Takes ownership of 'ws' and 'mis'.
-                execs.push_back(new PlanExecutor(ws, mis, collection));
+                auto_ptr<PlanExecutor> curExec(new PlanExecutor(txn, ws, mis, collection));
+
+                // Each of the plan executors should yield automatically. We pass "false" to
+                // indicate that 'curExec' should not register itself, as it will get registered
+                // by ClientCursor instead.
+                curExec->setYieldPolicy(PlanExecutor::YIELD_AUTO, false);
+
+                // Need to save state while yielding locks between now and newGetMore.
+                curExec->saveState();
+
+                execs.push_back(curExec.release());
             }
 
             // transfer iterators to executors using a round-robin distribution.

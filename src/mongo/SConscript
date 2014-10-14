@@ -21,6 +21,7 @@ env.InjectMongoIncludePaths()
 
 env.SConscript(['base/SConscript',
                 'crypto/SConscript',
+                'crypto/tom/SConscript',
                 'db/auth/SConscript',
                 'db/catalog/SConscript',
                 'db/commands/SConscript',
@@ -34,7 +35,9 @@ env.SConscript(['base/SConscript',
                 'db/repl/SConscript',
                 'db/sorter/SConscript',
                 'db/storage/SConscript',
+                'db/storage/devnull/SConscript',
                 'db/storage/heap1/SConscript',
+                'db/storage/kv/SConscript',
                 'db/storage/mmap_v1/SConscript',
                 'db/storage/rocks/SConscript',
                 'db/SConscript',
@@ -603,6 +606,7 @@ serverOnlyFiles = [ "db/background.cpp",
                     "db/commands/pipeline_command.cpp",
                     "db/commands/plan_cache_commands.cpp",
                     "db/commands/rename_collection.cpp",
+                    "db/commands/repair_cursor.cpp",
                     "db/commands/test_commands.cpp",
                     "db/commands/validate.cpp",
                     "db/commands/write_commands/batch_executor.cpp",
@@ -677,6 +681,7 @@ serverOnlyFiles = [ "db/background.cpp",
                     "db/repl/sync_tail.cpp",
                     "db/repl/write_concern.cpp",
                     "db/startup_warnings_mongod.cpp",
+                    "db/stats/lock_server_status_section.cpp",
                     "db/stats/range_deleter_server_status.cpp",
                     "db/stats/snapshots.cpp",
                     "db/stats/top.cpp",
@@ -692,7 +697,8 @@ serverOnlyFiles = [ "db/background.cpp",
                     "util/alignedbuilder.cpp",
                     "util/compress.cpp",
                     "util/elapsed_tracker.cpp",
-                    "util/logfile.cpp", ]
+                    "util/logfile.cpp",
+                ]
 
 # This library exists because some libraries, such as our networking library, need access to server
 # options, but not to the helpers to set them from the command line.  libserver_options_core.a just
@@ -726,6 +732,11 @@ env.Library('stacktrace',
                      'stringutils',
                      'version',
                      '$BUILD_DIR/mongo/base/base'])
+
+env.Library(target='quick_exit',
+            source=[
+                'util/quick_exit.cpp',
+            ])
 
 env.Library('coreshard', [# This is only here temporarily for auto-split logic in chunk.cpp.
                           's/balancer_policy.cpp',
@@ -921,6 +932,7 @@ serveronlyLibdeps = ["coreshard",
                      "db/repl/repl_coordinator_global",
                      "db/repl/replication_executor",
                      "db/repl/rslog",
+                     'db/storage/devnull/storage_devnull',
                      'db/storage/mmap_v1/storage_mmapv1',
                      'db/storage/heap1/storage_heap1',
                      'mmap',
@@ -963,7 +975,8 @@ env.Library("mongodwebserver",
              ],
             LIBDEPS=["coredb", "mongodandmongos"])
 
-mongodOnlyFiles = [ "db/db.cpp", "db/commands/touch.cpp", "db/mongod_options_init.cpp" ]
+mongodOnlyFiles = [ "db/db.cpp", "db/commands/touch.cpp", "db/mongod_options_init.cpp",
+                    "db/repl/replication_initializer_${MONGO_REPL_IMPL}.cpp", ]
 
 # ----- TARGETS ------
 
@@ -1001,54 +1014,19 @@ mongod = env.Install(
 Default( mongod )
 
 # tools
-allToolFiles = ["tools/tool.cpp",
-                "tools/stat_util.cpp",
-                "tools/tool_logger.cpp"]
-env.Library("tool_options", "tools/tool_options.cpp",
-            LIBDEPS=["server_options",
-                     "$BUILD_DIR/mongo/util/options_parser/options_parser_init",
-                     "serveronly",
-                     "coreserver",
-                     "coredb",
-                     ])
-env.Library("alltools",
-            allToolFiles,
-            LIBDEPS=["serveronly",
-                     "coreserver",
-                     "coredb",
-                     "signal_handlers",
-                     "$BUILD_DIR/mongo/util/options_parser/options_parser",
-                     "$BUILD_DIR/mongo/db/auth/authmocks",
-                     "$BUILD_DIR/mongo/db/auth/authmongod",
-                     "$BUILD_DIR/mongo/db/repl/repl_coordinator_global",
-                     "$BUILD_DIR/mongo/db/repl/replmocks"])
-
-normalTools = [ "dump", "restore", "export", "import", "shim", "stat", "top", "oplog" ]
 rewrittenTools = [ "mongodump", "mongorestore", "mongoexport", "mongoimport", "mongostat", "mongotop", "bsondump", "mongofiles", "mongooplog" ]
-env.Alias( "tools", [ "#/${PROGPREFIX}mongo" + name + "${PROGSUFFIX}" for name in normalTools ] )
-for name in normalTools:
-    env.Install( '#/', env.Program("mongo" + name,
-                                   ["tools/" + name + ".cpp", "tools/mongo" + name + "_options_init.cpp"],
-                                   LIBDEPS=["alltools", "mongo" + name + "_options"]) )
-    env.Library("mongo" + name + "_options", ["tools/mongo" + name + "_options.cpp"],
-                LIBDEPS=['tool_options'])
 
 #some special tools
-env.Library("mongofiles_options", ["tools/mongofiles_options.cpp"],
-            LIBDEPS=['tool_options'])
-env.Library("bsondump_options", ["tools/bsondump_options.cpp"],
-            LIBDEPS=['tool_options'])
 env.Library("mongobridge_options", ["tools/mongobridge_options.cpp"],
             LIBDEPS = [
-                'tool_options',
+                'serveronly',
+                'coreserver',
+                'coredb',
                 'signal_handlers_synchronous',
+                '$BUILD_DIR/mongo/util/options_parser/options_parser_init',
             ])
 
 env.Install( '#/', [
-        env.Program( "mongofiles", ["tools/files.cpp", "tools/mongofiles_options_init.cpp"],
-                     LIBDEPS=["alltools", "gridfs", "mongofiles_options"] ),
-        env.Program( "bsondump", ["tools/bsondump.cpp", "tools/bsondump_options_init.cpp"],
-                     LIBDEPS=["alltools", "bsondump_options"]),
         env.Program( "mongobridge", ["tools/bridge.cpp", "tools/mongobridge_options_init.cpp"],
                      LIBDEPS=["serveronly", "coredb", "mongobridge_options"] ),
         env.Program( "mongoperf", "client/examples/mongoperf.cpp",
@@ -1182,6 +1160,8 @@ env.JSHeader(
                 "shell/bulk_api.js",
                 "shell/collection.js",
                 "shell/db.js",
+                "shell/explain_query.js",
+                "shell/explainable.js",
                 "shell/mongo.js",
                 "shell/mr.js",
                 "shell/query.js",
@@ -1289,18 +1269,12 @@ def installExternalBinary( e, name ):
     if nix:
         e.AddPostAction( inst, 'chmod 755 $TARGET' )
 
-if has_option("use-new-tools"):
-    for t in rewrittenTools:
-        installExternalBinary(env, "src/mongo-tools/" + t)
+for t in rewrittenTools:
+    installExternalBinary(env, "src/mongo-tools/" + t)
 
-    # old tools + tools not rewritten yet
-    for t in ["mongoperf", "mongoshim"]:
-        installBinary( env, t )
-        env.Alias("tools", '#/' + add_exe(t))
-else:
-    for t in ["mongo" + x for x in normalTools] + ["mongofiles", "bsondump", "mongoperf" ]:
-        installBinary( env, t )
-        env.Alias("tools", '#/' + add_exe(t))
+# old tools
+installBinary(env, "mongoperf")
+env.Alias("tools", '#/' + add_exe("mongoperf"))
 
 env.Alias("tools", "#/" + add_exe("perftest"))
 env.Alias("tools", "#/" + add_exe("mongobridge"))

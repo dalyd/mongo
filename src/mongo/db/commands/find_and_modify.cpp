@@ -97,10 +97,7 @@ namespace mongo {
                 return false;
             }
 
-            Lock::DBLock dbXLock(txn->lockState(), dbname, newlm::MODE_X);
-            Client::Context ctx(txn, ns);
-            
-            return runNoDirectClient( txn, ns , 
+            return runNoDirectClient( txn, ns ,
                                       query , fields , update , 
                                       upsert , returnNew , remove , 
                                       result , errmsg );
@@ -137,11 +134,8 @@ namespace mongo {
                                       BSONObjBuilder& result,
                                       string& errmsg) {
 
-            Lock::DBLock lk(txn->lockState(), nsToDatabaseSubstring(ns), newlm::MODE_X);
-            WriteUnitOfWork wunit(txn);
-            Client::Context cx(txn, ns);
-            
-            Collection* collection = cx.db()->getCollection( txn, ns );
+            Client::WriteContext cx(txn, ns);
+            Collection* collection = cx.getCollection();
 
             const WhereCallbackReal whereCallback = WhereCallbackReal(txn, StringData(ns));
 
@@ -156,11 +150,8 @@ namespace mongo {
                 massert(17384, "Could not get plan executor for query " + queryOriginal.toString(),
                         getExecutor(txn, collection, cq, &rawExec, QueryPlannerParams::DEFAULT).isOK());
 
-                auto_ptr<PlanExecutor> exec(rawExec);
-
-                // We need to keep this PlanExecutor registration: we are concurrently modifying
-                // state and may continue doing that with document-level locking (approach is TBD).
-                const ScopedExecutorRegistration safety(exec.get());
+                scoped_ptr<PlanExecutor> exec(rawExec);
+                exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
 
                 PlanExecutor::ExecState state;
                 if (PlanExecutor::ADVANCED == (state = exec->getNext(&doc, NULL))) {
@@ -265,7 +256,7 @@ namespace mongo {
 
                     if ( !collection ) {
                         // collection created by an upsert
-                        collection = cx.db()->getCollection( txn, ns );
+                        collection = cx.getCollection();
                     }
 
                     LOG(3) << "update result: "  << res ;
@@ -303,7 +294,7 @@ namespace mongo {
                     
                 }
             }
-            wunit.commit();
+            cx.commit();
             return true;
         }
         
@@ -335,7 +326,7 @@ namespace mongo {
                 }
             }
 
-            Lock::DBLock dbXLock(txn->lockState(), dbname, newlm::MODE_X);
+            Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
             WriteUnitOfWork wunit(txn);
             Client::Context ctx(txn, ns);
 

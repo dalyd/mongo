@@ -334,7 +334,7 @@ namespace mongo {
                 // harmless, this would lead to a scary looking warning on the secondaries.
                 Lock::DBLock lk(_txn->lockState(),
                                 nsToDatabaseSubstring(_config.incLong),
-                                newlm::MODE_X);
+                                MODE_X);
                 if (Database* db = dbHolder().get(_txn, _config.incLong)) {
                     WriteUnitOfWork wunit(_txn);
                     db->dropCollection(_txn, _config.incLong);
@@ -358,13 +358,13 @@ namespace mongo {
                 // Create the inc collection and make sure we have index on "0" key.
                 // Intentionally not replicating the inc collection to secondaries.
                 Client::WriteContext incCtx(_txn, _config.incLong);
-                Collection* incColl = incCtx.ctx().db()->getCollection( _txn, _config.incLong );
+                Collection* incColl = incCtx.getCollection();
                 invariant(!incColl);
 
                 CollectionOptions options;
                 options.setNoIdIndex();
                 options.temp = true;
-                incColl = incCtx.ctx().db()->createCollection( _txn, _config.incLong, options );
+                incColl = incCtx.db()->createCollection(_txn, _config.incLong, options);
                 invariant(incColl);
 
                 BSONObj indexSpec = BSON( "key" << BSON( "0" << 1 ) << "ns" << _config.incLong
@@ -383,8 +383,7 @@ namespace mongo {
             {
                 // copy indexes into temporary storage
                 Client::WriteContext finalCtx(_txn, _config.outputOptions.finalNamespace);
-                Collection* finalColl =
-                    finalCtx.ctx().db()->getCollection(_txn, _config.outputOptions.finalNamespace);
+                Collection* const finalColl = finalCtx.getCollection();
                 if ( finalColl ) {
                     IndexCatalog::IndexIterator ii =
                         finalColl->getIndexCatalog()->getIndexIterator( _txn, true );
@@ -415,14 +414,12 @@ namespace mongo {
                 uassert(ErrorCodes::NotMaster, "no longer master", 
                         repl::getGlobalReplicationCoordinator()->
                         canAcceptWritesForDatabase(nsToDatabase(_config.tempNamespace.c_str())));
-                Collection* tempColl = tempCtx.ctx().db()->getCollection( _txn, _config.tempNamespace );
+                Collection* tempColl = tempCtx.getCollection();
                 invariant(!tempColl);
 
                 CollectionOptions options;
                 options.temp = true;
-                tempColl = tempCtx.ctx().db()->createCollection(_txn,
-                                                                _config.tempNamespace,
-                                                                options);
+                tempColl = tempCtx.db()->createCollection(_txn, _config.tempNamespace, options);
 
                 // Log the createCollection operation.
                 BSONObjBuilder b;
@@ -597,7 +594,7 @@ namespace mongo {
                 while (cursor->more()) {
                     Lock::DBLock lock(_txn->lockState(),
                                       nsToDatabaseSubstring(_config.outputOptions.finalNamespace),
-                                      newlm::MODE_X);
+                                      MODE_X);
                     WriteUnitOfWork wunit(_txn);
                     BSONObj o = cursor->nextSafe();
                     Helpers::upsert( _txn, _config.outputOptions.finalNamespace , o );
@@ -666,7 +663,7 @@ namespace mongo {
             uassert(ErrorCodes::NotMaster, "no longer master", 
                     repl::getGlobalReplicationCoordinator()->
                     canAcceptWritesForDatabase(nsToDatabase(ns.c_str())));
-            Collection* coll = getCollectionOrUassert(ctx.ctx().db(), ns);
+            Collection* coll = getCollectionOrUassert(ctx.db(), ns);
 
             class BSONObjBuilder b;
             if ( !o.hasField( "_id" ) ) {
@@ -689,7 +686,7 @@ namespace mongo {
             verify( _onDisk );
 
             Client::WriteContext ctx(_txn,  _config.incLong );
-            Collection* coll = getCollectionOrUassert(ctx.ctx().db(), _config.incLong);
+            Collection* coll = getCollectionOrUassert(ctx.db(), _config.incLong);
             coll->insertDocument( _txn, o, true );
             ctx.commit();
         }
@@ -968,7 +965,7 @@ namespace mongo {
 
             {
                 Client::WriteContext incCtx(_txn, _config.incLong );
-                Collection* incColl = getCollectionOrUassert(incCtx.ctx().db(), _config.incLong );
+                Collection* incColl = getCollectionOrUassert(incCtx.db(), _config.incLong );
 
                 bool foundIndex = false;
                 IndexCatalog::IndexIterator ii =
@@ -987,7 +984,7 @@ namespace mongo {
                 verify( foundIndex );
             }
 
-            scoped_ptr<Client::ReadContext> ctx(new Client::ReadContext(_txn, _config.incLong));
+            scoped_ptr<AutoGetCollectionForRead> ctx(new AutoGetCollectionForRead(_txn, _config.incLong));
 
             BSONObj prev;
             BSONList all;
@@ -1008,17 +1005,11 @@ namespace mongo {
                                                 whereCallback).isOK());
 
             PlanExecutor* rawExec;
-            verify(getExecutor(_txn, getCollectionOrUassert(ctx->ctx().db(), _config.incLong),
+            verify(getExecutor(_txn, getCollectionOrUassert(ctx->getDb(), _config.incLong),
                                cq, &rawExec, QueryPlannerParams::NO_TABLE_SCAN).isOK());
 
-            auto_ptr<PlanExecutor> exec(rawExec);
-
-            // This registration is necessary because we may manually yield the read lock
-            // below (in order to acquire a write lock and dump some data to a temporary
-            // collection).
-            //
-            // TODO: don't do this in the future.
-            const ScopedExecutorRegistration safety(exec.get());
+            scoped_ptr<PlanExecutor> exec(rawExec);
+            exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
 
             // iterate over all sorted objects
             BSONObj o;
@@ -1043,7 +1034,7 @@ namespace mongo {
                 // reduce a finalize array
                 finalReduce( all );
 
-                ctx.reset(new Client::ReadContext(_txn, _config.incLong));
+                ctx.reset(new AutoGetCollectionForRead(_txn, _config.incLong));
 
                 all.clear();
                 prev = o;
@@ -1059,7 +1050,7 @@ namespace mongo {
             ctx.reset();
             // reduce and finalize last array
             finalReduce( all );
-            ctx.reset(new Client::ReadContext(_txn, _config.incLong));
+            ctx.reset(new AutoGetCollectionForRead(_txn, _config.incLong));
 
             pm.finished();
         }
@@ -1116,7 +1107,7 @@ namespace mongo {
 
             Lock::DBLock kl(_txn->lockState(),
                             nsToDatabaseSubstring(_config.incLong),
-                            newlm::MODE_X);
+                            MODE_X);
             WriteUnitOfWork wunit(_txn);
 
             for ( InMemory::iterator i=_temp->begin(); i!=_temp->end(); i++ ) {
@@ -1276,10 +1267,12 @@ namespace mongo {
                 // Prevent sharding state from changing during the MR.
                 auto_ptr<RangePreserver> rangePreserver;
                 {
-                    Client::ReadContext ctx(txn, config.ns);
-                    Collection* collection = ctx.ctx().db()->getCollection( txn, config.ns );
-                    if ( collection )
+                    AutoGetCollectionForRead ctx(txn, config.ns);
+
+                    Collection* collection = ctx.getCollection();
+                    if (collection) {
                         rangePreserver.reset(new RangePreserver(collection));
+                    }
 
                     // Get metadata before we check our version, to make sure it doesn't increment
                     // in the meantime.  Need to do this in the same lock scope as the block.
@@ -1338,14 +1331,11 @@ namespace mongo {
                     {
                         // We've got a cursor preventing migrations off, now re-establish our useful cursor
 
-                        // Need lock and context to use it
-                        scoped_ptr<Lock::DBRead> lock(new Lock::DBRead(txn->lockState(), config.ns));
-
-                        // This context does no version check, safe b/c we checked earlier and have an
-                        // open cursor
-                        scoped_ptr<Client::Context> ctx(new Client::Context(txn, config.ns, false));
-
                         const NamespaceString nss(config.ns);
+
+                        // Need lock and context to use it
+                        scoped_ptr<Lock::DBRead> lock(new Lock::DBRead(txn->lockState(), nss.db()));
+
                         const WhereCallbackReal whereCallback(txn, nss.db());
 
                         CanonicalQuery* cq;
@@ -1359,18 +1349,19 @@ namespace mongo {
                             return 0;
                         }
 
+                        Database* db = dbHolder().get(txn, nss.db());
+                        invariant(db);
+
                         PlanExecutor* rawExec;
-                        if (!getExecutor(txn, state.getCollectionOrUassert(ctx->db(), config.ns),
+                        if (!getExecutor(txn, state.getCollectionOrUassert(db, config.ns),
                                          cq, &rawExec).isOK()) {
                             uasserted(17239, "Can't get executor for query "
                                              + config.filter.toString());
                             return 0;
                         }
 
-                        auto_ptr<PlanExecutor> exec(rawExec);
-
-                        // XXX: is this registration necessary?
-                        const ScopedExecutorRegistration safety(exec.get());
+                        scoped_ptr<PlanExecutor> exec(rawExec);
+                        exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
 
                         Timer mt;
 
@@ -1402,12 +1393,21 @@ namespace mongo {
                                 // TODO: As an optimization, we might want to do the save/restore
                                 // state and yield inside the reduceAndSpillInMemoryState method, so
                                 // it only happens if necessary.
-                                ctx.reset();
                                 lock.reset();
                                 state.reduceAndSpillInMemoryStateIfNeeded();
-                                lock.reset(new Lock::DBRead(txn->lockState(), config.ns));
+                                lock.reset(new Lock::DBRead(txn->lockState(), nss.db()));
 
-                                ctx.reset(new Client::Context(txn, config.ns, false));
+                                // Need to reload the database, in case it was dropped after we
+                                // released the lock
+                                db = dbHolder().get(txn, nss.db());
+                                if (db == NULL) {
+                                    // Database was deleted after we freed the lock
+                                    StringBuilder sb;
+                                    sb << "Database "
+                                       << nss.db()
+                                       << " was deleted in the middle of the reduce job.";
+                                    uasserted(28523, sb.str());
+                                }
 
                                 reduceTime += t.micros();
 

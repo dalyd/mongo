@@ -37,6 +37,7 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/collection_scan.h"
 #include "mongo/db/exec/plan_stage.h"
+#include "mongo/db/global_environment_experiment.h"
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/operation_context_impl.h"
@@ -80,7 +81,7 @@ namespace ExecutorRegistry {
             CanonicalQuery* cq;
             ASSERT(CanonicalQuery::canonicalize(ns(), BSONObj(), &cq).isOK());
             // Owns all args
-            return new PlanExecutor(ws.release(), scan.release(), cq,
+            return new PlanExecutor(&_opCtx, ws.release(), scan.release(), cq,
                                     _ctx->ctx().db()->getCollection( &_opCtx, ns() ));
         }
 
@@ -111,6 +112,10 @@ namespace ExecutorRegistry {
     class ExecutorRegistryDiskLocInvalid : public ExecutorRegistryBase {
     public:
         void run() {
+            if ( supportsDocLocking() ) {
+                return;
+            }
+
             auto_ptr<PlanExecutor> run(getCollscan());
             BSONObj obj;
 

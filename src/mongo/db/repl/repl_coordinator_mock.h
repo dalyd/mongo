@@ -58,6 +58,8 @@ namespace repl {
 
         virtual MemberState getCurrentMemberState() const;
 
+        virtual Seconds getSlaveDelaySecs() const;
+
         virtual void clearSyncSourceBlacklist();
 
         virtual ReplicationCoordinator::StatusAndDuration awaitReplication(
@@ -103,7 +105,7 @@ namespace repl {
 
         virtual int getMyId() const;
 
-        virtual void setFollowerMode(const MemberState& newState);
+        virtual bool setFollowerMode(const MemberState& newState);
 
         virtual bool isWaitingForApplierToDrain();
 

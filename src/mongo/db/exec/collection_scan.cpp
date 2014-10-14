@@ -26,11 +26,14 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kQuery
+
 #include "mongo/db/exec/collection_scan.h"
 
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/exec/filter.h"
+#include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/util/fail_point_service.h"

@@ -30,6 +30,7 @@
 
 #include "mongo/db/pipeline/document_source.h"
 
+#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/instance.h"
 #include "mongo/db/pipeline/document.h"
@@ -79,8 +80,8 @@ namespace mongo {
 
         // We have already validated the sharding version when we constructed the PlanExecutor
         // so we shouldn't check it again.
-        Lock::DBRead lk(pExpCtx->opCtx->lockState(), _ns);
-        Client::Context ctx(pExpCtx->opCtx, _ns, /*doVersion=*/false);
+        const NamespaceString nss(_ns);
+        AutoGetCollectionForRead autoColl(pExpCtx->opCtx, nss);
 
         _exec->restoreState(pExpCtx->opCtx);
 
@@ -159,13 +160,15 @@ namespace mongo {
         BSONObjBuilder explainBuilder;
         Status explainStatus(ErrorCodes::InternalError, "");
         {
-            Lock::DBRead lk(pExpCtx->opCtx->lockState(), _ns);
-            Client::Context ctx(pExpCtx->opCtx, _ns, /*doVersion=*/ false);
+            const NamespaceString nss(_ns);
+            AutoGetCollectionForRead autoColl(pExpCtx->opCtx, nss);
 
             massert(17392, "No _exec. Were we disposed before explained?", _exec);
 
             _exec->restoreState(pExpCtx->opCtx);
-            explainStatus = Explain::explainStages(_exec.get(), ExplainCommon::QUERY_PLANNER,
+            explainStatus = Explain::explainStages(pExpCtx->opCtx,
+                                                   _exec.get(),
+                                                   ExplainCommon::QUERY_PLANNER,
                                                    &explainBuilder);
             _exec->saveState();
         }

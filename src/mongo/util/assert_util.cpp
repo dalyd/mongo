@@ -27,6 +27,8 @@
  *    then also delete it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/util/assert_util.h"
@@ -41,6 +43,7 @@ using namespace std;
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/log.h"
+#include "mongo/util/quick_exit.h"
 #include "mongo/util/stacktrace.h"
 
 namespace mongo {
@@ -156,7 +159,7 @@ namespace mongo {
         log() << "Fatal Assertion " << msgid << endl;
         breakpoint();
         log() << "\n\n***aborting after fassert() failure\n\n" << endl;
-        ::_exit(EXIT_ABRUPT); // bypass our handler for SIGABRT, which prints a stack trace.
+        quickExit(EXIT_ABRUPT); // bypass our handler for SIGABRT, which prints a stack trace.
     }
 
     MONGO_COMPILER_NORETURN void fassertFailedWithStatus(int msgid, const Status& status) {

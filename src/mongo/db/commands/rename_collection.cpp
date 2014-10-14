@@ -30,6 +30,7 @@
 
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_catalog_entry.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_create.h"
 #include "mongo/db/commands.h"
@@ -139,6 +140,12 @@ namespace mongo {
                 }
             }
 
+            if (NamespaceString(source).coll() == "system.indexes"
+                || NamespaceString(target).coll() == "system.indexes") {
+                errmsg = "renaming system.indexes is not allowed";
+                return false;
+            }
+
             Database* const sourceDB = dbHolder().get(txn, nsToDatabase(source));
             Collection* const sourceColl = sourceDB ? sourceDB->getCollection(txn, source)
                                                     : NULL;
@@ -177,8 +184,7 @@ namespace mongo {
             // Dismissed on success
             ScopeGuard indexBuildRestorer = MakeGuard(IndexBuilder::restoreIndexes, indexesInProg);
 
-            bool unused;
-            Database* const targetDB = dbHolder().getOrCreate(txn, nsToDatabase(target), unused);
+            Database* const targetDB = dbHolder().openDb(txn, nsToDatabase(target));
 
             {
                 WriteUnitOfWork wunit(txn);
@@ -230,9 +236,12 @@ namespace mongo {
                 options.setNoIdIndex();
 
                 if (sourceColl->isCapped()) {
-                    // TODO stop assuming storageSize == cappedSize
+                    const CollectionOptions sourceOpts =
+                        sourceColl->getCatalogEntry()->getCollectionOptions(txn);
+
                     options.capped = true;
-                    options.cappedSize = sourceColl->getRecordStore()->storageSize(txn);
+                    options.cappedSize = sourceOpts.cappedSize;
+                    options.cappedMaxDocs = sourceOpts.cappedMaxDocs;
                 }
 
                 WriteUnitOfWork wunit(txn);

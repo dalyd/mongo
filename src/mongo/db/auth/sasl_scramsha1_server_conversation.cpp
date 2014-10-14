@@ -26,18 +26,16 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kAccessControl
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/auth/sasl_scramsha1_server_conversation.h"
 
 #include <boost/algorithm/string/join.hpp>
 #include <boost/algorithm/string/replace.hpp>
-#ifdef MONGO_SSL
-#include <openssl/sha.h>
-#include <openssl/evp.h>
-#include <openssl/hmac.h>
-#endif
 
+#include "mongo/crypto/crypto.h"
 #include "mongo/crypto/mechanism_scram.h"
 #include "mongo/platform/random.h"
 #include "mongo/util/base64.h"
@@ -97,10 +95,6 @@ namespace mongo {
      */
     StatusWith<bool> SaslSCRAMSHA1ServerConversation::_firstStep(std::vector<string>& input,
                                                                  std::string* outputData) {
-#ifndef MONGO_SSL
-        return StatusWith<bool>(ErrorCodes::InternalError,
-            "The server is not compiled with SSL support");
-#else
         std::string authzId = "";
 
         if (input.size() == 4) {
@@ -167,10 +161,10 @@ namespace mongo {
         // Generate SCRAM credentials on the fly for mixed MONGODB-CR/SCRAM mode.
         if (_creds.scram.salt.empty() && !_creds.password.empty()) {
             BSONObj scramCreds = scram::generateCredentials(_creds.password);
-            _creds.scram.iterationCount = scramCreds["iterationCount"].Int();
-            _creds.scram.salt = scramCreds["salt"].String();
-            _creds.scram.storedKey = scramCreds["storedKey"].String();
-            _creds.scram.serverKey = scramCreds["serverKey"].String();
+            _creds.scram.iterationCount = scramCreds[scram::iterationCountFieldName].Int();
+            _creds.scram.salt = scramCreds[scram::saltFieldName].String();
+            _creds.scram.storedKey = scramCreds[scram::storedKeyFieldName].String();
+            _creds.scram.serverKey = scramCreds[scram::serverKeyFieldName].String();
         }
 
         // Generate server-first-message
@@ -196,7 +190,6 @@ namespace mongo {
         _authMessage += *outputData + ",";
 
         return StatusWith<bool>(false);
-#endif // MONGO_SSL
     }
 
     /**
@@ -213,10 +206,6 @@ namespace mongo {
     **/
     StatusWith<bool> SaslSCRAMSHA1ServerConversation::_secondStep(const std::vector<string>& input,
                                                                   std::string* outputData) {
-#ifndef MONGO_SSL
-        return StatusWith<bool>(ErrorCodes::InternalError,
-            "The server is not compiled with SSL support");
-#else
         if (input.size() != 3) {
             return StatusWith<bool>(ErrorCodes::BadValue, mongoutils::str::stream() <<
                 "Incorrect number of arguments for second SCRAM-SHA-1 client message, got " <<
@@ -247,7 +236,7 @@ namespace mongo {
         }
 
         std::string clientProof = input[2].substr(2);
-
+        
         // Do server side computations, compare storedKeys and generate client-final-message
         // AuthMessage     := client-first-message-bare + "," +
         //                    server-first-message + "," +
@@ -261,7 +250,7 @@ namespace mongo {
 
         std::string decodedStoredKey = base64::decode(_creds.scram.storedKey);
         // ClientSignature := HMAC(StoredKey, AuthMessage)
-        fassert(18662, HMAC(EVP_sha1(),
+        fassert(18662, crypto::hmacSha1(
                             reinterpret_cast<const unsigned char*>(decodedStoredKey.c_str()),
                             scram::hashSize,
                             reinterpret_cast<const unsigned char*>(_authMessage.c_str()),
@@ -288,7 +277,7 @@ namespace mongo {
 
         // StoredKey := H(ClientKey)
         unsigned char computedStoredKey[scram::hashSize];
-        fassert(18659, SHA1(clientKey, scram::hashSize, computedStoredKey));
+        fassert(18659, crypto::sha1(clientKey, scram::hashSize, computedStoredKey));
 
         if (memcmp(decodedStoredKey.c_str(), computedStoredKey, scram::hashSize) != 0) {
             return StatusWith<bool>(ErrorCodes::AuthenticationFailed,
@@ -299,7 +288,7 @@ namespace mongo {
         // ServerSignature := HMAC(ServerKey, AuthMessage)
         unsigned char serverSignature[scram::hashSize];
         std::string decodedServerKey = base64::decode(_creds.scram.serverKey);
-        fassert(18660, HMAC(EVP_sha1(),
+        fassert(18660, crypto::hmacSha1(
                             reinterpret_cast<const unsigned char*>(decodedServerKey.c_str()),
                             scram::hashSize,
                             reinterpret_cast<const unsigned char*>(_authMessage.c_str()),
@@ -314,6 +303,5 @@ namespace mongo {
         *outputData = sb.str();
 
         return StatusWith<bool>(false);
-#endif // MONGO_SSL
     }
 }  // namespace mongo

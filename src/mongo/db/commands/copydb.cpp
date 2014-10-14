@@ -150,6 +150,11 @@ namespace mongo {
                 return false;
             }
 
+            if ( !NamespaceString::validDBName( todb ) ) {
+                errmsg = "invalid todb name: " + todb;
+                return false;
+            }
+
             Cloner cloner;
             string username = cmdObj.getStringField( "username" );
             string nonce = cmdObj.getStringField( "nonce" );
@@ -188,7 +193,7 @@ namespace mongo {
                 return cloner.go(txn, todb, fromhost, cloneOptions, NULL, errmsg);
             }
 
-            Lock::DBLock lk (txn->lockState(), todb, newlm::MODE_X);
+            Lock::DBLock lk (txn->lockState(), todb, MODE_X);
             return cloner.go(txn, todb, fromhost, cloneOptions, NULL, errmsg);
         }
 

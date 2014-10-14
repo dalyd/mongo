@@ -26,6 +26,8 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kQuery
+
 #include "mongo/db/query/canonical_query.h"
 
 #include "mongo/db/jsobj.h"
@@ -331,6 +333,28 @@ namespace mongo {
     }
 
     // static
+    Status CanonicalQuery::canonicalize(const std::string& ns,
+                                        const BSONObj& query,
+                                        bool explain,
+                                        CanonicalQuery** out,
+                                        const MatchExpressionParser::WhereCallback& whereCallback) {
+        const BSONObj emptyObj;
+        return CanonicalQuery::canonicalize(ns,
+                                            query,
+                                            emptyObj, // sort
+                                            emptyObj, // projection
+                                            0, // skip
+                                            0, // limit
+                                            emptyObj, // hint
+                                            emptyObj, // min
+                                            emptyObj, // max
+                                            false, // snapshot
+                                            explain,
+                                            out,
+                                            whereCallback);
+    }
+
+    // static
     Status CanonicalQuery::canonicalize(const string& ns,
                                         const BSONObj& query,
                                         long long skip,
@@ -476,27 +500,28 @@ namespace mongo {
                                         bool explain,
                                         CanonicalQuery** out,
                                         const MatchExpressionParser::WhereCallback& whereCallback) {
-        LiteParsedQuery* lpq;
+        LiteParsedQuery* lpqRaw;
         // Pass empty sort and projection.
         BSONObj emptyObj;
         Status parseStatus = LiteParsedQuery::make(ns, skip, limit, 0, query, proj, sort,
-                                                   hint, minObj, maxObj, snapshot, explain, &lpq);
+                                                   hint, minObj, maxObj, snapshot, explain,
+                                                   &lpqRaw);
         if (!parseStatus.isOK()) {
             return parseStatus;
         }
+        auto_ptr<LiteParsedQuery> lpq(lpqRaw);
 
         // Build a parse tree from the BSONObj in the parsed query.
         StatusWithMatchExpression swme = 
                             MatchExpressionParser::parse(lpq->getFilter(), whereCallback);
         if (!swme.isOK()) {
-            delete lpq;
             return swme.getStatus();
         }
 
         // Make the CQ we'll hopefully return.
         auto_ptr<CanonicalQuery> cq(new CanonicalQuery());
         // Takes ownership of lpq and the MatchExpression* in swme.
-        Status initStatus = cq->init(lpq, whereCallback, swme.getValue());
+        Status initStatus = cq->init(lpq.release(), whereCallback, swme.getValue());
 
         if (!initStatus.isOK()) { return initStatus; }
         *out = cq.release();

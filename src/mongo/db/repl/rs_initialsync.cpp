@@ -84,7 +84,7 @@ namespace {
             options.syncIndexes = ! dataPass;
 
             // Make database stable
-            Lock::DBLock dbWrite(txn->lockState(), db, newlm::MODE_X);
+            Lock::DBLock dbWrite(txn->lockState(), db, MODE_X);
 
             if (!cloner.go(txn, db, host, options, NULL, err, &errCode)) {
                 log() << "initial sync: error while "
@@ -146,6 +146,8 @@ namespace {
 
         // apply till stopOpTime
         try {
+            LOG(2) << "Applying oplog entries from " << startOpTime.toStringPretty()
+                   << " until " << stopOpTime.toStringPretty();
             syncer.oplogApplication(ctx, stopOpTime);
         }
         catch (const DBException&) {
@@ -278,7 +280,8 @@ namespace {
         log() << "initial sync finishing up";
 
         {
-            Client::WriteContext cx(&txn, "local.");
+            AutoGetDb autodb(&txn, "local", MODE_X);
+            WriteUnitOfWork wunit(&txn);
             OpTime lastOpTimeWritten(getGlobalReplicationCoordinator()->getMyLastOptime());
             log() << "replSet set minValid=" << lastOpTimeWritten << rsLog;
 
@@ -289,7 +292,7 @@ namespace {
             // Clear the initial sync flag.
             clearInitialSyncFlag(&txn);
             BackgroundSync::get()->setInitialSyncRequestedFlag(false);
-            cx.commit();
+            wunit.commit();
         }
 
         // If we just cloned & there were no ops applied, we still want the primary to know where

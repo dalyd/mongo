@@ -28,10 +28,11 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
+
 #include "mongo/db/storage/mmap_v1/record_store_v1_base.h"
 
 #include "mongo/db/catalog/collection.h"
-#include "mongo/db/concurrency/lock_mgr.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/mmap_v1/extent.h"
 #include "mongo/db/storage/mmap_v1/extent_manager.h"
@@ -106,6 +107,15 @@ namespace mongo {
 
     RecordData RecordStoreV1Base::dataFor( OperationContext* txn, const DiskLoc& loc ) const {
         return recordFor(loc)->toRecordData();
+    }
+
+    bool RecordStoreV1Base::findRecord( OperationContext* txn,
+                                        const DiskLoc& loc, RecordData* rd ) const {
+        // this is a bit odd, as the semantics of using the storage engine imply it _has_ to be.
+        // And in fact we can't actually check.
+        // So we assume the best.
+        *rd = dataFor( txn, loc );
+        return true;
     }
 
     Record* RecordStoreV1Base::recordFor( const DiskLoc& loc ) const {
@@ -795,6 +805,7 @@ namespace mongo {
         if ( isCapped() ) {
             result->appendBool( "capped", true );
             result->appendNumber( "max", _details->maxCappedDocs() );
+            result->appendNumber( "maxSize", static_cast<long long>( storageSize( txn, NULL, 0 ) ) );
         }
     }
 

@@ -35,6 +35,7 @@
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/exec/filter.h"
 #include "mongo/db/exec/oplogstart.h"
 #include "mongo/db/exec/working_set_common.h"
@@ -184,8 +185,9 @@ namespace mongo {
         exhaust = false;
 
         // This is a read lock.
-        scoped_ptr<Client::ReadContext> ctx(new Client::ReadContext(txn, ns));
-        Collection* collection = ctx->ctx().db()->getCollection(txn, ns);
+        const NamespaceString nss(ns);
+        scoped_ptr<AutoGetCollectionForRead> ctx(new AutoGetCollectionForRead(txn, nss));
+        Collection* collection = ctx->getCollection();
         uassert( 17356, "collection dropped between getMore calls", collection );
 
         QLOG() << "Running getMore, cursorid: " << cursorid << endl;
@@ -196,7 +198,7 @@ namespace mongo {
         // reads are not okay.
         Status status = repl::getGlobalReplicationCoordinator()->checkCanServeReadsFor(
                 txn,
-                NamespaceString(ns),
+                nss,
                 true);
         uassertStatusOK(status);
 
@@ -308,6 +310,7 @@ namespace mongo {
                 && (queryOptions & QueryOption_AwaitData) && (pass < 1000)) {
                 // If the cursor is tailable we don't kill it if it's eof.  We let it try to get
                 // data some # of times first.
+                exec->saveState();
                 return 0;
             }
 
@@ -439,8 +442,7 @@ namespace mongo {
         OplogStart* stage = new OplogStart(txn, collection, tsExpr, oplogws);
 
         // Takes ownership of ws and stage.
-        auto_ptr<PlanExecutor> exec(new PlanExecutor(oplogws, stage, collection));
-        exec->registerExecInternalPlan();
+        scoped_ptr<PlanExecutor> exec(new PlanExecutor(txn, oplogws, stage, collection));
 
         // The stage returns a DiskLoc of where to start.
         DiskLoc startLoc;
@@ -469,7 +471,7 @@ namespace mongo {
         WorkingSet* ws = new WorkingSet();
         CollectionScan* cs = new CollectionScan(txn, params, ws, cq->root());
         // Takes ownership of 'ws', 'cs', and 'cq'.
-        *execOut = new PlanExecutor(ws, cs, autoCq.release(), collection);
+        *execOut = new PlanExecutor(txn, ws, cs, autoCq.release(), collection);
         return Status::OK();
     }
 
@@ -526,20 +528,15 @@ namespace mongo {
             return "";
         }
 
-        // This is a read lock.  We require this because if we're parsing a $where, the
-        // where-specific parsing code assumes we have a lock and creates execution machinery that
-        // requires it.
-        Client::ReadContext ctx(txn, q.ns);
-        Collection* collection = ctx.ctx().db()->getCollection( txn, ns );
+        const NamespaceString nss(q.ns);
 
         // Parse the qm into a CanonicalQuery.
         CanonicalQuery* cq;
         Status canonStatus = CanonicalQuery::canonicalize(
-                            q, &cq, WhereCallbackReal(txn, StringData(ctx.ctx().db()->name())));
+                                    q, &cq, WhereCallbackReal(txn, StringData(nss.db())));
         if (!canonStatus.isOK()) {
             uasserted(17287, str::stream() << "Can't canonicalize query: " << canonStatus.toString());
         }
-        verify(cq);
 
         QLOG() << "Running query:\n" << cq->toString();
         LOG(2) << "Running query: " << cq->toStringShort();
@@ -549,6 +546,13 @@ namespace mongo {
 
         // We use this a lot below.
         const LiteParsedQuery& pq = cq->getParsed();
+
+        AutoGetCollectionForRead ctx(txn, nss);
+
+        const int dbProfilingLevel = (ctx.getDb() != NULL) ? ctx.getDb()->getProfilingLevel() :
+                                                             serverGlobalParams.defaultProfile;
+
+        Collection* collection = ctx.getCollection();
 
         // We'll now try to get the query executor that will execute this query for us. There
         // are a few cases in which we know upfront which executor we should get and, therefore,
@@ -568,7 +572,7 @@ namespace mongo {
             EOFStage* eofStage = new EOFStage();
             WorkingSet* ws = new WorkingSet();
             // Takes ownership of 'cq'.
-            rawExec = new PlanExecutor(ws, eofStage, cq, NULL);
+            rawExec = new PlanExecutor(txn, ws, eofStage, cq, NULL);
         }
         else if (pq.getOptions().oplogReplay) {
             // Takes ownership of 'cq'.
@@ -591,6 +595,11 @@ namespace mongo {
         verify(NULL != rawExec);
         auto_ptr<PlanExecutor> exec(rawExec);
 
+        // We want the PlanExecutor to yield automatically, but we handle registration of the
+        // executor ourselves. We want to temporarily register the executor while we are generating
+        // this batch of results, and then unregister and re-register with ClientCursor for getmore.
+        exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
+
         // If it's actually an explain, do the explain and return rather than falling through
         // to the normal query execution loop.
         if (pq.isExplain()) {
@@ -598,7 +607,9 @@ namespace mongo {
             bb.skip(sizeof(QueryResult::Value));
 
             BSONObjBuilder explainBob;
-            Status explainStatus = Explain::explainStages(exec.get(), ExplainCommon::EXEC_ALL_PLANS,
+            Status explainStatus = Explain::explainStages(txn,
+                                                          exec.get(),
+                                                          ExplainCommon::EXEC_ALL_PLANS,
                                                           &explainBob);
             if (!explainStatus.isOK()) {
                 uasserted(18521, "Explain error: " + explainStatus.reason());
@@ -669,17 +680,12 @@ namespace mongo {
         // Do we save the PlanExecutor in a ClientCursor for getMore calls later?
         bool saveClientCursor = false;
 
-        // The executor registers itself with the active executors list in ClientCursor.
-        auto_ptr<ScopedExecutorRegistration> safety(new ScopedExecutorRegistration(exec.get()));
-
         BSONObj obj;
         PlanExecutor::ExecState state;
         // uint64_t numMisplacedDocs = 0;
 
         // Get summary info about which plan the executor is using.
-        PlanSummaryStats stats;
-        Explain::getSummaryStats(exec.get(), &stats);
-        curop.debug().planSummary = stats.summaryStr.c_str();
+        curop.debug().planSummary = Explain::getPlanSummary(exec.get());
 
         while (PlanExecutor::ADVANCED == (state = exec->getNext(&obj, NULL))) {
             // Add result to output buffer.
@@ -723,7 +729,7 @@ namespace mongo {
         // If we don't cache the executor later, we are deleting it, so it must be deregistered.
         //
         // So, no matter what, deregister the executor.
-        safety.reset();
+        exec->deregisterExec();
 
         // Caller expects exceptions thrown in certain cases.
         if (PlanExecutor::EXEC_ERROR == state) {
@@ -741,7 +747,6 @@ namespace mongo {
             // If we're tailing a capped collection, we don't bother saving the cursor if the
             // collection is empty. Otherwise, the semantics of the tailable cursor is that the
             // client will keep trying to read from it. So we'll keep it around.
-            Collection* collection = ctx.ctx().db()->getCollection(txn, cq->ns());
             if (collection && collection->numRecords(txn) != 0 && pq.getNumToReturn() != 1) {
                 saveClientCursor = true;
             }
@@ -759,20 +764,20 @@ namespace mongo {
         const logger::LogComponent queryLogComponent = logger::LogComponent::kQuery;
         const logger::LogSeverity logLevelOne = logger::LogSeverity::Debug(1);
 
+        PlanSummaryStats summaryStats;
+        Explain::getSummaryStats(exec.get(), &summaryStats);
+
+        curop.debug().ntoskip = pq.getSkip();
+        curop.debug().nreturned = numResults;
+        curop.debug().scanAndOrder = summaryStats.hasSortStage;
+        curop.debug().nscanned = summaryStats.totalKeysExamined;
+        curop.debug().nscannedObjects = summaryStats.totalDocsExamined;
+        curop.debug().idhack = summaryStats.isIdhack;
+
         // Set debug information for consumption by the profiler.
-        if (ctx.ctx().db()->getProfilingLevel() > 0 ||
+        if (dbProfilingLevel > 0 ||
             curop.elapsedMillis() > serverGlobalParams.slowMS ||
             logger::globalLogDomain()->shouldLog(queryLogComponent, logLevelOne)) {
-            PlanSummaryStats newStats;
-            Explain::getSummaryStats(exec.get(), &newStats);
-
-            curop.debug().ntoskip = pq.getSkip();
-            curop.debug().nreturned = numResults;
-            curop.debug().scanAndOrder = newStats.hasSortStage;
-            curop.debug().nscanned = newStats.totalKeysExamined;
-            curop.debug().nscannedObjects = newStats.totalDocsExamined;
-            curop.debug().idhack = newStats.isIdhack;
-
             // Get BSON stats.
             scoped_ptr<PlanStageStats> execStats(exec->getStats());
             BSONObjBuilder statsBob;

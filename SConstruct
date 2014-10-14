@@ -230,6 +230,9 @@ add_option( "mm", "use main memory instead of memory mapped files" , 0 , True )
 add_option( "ssl" , "Enable SSL" , 0 , True )
 add_option( "ssl-fips-capability", "Enable the ability to activate FIPS 140-2 mode", 0, True );
 add_option( "rocksdb" , "Enable RocksDB" , 0 , False )
+add_option( "replication-implementation",
+            "Controls what implementation is used for the replication system", "?", False,
+            type="choice", choices=["impl", "legacy"], const="legacy", default="legacy" )
 
 # library choices
 js_engine_choices = ['v8-3.12', 'v8-3.25', 'none']
@@ -304,6 +307,7 @@ add_option( "use-system-yaml", "use system version of yaml", 0, True )
 
 add_option( "use-system-all" , "use all system libraries", 0 , True )
 
+# deprecated
 add_option( "use-new-tools" , "put new tools in the tarball", 0 , False )
 
 add_option( "use-cpu-profiler",
@@ -969,6 +973,7 @@ if "uname" in dir(os):
 
 if has_option( "ssl" ):
     env.Append( CPPDEFINES=["MONGO_SSL"] )
+    env.Append( MONGO_CRYPTO=["openssl"] )
     if windows:
         env.Append( LIBS=["libeay32"] )
         env.Append( LIBS=["ssleay32"] )
@@ -977,6 +982,10 @@ if has_option( "ssl" ):
         env.Append( LIBS=["crypto"] )
     if has_option("ssl-fips-capability"):
         env.Append( CPPDEFINES=["MONGO_SSL_FIPS"] )
+else:
+    env.Append( MONGO_CRYPTO=["tom"] )
+
+env['MONGO_REPL_IMPL'] = get_option('replication-implementation')
 
 try:
     umask = os.umask(022)

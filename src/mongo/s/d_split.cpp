@@ -122,8 +122,8 @@ namespace mongo {
                 return false;
             }
 
-            Client::ReadContext ctx(txn, ns);
-            Collection* collection = ctx.ctx().db()->getCollection( txn, ns );
+            AutoGetCollectionForRead ctx(txn, ns);
+            Collection* collection = ctx.getCollection();
             if ( !collection ) {
                 errmsg = "ns not found";
                 return false;
@@ -151,6 +151,7 @@ namespace mongo {
             auto_ptr<PlanExecutor> exec(InternalPlanner::indexScan(txn, collection, idx,
                                                                    min, max, false,
                                                                    InternalPlanner::FORWARD));
+            exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
 
             // Find the 'missingField' value used to represent a missing document field in a key of
             // this index.
@@ -280,8 +281,8 @@ namespace mongo {
 
             {
                 // Get the size estimate for this namespace
-                Client::ReadContext ctx(txn, ns);
-                Collection* collection = ctx.ctx().db()->getCollection( txn, ns );
+                AutoGetCollectionForRead ctx(txn, ns);
+                Collection* collection = ctx.getCollection();
                 if ( !collection ) {
                     errmsg = "ns not found";
                     return false;
@@ -398,6 +399,7 @@ namespace mongo {
                 set<BSONObj> tooFrequentKeys;
                 splitKeys.push_back(prettyKey(idx->keyPattern(), currKey.getOwned()).extractFields( keyPattern ) );
 
+                exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
                 while ( 1 ) {
                     while (PlanExecutor::ADVANCED == state) {
                         currCount++;
@@ -443,6 +445,7 @@ namespace mongo {
                     exec.reset(InternalPlanner::indexScan(txn, collection, idx, min, max,
                                                             false, InternalPlanner::FORWARD));
 
+                    exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
                     state = exec->getNext(&currKey, NULL);
                 }
 
@@ -594,13 +597,13 @@ namespace mongo {
             collLock.setLockMessage(str::stream() << "splitting chunk [" << minKey << ", " << maxKey
                                                   << ") in " << ns);
 
-            if (!collLock.tryAcquire(&errmsg)) {
-
+            Status acquisitionStatus = collLock.tryAcquire();
+            if (!acquisitionStatus.isOK()) {
                 errmsg = str::stream() << "could not acquire collection lock for " << ns
                                        << " to split chunk [" << minKey << "," << maxKey << ")"
-                                       << causedBy(errmsg);
+                                       << causedBy(acquisitionStatus);
 
-                warning() << errmsg;
+                warning() << errmsg << endl;
                 return false;
             }
 
@@ -787,7 +790,7 @@ namespace mongo {
             //
             
             {
-                Lock::DBLock writeLk(txn->lockState(), nsToDatabaseSubstring(ns), newlm::MODE_X);
+                Lock::DBLock writeLk(txn->lockState(), nsToDatabaseSubstring(ns), MODE_X);
 
                 // NOTE: The newShardVersion resulting from this split is higher than any
                 // other chunk version, so it's also implicitly the newCollVersion
@@ -829,8 +832,8 @@ namespace mongo {
             dassert(newChunks.size() > 1);
 
             {
-                Client::ReadContext ctx(txn, ns);
-                Collection* collection = ctx.ctx().db()->getCollection(txn, ns);
+                AutoGetCollectionForRead ctx(txn, ns);
+                Collection* collection = ctx.getCollection();
                 invariant(collection);
 
                 // Allow multiKey based on the invariant that shard keys must be

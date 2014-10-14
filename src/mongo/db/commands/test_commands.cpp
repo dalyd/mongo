@@ -28,6 +28,8 @@
 *    it in the license file.
 */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommands
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/base/init.h"
@@ -64,7 +66,7 @@ namespace mongo {
             string ns = dbname + "." + coll;
             BSONObj obj = cmdObj[ "obj" ].embeddedObjectUserCheck();
 
-            Lock::DBLock lk(txn->lockState(), dbname, newlm::MODE_X);
+            Lock::DBLock lk(txn->lockState(), dbname, MODE_X);
             WriteUnitOfWork wunit(txn);
             Client::Context ctx(txn,  ns );
             Database* db = ctx.db();
@@ -148,7 +150,7 @@ namespace mongo {
             bool inc = cmdObj.getBoolField( "inc" ); // inclusive range?
 
             Client::WriteContext ctx(txn,  nss.ns() );
-            Collection* collection = ctx.ctx().db()->getCollection( txn, nss.ns() );
+            Collection* collection = ctx.getCollection();
             massert( 13417, "captrunc collection not found or empty", collection);
 
             DiskLoc end;
@@ -198,8 +200,8 @@ namespace mongo {
             NamespaceString nss( dbname, coll );
 
             Client::WriteContext ctx(txn,  nss.ns() );
-            Database* db = ctx.ctx().db();
-            Collection* collection = db->getCollection( txn, nss.ns() );
+            Database* db = ctx.db();
+            Collection* collection = ctx.getCollection();
             massert( 13429, "emptycapped no such collection", collection );
 
             std::vector<BSONObj> indexes = stopIndexBuilds(txn, db, cmdObj);

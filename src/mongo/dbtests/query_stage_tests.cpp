@@ -75,16 +75,17 @@ namespace QueryStageTests {
         }
 
         int countResults(const IndexScanParams& params, BSONObj filterObj = BSONObj()) {
-            Client::ReadContext ctx(&_txn, ns());
+            AutoGetCollectionForRead ctx(&_txn, ns());
 
             StatusWithMatchExpression swme = MatchExpressionParser::parse(filterObj);
             verify(swme.isOK());
             auto_ptr<MatchExpression> filterExpr(swme.getValue());
 
             WorkingSet* ws = new WorkingSet();
-            PlanExecutor runner(ws, 
+            PlanExecutor runner(&_txn,
+                                ws, 
                                 new IndexScan(&_txn, params, ws, filterExpr.get()), 
-                                ctx.ctx().db()->getCollection(&_txn, ns()));
+                                ctx.getCollection());
 
             int count = 0;
             for (DiskLoc dl; PlanExecutor::ADVANCED == runner.getNext(NULL, &dl); ) {
@@ -106,8 +107,8 @@ namespace QueryStageTests {
         }
 
         IndexDescriptor* getIndex(const BSONObj& obj) {
-            Client::ReadContext ctx(&_txn, ns());
-            Collection* collection = ctx.ctx().db()->getCollection( &_txn, ns() );
+            AutoGetCollectionForRead ctx(&_txn, ns());
+            Collection* collection = ctx.getCollection();
             return collection->getIndexCatalog()->findIndexByKeyPattern( &_txn, obj );
         }
 

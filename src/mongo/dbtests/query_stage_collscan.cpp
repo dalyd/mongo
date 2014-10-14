@@ -40,10 +40,6 @@
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/operation_context_impl.h"
-#include "mongo/db/storage/mmap_v1/extent.h"
-#include "mongo/db/storage/mmap_v1/extent_manager.h"
-#include "mongo/db/storage/mmap_v1/mmap_v1_extent_manager.h"
-// #include "mongo/db/structure/catalog/namespace_details.h"  // XXX SERVER-13640
 #include "mongo/db/storage/record_store.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/util/fail_point_service.h"
@@ -78,11 +74,11 @@ namespace QueryStageCollectionScan {
         }
 
         int countResults(CollectionScanParams::Direction direction, const BSONObj& filterObj) {
-            Client::ReadContext ctx(&_txn, ns());
+            AutoGetCollectionForRead ctx(&_txn, ns());
 
             // Configure the scan.
             CollectionScanParams params;
-            params.collection = ctx.ctx().db()->getCollection( &_txn, ns() );
+            params.collection = ctx.getCollection();
             params.direction = direction;
             params.tailable = false;
 
@@ -94,7 +90,7 @@ namespace QueryStageCollectionScan {
             // Make a scan and have the runner own it.
             WorkingSet* ws = new WorkingSet();
             PlanStage* ps = new CollectionScan(&_txn, params, ws, filterExpr.get());
-            PlanExecutor runner(ws, ps, params.collection);
+            PlanExecutor runner(&_txn, ws, ps, params.collection);
 
             // Use the runner to count the number of objects scanned.
             int count = 0;
@@ -188,18 +184,18 @@ namespace QueryStageCollectionScan {
     class QueryStageCollscanObjectsInOrderForward : public QueryStageCollectionScanBase {
     public:
         void run() {
-            Client::ReadContext ctx(&_txn, ns());
+            AutoGetCollectionForRead ctx(&_txn, ns());
 
             // Configure the scan.
             CollectionScanParams params;
-            params.collection = ctx.ctx().db()->getCollection( &_txn, ns() );
+            params.collection = ctx.getCollection();
             params.direction = CollectionScanParams::FORWARD;
             params.tailable = false;
 
             // Make a scan and have the runner own it.
             WorkingSet* ws = new WorkingSet();
             PlanStage* ps = new CollectionScan(&_txn, params, ws, NULL);
-            PlanExecutor runner(ws, ps, params.collection);
+            PlanExecutor runner(&_txn, ws, ps, params.collection);
 
             int count = 0;
             for (BSONObj obj; PlanExecutor::ADVANCED == runner.getNext(&obj, NULL); ) {
@@ -219,16 +215,16 @@ namespace QueryStageCollectionScan {
     class QueryStageCollscanObjectsInOrderBackward : public QueryStageCollectionScanBase {
     public:
         void run() {
-            Client::ReadContext ctx(&_txn, ns());
+            AutoGetCollectionForRead ctx(&_txn, ns());
 
             CollectionScanParams params;
-            params.collection = ctx.ctx().db()->getCollection( &_txn, ns() );
+            params.collection = ctx.getCollection();
             params.direction = CollectionScanParams::BACKWARD;
             params.tailable = false;
 
             WorkingSet* ws = new WorkingSet();
             PlanStage* ps = new CollectionScan(&_txn, params, ws, NULL);
-            PlanExecutor runner(ws, ps, params.collection);
+            PlanExecutor runner(&_txn, ws, ps, params.collection);
 
             int count = 0;
             for (BSONObj obj; PlanExecutor::ADVANCED == runner.getNext(&obj, NULL); ) {
@@ -250,7 +246,7 @@ namespace QueryStageCollectionScan {
         void run() {
             Client::WriteContext ctx(&_txn, ns());
 
-            Collection* coll = ctx.ctx().db()->getCollection( &_txn, ns() );
+            Collection* coll = ctx.getCollection();
 
             // Get the DiskLocs that would be returned by an in-order scan.
             vector<DiskLoc> locs;
@@ -312,7 +308,7 @@ namespace QueryStageCollectionScan {
     public:
         void run() {
             Client::WriteContext ctx(&_txn, ns());
-            Collection* coll = ctx.ctx().db()->getCollection(&_txn, ns());
+            Collection* coll = ctx.getCollection();
 
             // Get the DiskLocs that would be returned by an in-order scan.
             vector<DiskLoc> locs;

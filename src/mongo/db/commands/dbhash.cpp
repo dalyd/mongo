@@ -28,6 +28,8 @@
 *    it in the license file.
 */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommands
+
 #include "mongo/db/commands/dbhash.h"
 
 #include "mongo/db/client.h"
@@ -64,7 +66,6 @@ namespace mongo {
     }
 
     string DBHashCmd::hashCollection( OperationContext* opCtx, Database* db, const string& fullCollectionName, bool* fromCache ) {
-
         scoped_ptr<scoped_lock> cachedHashedLock;
 
         if ( isCachable( fullCollectionName ) ) {
@@ -148,11 +149,14 @@ namespace mongo {
         list<string> colls;
         const string ns = parseNs(dbname, cmdObj);
 
-        Client::ReadContext ctx(txn, ns);
-        Database* db = ctx.ctx().db();
-        if ( db )
-            db->getDatabaseCatalogEntry()->getCollectionNamespaces( &colls );
-        colls.sort();
+        // We lock the entire database in S-mode in order to ensure that the contents will not
+        // change for the snapshot.
+        AutoGetDb autoDb(txn, ns, MODE_S);
+        Database* db = autoDb.getDb();
+        if (db) {
+            db->getDatabaseCatalogEntry()->getCollectionNamespaces(&colls);
+            colls.sort();
+        }
 
         result.appendNumber( "numCollections" , (long long)colls.size() );
         result.append( "host" , prettyHostName() );

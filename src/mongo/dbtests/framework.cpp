@@ -28,6 +28,8 @@
 *    then also delete it in the license file.
 */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/dbtests/framework.h"
@@ -94,9 +96,9 @@ namespace mongo {
                     }
                     else if (minutesRunning > 1){
                         warning() << currentTestName << " has been running for more than " << minutesRunning-1 << " minutes." << endl;
-                        
+
                         // See what is stuck
-                        newlm::LockerImpl::dumpGlobalLockManager();
+                        getGlobalLockManager()->dump();
                     }
                 }
             }

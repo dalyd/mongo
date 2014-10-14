@@ -1843,6 +1843,11 @@ namespace mongo {
                     }
                 }
 
+                if (customOut.hasField("inline") && shardedOutput) {
+                    errmsg = "cannot specify inline and sharded output at the same time";
+                    return false;
+                }
+
                 // modify command to run on shards with output to tmp collection
                 string badShardedField;
                 verify( maxChunkSizeBytes < 0x7fffffff );
@@ -2636,7 +2641,7 @@ namespace mongo {
                 string ns = parseNs( dbname, cmdObj );
                 ActionSet actions;
                 actions.addAction(ActionType::listIndexes);
-                out->push_back(Privilege(ResourcePattern::forCollectionName( ns ), actions));
+                out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
             }
 
             bool run(OperationContext* txn, const string& dbName,

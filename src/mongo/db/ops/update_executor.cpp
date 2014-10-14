@@ -26,11 +26,14 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/ops/update_executor.h"
 
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/exec/update.h"
 #include "mongo/db/ops/update.h"
 #include "mongo/db/ops/update_driver.h"
@@ -38,8 +41,11 @@
 #include "mongo/db/ops/update_request.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/get_executor.h"
+#include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/repl_coordinator_global.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -92,6 +98,8 @@ namespace mongo {
         return _exec.get();
     }
 
+    MONGO_FP_DECLARE(implicitCollectionCreationDelay);
+
     Status UpdateExecutor::prepareInLock(Database* db) {
         // If we have a non-NULL PlanExecutor, then we've already done the in-lock preparation.
         if (_exec.get()) {
@@ -107,27 +115,48 @@ namespace mongo {
 
         // The update stage does not create its own collection.  As such, if the update is
         // an upsert, create the collection that the update stage inserts into beforehand.
-        if (_request->isUpsert()) {
-            if (!collection) {
-                OperationContext* const txn = _request->getOpCtx();
-                WriteUnitOfWork wuow(txn);
-                invariant(txn->lockState()->isWriteLocked());
-                invariant(db->createCollection(txn, nsString.ns()));
+        if (!collection && _request->isUpsert()) {
+            OperationContext* const txn = _request->getOpCtx();
 
-                if (!_request->isFromReplication()) {
-                    repl::logOp(txn,
-                                "c",
-                                (db->name() + ".$cmd").c_str(),
-                                BSON("create" << (nsString.coll())));
-                }
-                wuow.commit();
-                collection = db->getCollection(_request->getOpCtx(), nsString.ns());
+            //  Upgrade to an exclusive lock. While this may possibly lead to a deadlock,
+            //  collection creation is rare and a retry will definitively succeed in this
+            //  case. Add a fail point to allow reliably triggering the deadlock situation.
+
+            MONGO_FAIL_POINT_BLOCK(implicitCollectionCreationDelay, data) {
+                LOG(0) << "Sleeping for creation of collection " + nsString.ns();
+                sleepmillis(1000);
+                LOG(0) << "About to upgrade to exclusive lock on " + nsString.ns();
             }
+
+            Lock::DBLock lk(txn->lockState(), nsString.db(), MODE_X);
+
+            WriteUnitOfWork wuow(txn);
+            invariant(db->createCollection(txn, nsString.ns()));
+
+            if (!_request->isFromReplication()) {
+                repl::logOp(txn,
+                            "c",
+                            (db->name() + ".$cmd").c_str(),
+                            BSON("create" << (nsString.coll())));
+            }
+            wuow.commit();
+            collection = db->getCollection(_request->getOpCtx(), nsString.ns());
             invariant(collection);
         }
 
         // TODO: This seems a bit circuitious.
         _opDebug->updateobj = _request->getUpdates();
+
+        // If this is a user-issued update, then we want to return an error: you cannot perform
+        // writes on a secondary. If this is an update to a secondary from the replication system,
+        // however, then we make an exception and let the write proceed. In this case,
+        // shouldCallLogOp() will be false.
+        if (_request->shouldCallLogOp() &&
+            !repl::getGlobalReplicationCoordinator()->canAcceptWritesForDatabase(nsString.db())) {
+            return Status(ErrorCodes::NotMaster,
+                          str::stream() << "Not primary while performing update on "
+                                        << nsString.ns());
+        }
 
         if (lifecycle) {
             lifecycle->setCollection(collection);
@@ -148,12 +177,26 @@ namespace mongo {
                                               &_driver, _opDebug, &rawExec);
         }
 
-        if (getExecStatus.isOK()) {
-            invariant(rawExec);
-            _exec.reset(rawExec);
+        if (!getExecStatus.isOK()) {
+            return getExecStatus;
         }
 
-        return getExecStatus;
+        invariant(rawExec);
+        _exec.reset(rawExec);
+
+        // If yielding is allowed for this plan, then set an auto yield policy. Otherwise set
+        // a manual yield policy.
+        const bool canYield = !_request->isGod() && (
+            _canonicalQuery.get() ?
+            !QueryPlannerCommon::hasNode(_canonicalQuery->root(), MatchExpression::ATOMIC) :
+            !LiteParsedQuery::isQueryIsolated(_request->getQuery()));
+
+        PlanExecutor::YieldPolicy policy = canYield ? PlanExecutor::YIELD_AUTO :
+                                                      PlanExecutor::YIELD_MANUAL;
+
+        _exec->setYieldPolicy(policy);
+
+        return Status::OK();
     }
 
     UpdateResult UpdateExecutor::execute(Database* db) {
@@ -167,9 +210,6 @@ namespace mongo {
                 "could not get executor " + _request->getQuery().toString()
                                          + "; " + causedBy(status),
                 status.isOK());
-
-        // Register executor with the collection cursor cache.
-        const ScopedExecutorRegistration safety(_exec.get());
 
         // Run the plan (don't need to collect results because UpdateStage always returns
         // NEED_TIME).
@@ -228,6 +268,7 @@ namespace mongo {
 
         Status status = CanonicalQuery::canonicalize(_request->getNamespaceString().ns(),
                                                      _request->getQuery(),
+                                                     _request->isExplain(),
                                                      &cqRaw,
                                                      whereCallback);
         if (status.isOK()) {

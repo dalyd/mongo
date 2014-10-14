@@ -39,7 +39,6 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/processinfo.h"
 #include "mongo/util/version.h"
 
 namespace {
@@ -220,7 +219,7 @@ namespace mongo {
         // Some top-level exec stats get pulled out of the root stage.
         if (verbosity >= ExplainCommon::EXEC_STATS) {
             bob->appendNumber("nReturned", stats.common.advanced);
-            bob->appendNumber("executionTimeMillis", stats.common.executionTimeMillis);
+            bob->appendNumber("executionTimeMillisEstimate", stats.common.executionTimeMillis);
         }
 
         // At full verbosity, we add some extra common details.
@@ -502,10 +501,18 @@ namespace mongo {
     // static
     void Explain::generateExecStats(PlanStageStats* stats,
                                     ExplainCommon::Verbosity verbosity,
-                                    BSONObjBuilder* out) {
+                                    BSONObjBuilder* out,
+                                    long long totalTimeMillis) {
 
         out->appendNumber("nReturned", stats->common.advanced);
-        out->appendNumber("executionTimeMillis", stats->common.executionTimeMillis);
+
+        // Time elapsed could might be either precise or approximate.
+        if (totalTimeMillis >= 0) {
+            out->appendNumber("executionTimeMillis", totalTimeMillis);
+        }
+        else {
+            out->appendNumber("executionTimeMillisEstimate", stats->common.executionTimeMillis);
+        }
 
         // Flatten the stats tree into a list.
         vector<PlanStageStats*> statsNodes;
@@ -539,19 +546,12 @@ namespace mongo {
         out->appendNumber("port", serverGlobalParams.port);
         out->append("version", versionString);
         out->append("gitVersion", gitVersion());
-
-        ProcessInfo p;
-        BSONObjBuilder bOs;
-        bOs.append("type", p.getOsType());
-        bOs.append("name", p.getOsName());
-        bOs.append("version", p.getOsVersion());
-        serverBob.append(StringData("os"), bOs.obj());
-
         serverBob.doneFast();
     }
 
     // static
-    Status Explain::explainStages(PlanExecutor* exec,
+    Status Explain::explainStages(OperationContext* opCtx,
+                                  PlanExecutor* exec,
                                   ExplainCommon::Verbosity verbosity,
                                   BSONObjBuilder* out) {
         //
@@ -606,7 +606,8 @@ namespace mongo {
             BSONObjBuilder execBob(out->subobjStart("executionStats"));
 
             // Generate exec stats BSON for the winning plan.
-            generateExecStats(winningStats.get(), verbosity, &execBob);
+            long long totalTimeMillis = opCtx->getCurOp()->elapsedMillis();
+            generateExecStats(winningStats.get(), verbosity, &execBob, totalTimeMillis);
 
             // Also generate exec stats for each rejected plan, if the verbosity level
             // is high enough.
@@ -626,6 +627,11 @@ namespace mongo {
         generateServerInfo(out);
 
         return Status::OK();
+    }
+
+    // static
+    string Explain::getPlanSummary(PlanExecutor* exec) {
+         return getPlanSummary(exec->getRootStage());
     }
 
     // static

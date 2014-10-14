@@ -26,6 +26,8 @@
 *    it in the license file.
 */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommands
+
 #include "mongo/pch.h"
 
 #include "mongo/base/init.h"
@@ -75,11 +77,6 @@ namespace repl {
 
             if( cmdObj.hasElement("blind") ) {
                 replSetBlind = cmdObj.getBoolField("blind");
-                return true;
-            }
-
-            if (cmdObj.hasElement("sethbmsg")) {
-                sethbmsg(cmdObj["sethbmsg"].String());
                 return true;
             }
 
@@ -220,6 +217,10 @@ namespace repl {
             Status status = getGlobalReplicationCoordinator()->processReplSetReconfig(txn,
                                                                                       parsedArgs,
                                                                                       &result);
+            if (status.isOK() && !parsedArgs.force) {
+                logOpInitiate(txn, BSON("msg" << "Reconfig set" << 
+                                        "version" << parsedArgs.newConfigObj["version"]));
+            }
             return appendCommandStatus(result, status);
         }
     } cmdReplSetReconfig;

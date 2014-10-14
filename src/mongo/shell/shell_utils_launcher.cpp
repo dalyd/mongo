@@ -27,6 +27,8 @@
  *    then also delete it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
+
 #include "mongo/pch.h"
 
 #include "mongo/shell/shell_utils_launcher.h"
@@ -53,6 +55,7 @@
 #include "mongo/scripting/engine.h"
 #include "mongo/shell/shell_utils.h"
 #include "mongo/util/log.h"
+#include "mongo/util/quick_exit.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/signal_win32.h"
 
@@ -374,7 +377,7 @@ namespace mongo {
                     ss << '"';
                     // escape all embedded quotes
                     for (size_t j=0; j<_argv[i].size(); ++j) {
-                        if (_argv[i][j]=='"') ss << '"';
+                        if (_argv[i][j]=='"') ss << '\\';
                         ss << _argv[i][j];
                     }
                     ss << '"';
@@ -456,7 +459,7 @@ namespace mongo {
 
                     // Async signal unsafe code reporting a terminal error condition.
                     cout << "Unable to dup2 child output: " << errnoWithDescription() << endl;
-                    ::_Exit(-1); //do not pass go, do not call atexit handlers
+                    quickExit(-1); //do not pass go, do not call atexit handlers
                 }
 
                 // Heap-check for mongos only. 'argv[0]' must be in the path format.
@@ -477,7 +480,7 @@ namespace mongo {
 
                 // Async signal unsafe code reporting a terminal error condition.
                 cout << "Unable to start program " << argv[0] << ' ' << errnoWithDescription() << endl;
-                ::_Exit(-1);
+                quickExit(-1);
             }
 
 #endif

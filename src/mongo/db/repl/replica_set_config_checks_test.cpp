@@ -121,20 +121,25 @@ namespace {
         ASSERT_OK(newConfig.validate());
 
         // Can reconfig from old to new.
-        ASSERT_OK(validateConfigForReconfig(&externalState, oldConfig, newConfig).getStatus());
+        ASSERT_OK(validateConfigForReconfig(&externalState,
+                                            oldConfig,
+                                            newConfig,
+                                            false).getStatus());
 
 
         // Cannot reconfig from old to old (versions must be different).
         ASSERT_EQUALS(ErrorCodes::NewReplicaSetConfigurationIncompatible,
                       validateConfigForReconfig(&externalState,
                                                 oldConfig,
-                                                oldConfig).getStatus());
+                                                oldConfig,
+                                                false).getStatus());
 
         // Cannot reconfig from new to old (versions must increase).
         ASSERT_EQUALS(ErrorCodes::NewReplicaSetConfigurationIncompatible,
                       validateConfigForReconfig(&externalState,
                                                 newConfig,
-                                                oldConfig).getStatus());
+                                                oldConfig,
+                                                false).getStatus());
     }
 
     TEST(ValidateConfigForReconfig, NewConfigMustNotChangeSetName) {
@@ -166,7 +171,8 @@ namespace {
         ASSERT_EQUALS(ErrorCodes::NewReplicaSetConfigurationIncompatible,
                       validateConfigForReconfig(&externalState,
                                                 oldConfig,
-                                                newConfig).getStatus());
+                                                newConfig,
+                                                false).getStatus());
     }
 
     TEST(ValidateConfigForReconfig, NewConfigMustNotFlipBuildIndexesFlag) {
@@ -214,11 +220,13 @@ namespace {
         ASSERT_OK(oldConfigRefresh.validate());
         ASSERT_OK(validateConfigForReconfig(&externalState,
                                             oldConfig,
-                                            oldConfigRefresh).getStatus());
+                                            oldConfigRefresh,
+                                            false).getStatus());
         ASSERT_EQUALS(ErrorCodes::NewReplicaSetConfigurationIncompatible,
                       validateConfigForReconfig(&externalState,
                                                 oldConfig,
-                                                newConfig).getStatus());
+                                                newConfig,
+                                                false).getStatus());
     }
 
     TEST(ValidateConfigForReconfig, NewConfigMustNotFlipArbiterFlag) {
@@ -263,11 +271,13 @@ namespace {
         ASSERT_OK(oldConfigRefresh.validate());
         ASSERT_OK(validateConfigForReconfig(&externalState,
                                             oldConfig,
-                                            oldConfigRefresh).getStatus());
+                                            oldConfigRefresh,
+                                            false).getStatus());
         ASSERT_EQUALS(ErrorCodes::NewReplicaSetConfigurationIncompatible,
                       validateConfigForReconfig(&externalState,
                                                 oldConfig,
-                                                newConfig).getStatus());
+                                                newConfig,
+                                                false).getStatus());
     }
 
     TEST(ValidateConfigForReconfig, HostAndIdRemappingRestricted) {
@@ -306,7 +316,8 @@ namespace {
         ASSERT_OK(legalNewConfigWithNewHostAndId.validate());
         ASSERT_OK(validateConfigForReconfig(&externalState,
                                             oldConfig,
-                                            legalNewConfigWithNewHostAndId).getStatus());
+                                            legalNewConfigWithNewHostAndId,
+                                            false).getStatus());
 
         //
         // Here, the new config is invalid because we've reused host name "h2" with
@@ -323,10 +334,11 @@ namespace {
         ASSERT_EQUALS(ErrorCodes::NewReplicaSetConfigurationIncompatible,
                       validateConfigForReconfig(&externalState,
                                                 oldConfig,
-                                                illegalNewConfigReusingHost).getStatus());
+                                                illegalNewConfigReusingHost,
+                                                false).getStatus());
         //
-        // Here, the new config is invalid because we've reused _id 2 with
-        // new host name "h4".
+        // Here, the new config is valid, because all we've changed is the name of
+        // the host representing _id 2.
         //
         ASSERT_OK(illegalNewConfigReusingId.initialize(
                           BSON("_id" << "rs0" <<
@@ -336,10 +348,10 @@ namespace {
                                        BSON("_id" << 2 << "host" << "h4") <<
                                        BSON("_id" << 3 << "host" << "h3")))));
         ASSERT_OK(illegalNewConfigReusingId.validate());
-        ASSERT_EQUALS(ErrorCodes::NewReplicaSetConfigurationIncompatible,
-                      validateConfigForReconfig(&externalState,
-                                                oldConfig,
-                                                illegalNewConfigReusingId).getStatus());
+        ASSERT_OK(validateConfigForReconfig(&externalState,
+                                            oldConfig,
+                                            illegalNewConfigReusingId,
+                                            false).getStatus());
     }
 
     TEST(ValidateConfigForReconfig, MustFindSelf) {
@@ -363,21 +375,25 @@ namespace {
         ReplicationCoordinatorExternalStateMock notPresentExternalState;
         ReplicationCoordinatorExternalStateMock presentOnceExternalState;
         presentOnceExternalState.addSelf(HostAndPort("h2"));
-        ReplicationCoordinatorExternalStateMock presentTwiceExternalState;
-        presentTwiceExternalState.addSelf(HostAndPort("h3"));
-        presentTwiceExternalState.addSelf(HostAndPort("h1"));
+        ReplicationCoordinatorExternalStateMock presentThriceExternalState;
+        presentThriceExternalState.addSelf(HostAndPort("h3"));
+        presentThriceExternalState.addSelf(HostAndPort("h2"));
+        presentThriceExternalState.addSelf(HostAndPort("h1"));
 
         ASSERT_EQUALS(ErrorCodes::NodeNotFound,
                       validateConfigForReconfig(&notPresentExternalState,
                                                 oldConfig,
-                                                newConfig).getStatus());
+                                                newConfig,
+                                                false).getStatus());
         ASSERT_EQUALS(ErrorCodes::DuplicateKey,
-                      validateConfigForReconfig(&presentTwiceExternalState,
+                      validateConfigForReconfig(&presentThriceExternalState,
                                                 oldConfig,
-                                                newConfig).getStatus());
+                                                newConfig,
+                                                false).getStatus());
         ASSERT_EQUALS(1, unittest::assertGet(validateConfigForReconfig(&presentOnceExternalState,
                                                                        oldConfig,
-                                                                       newConfig)));
+                                                                       newConfig,
+                                                                       false)));
     }
 
     TEST(ValidateConfigForReconfig, SelfMustEndElectable) {
@@ -405,7 +421,247 @@ namespace {
         ASSERT_EQUALS(ErrorCodes::NodeNotElectable,
                       validateConfigForReconfig(&presentOnceExternalState,
                                                 oldConfig,
-                                                newConfig).getStatus());
+                                                newConfig,
+                                                false).getStatus());
+    }
+
+    TEST(ValidateConfigForInitiate, NewConfigInvalid) {
+        // The new config is not valid due to a duplicate _id value. This tests that if the new
+        // config is invalid, validateConfigForInitiate will return a status indicating what is
+        // wrong with the new config.
+        ReplicaSetConfig newConfig;
+        ASSERT_OK(newConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 2 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 0 << "host" << "h2") <<
+                                                    BSON("_id" << 0 << "host" << "h3")))));
+
+        ReplicationCoordinatorExternalStateMock presentOnceExternalState;
+        presentOnceExternalState.addSelf(HostAndPort("h2"));
+        ASSERT_EQUALS(ErrorCodes::BadValue, validateConfigForInitiate(&presentOnceExternalState,
+                                                                      newConfig).getStatus());
+    }
+
+    TEST(ValidateConfigForReconfig, NewConfigInvalid) {
+        // The new config is not valid due to a duplicate _id value. This tests that if the new
+        // config is invalid, validateConfigForReconfig will return a status indicating what is
+        // wrong with the new config.
+        ReplicaSetConfig oldConfig;
+        ASSERT_OK(oldConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 1 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 0 << "host" << "h2")))));
+
+        ReplicaSetConfig newConfig;
+        ASSERT_OK(newConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 2 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 0 << "host" << "h2") <<
+                                                    BSON("_id" << 0 << "host" << "h3")))));
+
+        ReplicationCoordinatorExternalStateMock presentOnceExternalState;
+        presentOnceExternalState.addSelf(HostAndPort("h2"));
+        ASSERT_EQUALS(ErrorCodes::BadValue, validateConfigForReconfig(&presentOnceExternalState,
+                                                                      oldConfig,
+                                                                      newConfig,
+                                                                      false).getStatus());
+    }
+
+    TEST(ValidateConfigForStartUp, NewConfigInvalid) {
+        // The new config is not valid due to a duplicate _id value. This tests that if the new
+        // config is invalid, validateConfigForStartUp will return a status indicating what is wrong
+        // with the new config.
+        ReplicaSetConfig oldConfig;
+        ASSERT_OK(oldConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 1 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 0 << "host" << "h2")))));
+
+        ReplicaSetConfig newConfig;
+        ASSERT_OK(newConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 2 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 0 << "host" << "h2") <<
+                                                    BSON("_id" << 0 << "host" << "h3")))));
+
+        ReplicationCoordinatorExternalStateMock presentOnceExternalState;
+        presentOnceExternalState.addSelf(HostAndPort("h2"));
+        ASSERT_EQUALS(ErrorCodes::BadValue, validateConfigForStartUp(&presentOnceExternalState,
+                                                                     oldConfig,
+                                                                     newConfig).getStatus());
+    }
+
+    TEST(ValidateConfigForStartUp, OldAndNewConfigIncompatible) {
+        // The new config is not compatible with the old config due to a member changing _ids. This
+        // tests that validateConfigForStartUp will return a status indicating the incompatiblilty
+        // between the old and new config.
+        ReplicaSetConfig oldConfig;
+        ASSERT_OK(oldConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 1 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 0 << "host" << "h2") <<
+                                                    BSON("_id" << 1 << "host" << "h3")))));
+
+
+        ReplicaSetConfig newConfig;
+        ASSERT_OK(newConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 2 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 2 << "host" << "h2") <<
+                                                    BSON("_id" << 1 << "host" << "h3")))));
+
+        ReplicationCoordinatorExternalStateMock presentOnceExternalState;
+        presentOnceExternalState.addSelf(HostAndPort("h2"));
+        ASSERT_EQUALS(ErrorCodes::NewReplicaSetConfigurationIncompatible,
+                      validateConfigForStartUp(&presentOnceExternalState,
+                                               oldConfig,
+                                               newConfig).getStatus());
+    }
+
+    TEST(ValidateConfigForStartUp, OldAndNewConfigCompatible) {
+        // The new config is compatible with the old config. This tests that 
+        // validateConfigForStartUp will return a Status::OK() indicating the validity of this
+        // config change.
+        ReplicaSetConfig oldConfig;
+        ASSERT_OK(oldConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 1 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 0 << "host" << "h2") <<
+                                                    BSON("_id" << 1 << "host" << "h3")))));
+
+
+        ReplicaSetConfig newConfig;
+        ASSERT_OK(newConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 2 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 0 << "host" << "h2" << 
+                                                         "priority" << 3) <<
+                                                    BSON("_id" << 1 << "host" << "h3")))));
+
+        ReplicationCoordinatorExternalStateMock presentOnceExternalState;
+        presentOnceExternalState.addSelf(HostAndPort("h2"));
+        ASSERT_OK(validateConfigForStartUp(&presentOnceExternalState,
+                                           oldConfig,
+                                           newConfig).getStatus());
+    }
+
+    TEST(ValidateConfigForHeartbeatReconfig, NewConfigInvalid) {
+        // The new config is not valid due to a duplicate _id value. This tests that if the new
+        // config is invalid, validateConfigForHeartbeatReconfig will return a status indicating
+        // what is wrong with the new config.
+        ReplicaSetConfig newConfig;
+        ASSERT_OK(newConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 2 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 0 << "host" << "h2") <<
+                                                    BSON("_id" << 0 << "host" << "h3")))));
+
+        ReplicationCoordinatorExternalStateMock presentOnceExternalState;
+        presentOnceExternalState.addSelf(HostAndPort("h2"));
+        ASSERT_EQUALS(ErrorCodes::BadValue,
+                      validateConfigForHeartbeatReconfig(&presentOnceExternalState,
+                                                         newConfig).getStatus());
+    }
+
+    TEST(ValidateConfigForHeartbeatReconfig, NewConfigValid) {
+        // The new config is valid. This tests that validateConfigForHeartbeatReconfig will return
+        // a Status::OK() indicating the validity of this config change.
+        ReplicaSetConfig newConfig;
+        ASSERT_OK(newConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 2 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 0 << "host" << "h2") <<
+                                                    BSON("_id" << 1 << "host" << "h3")))));
+
+        ReplicationCoordinatorExternalStateMock presentOnceExternalState;
+        presentOnceExternalState.addSelf(HostAndPort("h2"));
+        ASSERT_OK(validateConfigForHeartbeatReconfig(&presentOnceExternalState,
+                                                     newConfig).getStatus());
+    }
+
+    TEST(ValidateForReconfig, ForceStillNeedsValidConfig) {
+        // The new config is invalid due to two nodes with the same _id value. This tests that 
+        // ValidateForReconfig fails with an invalid config, even if force is true.
+        ReplicaSetConfig oldConfig;
+        ASSERT_OK(oldConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 1 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 0 << "host" << "h2") <<
+                                                    BSON("_id" << 1 << "host" << "h3")))));
+
+
+        ReplicaSetConfig newConfig;
+        ASSERT_OK(newConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 2 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 0 << "host" << "h2") <<
+                                                    BSON("_id" << 0 << "host" << "h3")))));
+
+        ReplicationCoordinatorExternalStateMock presentOnceExternalState;
+        presentOnceExternalState.addSelf(HostAndPort("h2"));
+        ASSERT_EQUALS(ErrorCodes::BadValue,
+                      validateConfigForReconfig(&presentOnceExternalState,
+                                                oldConfig,
+                                                newConfig,
+                                                true).getStatus());
+    }
+
+    TEST(ValidateForReconfig, ForceStillNeedsSelfPresent) {
+        // The new config does not contain self. This tests that ValidateForReconfig fails
+        // if the member receiving it is absent from the config, even if force is true.
+        ReplicaSetConfig oldConfig;
+        ASSERT_OK(oldConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 1 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 0 << "host" << "h2") <<
+                                                    BSON("_id" << 1 << "host" << "h3")))));
+
+
+        ReplicaSetConfig newConfig;
+        ASSERT_OK(newConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 2 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 1 << "host" << "h3") << 
+                                                    BSON("_id" << 2 << "host" << "h4")))));
+
+        ReplicationCoordinatorExternalStateMock presentOnceExternalState;
+        presentOnceExternalState.addSelf(HostAndPort("h2"));
+        ASSERT_EQUALS(ErrorCodes::NodeNotFound,
+                      validateConfigForReconfig(&presentOnceExternalState,
+                                                oldConfig,
+                                                newConfig,
+                                                true).getStatus());
+    }
+
+    TEST(ValidateForReconfig, ForceOtherwiseIncompatibleConfigs) {
+        // The new config is incompatible with the old  for several reasons:
+        // config version goes down, one member changes _id, and one  member changes to arbiter.
+        // This tests that the reconfig is possible, in spite of all these incompatibles, because 
+        // of the force flag.
+        ReplicaSetConfig oldConfig;
+        ASSERT_OK(oldConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 3 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 0 << "host" << "h2") <<
+                                                    BSON("_id" << 1 << "host" << "h3") <<
+                                                    BSON("_id" << 2 << "host" << "h4")))));
+
+
+        ReplicaSetConfig newConfig;
+        ASSERT_OK(newConfig.initialize(BSON("_id" << "rs0" <<
+                                            "version" << 2 <<
+                                            "members" << BSON_ARRAY(
+                                                    BSON("_id" << 0 << "host" << "h2") << 
+                                                    BSON("_id" << 2 << "host" << "h4" <<
+                                                         "arbiterOnly" << true) << 
+                                                    BSON("_id" << 3 << "host" << "h3")))));
+
+        ReplicationCoordinatorExternalStateMock presentOnceExternalState;
+        presentOnceExternalState.addSelf(HostAndPort("h2"));
+        ASSERT_OK(validateConfigForReconfig(&presentOnceExternalState,
+                                            oldConfig,
+                                            newConfig,
+                                            true).getStatus());
     }
 
 }  // namespace

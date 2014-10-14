@@ -26,6 +26,8 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/operation_context_impl.h"
@@ -48,7 +50,12 @@ namespace mongo {
         invariant(storageEngine);
         _recovery.reset(storageEngine->newRecoveryUnit(this));
 
-        _locker.reset(new newlm::LockerImpl());
+        if (storageEngine->supportsDocLocking()) {
+            _locker.reset(new LockerImpl<false>());
+        }
+        else {
+            _locker.reset(new LockerImpl<true>());
+        }
 
         getGlobalEnvironment()->registerOperationContext(this);
     }
@@ -205,10 +212,6 @@ namespace mongo {
     bool OperationContextImpl::isPrimaryFor( const StringData& ns ) {
         return repl::getGlobalReplicationCoordinator()->canAcceptWritesForDatabase(
                 NamespaceString(ns).db());
-    }
-
-    Transaction* OperationContextImpl::getTransaction() {
-        return _tx.setTxIdOnce((unsigned)getCurOp()->opNum());
     }
 
 }  // namespace mongo

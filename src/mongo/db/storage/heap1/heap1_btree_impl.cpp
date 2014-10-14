@@ -86,12 +86,13 @@ namespace {
         Heap1BtreeBuilderImpl(IndexSet* data, long long* currentKeySize, bool dupsAllowed)
                 : _data(data),
                   _currentKeySize( currentKeySize ),
-                  _dupsAllowed(dupsAllowed) {
+                  _dupsAllowed(dupsAllowed),
+                  _comparator(_data->key_comp()) {
             invariant(_data->empty());
         }
 
         Status addKey(const BSONObj& key, const DiskLoc& loc) {
-            // inserts should be in ascending order.
+            // inserts should be in ascending (key, DiskLoc) order.
 
             if ( key.objsize() >= TempKeyMaxSize ) {
                 return Status(ErrorCodes::KeyTooLong, "key too big");
@@ -102,13 +103,20 @@ namespace {
             invariant(loc.isValid());
             invariant(!hasFieldNames(key));
 
-            // TODO optimization: dup check can assume dup is only possible with last inserted key
-            // and avoid the log(n) lookup.
-            if (!_dupsAllowed && isDup(*_data, key, loc))
-                return dupKeyError(key);
+            if (!_data->empty()) {
+                // Compare specified key with last inserted key, ignoring its DiskLoc
+                int cmp = _comparator.compare(IndexKeyEntry(key, DiskLoc()), *_last);
+                if (cmp < 0 || (_dupsAllowed && cmp == 0 && loc < _last->loc)) {
+                    return Status(ErrorCodes::InternalError,
+                                  "expected ascending (key, DiskLoc) order in bulk builder");
+                }
+                else if (!_dupsAllowed && cmp == 0 && loc != _last->loc) {
+                    return dupKeyError(key);
+                }
+            }
 
             BSONObj owned = key.getOwned();
-            _data->insert(_data->end(), IndexKeyEntry(owned, loc));
+            _last = _data->insert(_data->end(), IndexKeyEntry(owned, loc));
             *_currentKeySize += key.objsize();
 
             return Status::OK();
@@ -118,6 +126,9 @@ namespace {
         IndexSet* const _data;
         long long* _currentKeySize;
         const bool _dupsAllowed;
+
+        IndexEntryComparison _comparator;  // used by the bulk builder to detect duplicate keys
+        IndexSet::const_iterator _last;    // or (key, DiskLoc) ordering violations
     };
 
     class Heap1BtreeImpl : public SortedDataInterface {

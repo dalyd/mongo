@@ -26,6 +26,8 @@
  *    then also delete it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kSharding
+
 #include "mongo/s/config_upgrade_helpers.h"
 
 #include "mongo/client/connpool.h"
@@ -343,6 +345,7 @@ namespace mongo {
         BSONObjBuilder unsetObj;
         unsetObj.append(VersionType::upgradeId(), 1);
         unsetObj.append(VersionType::upgradeState(), 1);
+        unsetObj.append("version", 1); // remove deprecated field, no longer supported >= v2.8.
 
         Status result = clusterUpdate(VersionType::ConfigNS,
                 BSON("_id" << 1 << VersionType::currentVersion(currentVersion)),

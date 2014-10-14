@@ -50,6 +50,8 @@ namespace repl {
     const std::string ReplicaSetConfig::kVersionFieldName = "version";
     const std::string ReplicaSetConfig::kMembersFieldName = "members";
     const std::string ReplicaSetConfig::kSettingsFieldName = "settings";
+    const std::string ReplicaSetConfig::kMajorityWriteConcernModeName = "$majority";
+    const std::string ReplicaSetConfig::kStepDownCheckWriteConcernModeName = "$stepDownCheck";
 
 namespace {
 
@@ -130,6 +132,7 @@ namespace {
             return status;
 
         _calculateMajorities();
+        _addInternalWriteConcernModes();
         _isInitialized = true;
         return Status::OK();
     }
@@ -399,6 +402,24 @@ namespace {
         return NULL;
     }
 
+    const int ReplicaSetConfig::findMemberIndexByHostAndPort(const HostAndPort& hap) const {
+        int x = 0;
+        for (std::vector<MemberConfig>::const_iterator it = _members.begin();
+                it != _members.end(); ++it) {
+
+            if (it->getHostAndPort() == hap) {
+                return x;
+            }
+            ++x;
+        }
+        return -1;
+    }
+
+    const MemberConfig* ReplicaSetConfig::findMemberByHostAndPort(const HostAndPort& hap) const {
+        int idx = findMemberIndexByHostAndPort(hap);
+        return idx != -1 ? &getMemberAt(idx) : NULL;
+    }
+
     ReplicaSetTag ReplicaSetConfig::findTag(const StringData& key, const StringData& value) const {
         return _tagConfig.findTag(key, value);
     }
@@ -412,8 +433,8 @@ namespace {
             return StatusWith<ReplicaSetTagPattern>(
                     ErrorCodes::UnknownReplWriteConcern,
                     str::stream() <<
-                    "No write concern mode named \"" << escape(patternName.toString()) <<
-                    " found in replica set configuration");
+                    "No write concern mode named '" << escape(patternName.toString()) <<
+                    "' found in replica set configuration");
         }
         return StatusWith<ReplicaSetTagPattern>(iter->second);
     }
@@ -437,14 +458,45 @@ namespace {
                 _members.begin(),
                 _members.end(),
                 stdx::bind(&MemberConfig::isVoter, stdx::placeholders::_1));
-
+        _totalVotingMembers = voters;
         _majorityVoteCount = voters / 2 + 1;
+    }
+
+    void ReplicaSetConfig::_addInternalWriteConcernModes() {
+        // $majority: the majority of voting nodes
+        ReplicaSetTagPattern pattern = _tagConfig.makePattern();
+        Status status = 
+            _tagConfig.addTagCountConstraintToPattern(&pattern, 
+                                                      MemberConfig::kInternalVoterTagName,
+                                                      getMajorityVoteCount());
+        if (status.isOK()) {
+            _customWriteConcernModes[kMajorityWriteConcernModeName] = pattern;
+        }
+        else if (status != ErrorCodes::NoSuchKey) {
+            // NoSuchKey means we have no $voter-tagged nodes in this config;
+            // other errors are unexpected.
+            fassert(28528, status);
+        }
+
+        // $stepDownCheck: one electable node plus ourselves
+        pattern = _tagConfig.makePattern();
+        status = _tagConfig.addTagCountConstraintToPattern(&pattern,
+                                                           MemberConfig::kInternalElectableTagName,
+                                                           2);
+        if (status.isOK()) {
+            _customWriteConcernModes[kStepDownCheckWriteConcernModeName] = pattern;
+        }
+        else if (status != ErrorCodes::NoSuchKey) {
+            // NoSuchKey means we have no $electable-tagged nodes in this config;
+            // other errors are unexpected
+            fassert(28529, status);
+        }
     }
 
     BSONObj ReplicaSetConfig::toBSON() const {
         BSONObjBuilder configBuilder;
         configBuilder.append("_id", _replSetName);
-        configBuilder.append("version", _version);
+        configBuilder.appendIntOrLL("version", _version);
 
         BSONArrayBuilder members(configBuilder.subarrayStart("members"));
         for (MemberIterator mem = membersBegin(); mem != membersEnd(); mem++) {
@@ -461,6 +513,10 @@ namespace {
                     _customWriteConcernModes.begin();
                 mode != _customWriteConcernModes.end();
                 ++mode) {
+            if (mode->first[0] == '$') {
+                // Filter out internal modes
+                continue;
+            }
             BSONObjBuilder modeBuilder(gleModes.subobjStart(mode->first));
             for (ReplicaSetTagPattern::ConstraintIterator itr = mode->second.constraintsBegin();
                     itr != mode->second.constraintsEnd();

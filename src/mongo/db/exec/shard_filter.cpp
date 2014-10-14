@@ -26,9 +26,12 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kQuery
+
 #include "mongo/db/exec/shard_filter.h"
 
 #include "mongo/db/exec/filter.h"
+#include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/s/stale_exception.h"

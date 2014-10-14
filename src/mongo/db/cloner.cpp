@@ -110,8 +110,7 @@ namespace mongo {
             Lock::GlobalWrite lk(txn->lockState());
 
             // Make sure database still exists after we resume from the temp release
-            bool unused;
-            Database* db = dbHolder().getOrCreate(txn, _dbName, unused);
+            Database* db = dbHolder().openDb(txn, _dbName);
 
             bool createdCollection = false;
             Collection* collection = NULL;
@@ -254,8 +253,7 @@ namespace mongo {
 
         // We are under lock here again, so reload the database in case it may have disappeared
         // during the temp release
-        bool unused;
-        Database* db = dbHolder().getOrCreate(txn, toDBName, unused);
+        Database* db = dbHolder().openDb(txn, toDBName);
 
         Collection* collection = db->getCollection( txn, to_collection );
         if ( !collection ) {
@@ -310,22 +308,25 @@ namespace mongo {
         const NamespaceString nss(ns);
         const string dbname = nss.db().toString();
 
-        Lock::DBLock dbWrite(txn->lockState(), dbname, newlm::MODE_X);
+        Lock::DBLock dbWrite(txn->lockState(), dbname, MODE_X);
 
-        bool unused;
-        Database* db = dbHolder().getOrCreate(txn, dbname, unused);
+        Database* db = dbHolder().openDb(txn, dbname);
 
         // config
-        string temp = dbname + ".system.namespaces";
-        BSONObj config = _conn->findOne(temp , BSON("name" << ns));
-        if (config["options"].isABSONObj()) {
-            WriteUnitOfWork wunit(txn);
-            Status status = userCreateNS(txn, db, ns, config["options"].Obj(), logForRepl, 0);
-            if ( !status.isOK() ) {
-                errmsg = status.toString();
-                return false;
+        BSONObj filter = BSON("name" << nss.coll().toString());
+        list<BSONObj> collList = _conn->getCollectionInfos( dbname, filter);
+        if (!collList.empty()) {
+            invariant(collList.size() <= 1);
+            BSONObj col = collList.front();
+            if (col["options"].isABSONObj()) {
+                WriteUnitOfWork wunit(txn);
+                Status status = userCreateNS(txn, db, ns, col["options"].Obj(), logForRepl, 0);
+                if ( !status.isOK() ) {
+                    errmsg = status.toString();
+                    return false;
+                }
+                wunit.commit();
             }
-            wunit.commit();
         }
 
         // main data
@@ -487,8 +488,7 @@ namespace mongo {
                     // Copy releases the lock, so we need to re-load the database. This should
                     // probably throw if the database has changed in between, but for now preserve
                     // the existing behaviour.
-                    bool unused;
-                    db = dbHolder().getOrCreate(txn, toDBName, unused);
+                    db = dbHolder().openDb(txn, toDBName);
 
                     // we defer building id index for performance - building it in batch is much
                     // faster

@@ -26,9 +26,12 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kQuery
+
 #include "mongo/db/exec/index_scan.h"
 
 #include "mongo/db/exec/filter.h"
+#include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set_computed_data.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_cursor.h"
@@ -83,7 +86,7 @@ namespace mongo {
 
         // We can't always access the descriptor in the call to getStats() so we pull
         // the status-only information we need out here.
-        _specificStats.indexName = _params.descriptor->infoObj()["name"].String();
+        _specificStats.indexName = _params.descriptor->indexName();
         _specificStats.isMultiKey = _params.descriptor->isMultikey(_txn);
 
         // Set up the index cursor.

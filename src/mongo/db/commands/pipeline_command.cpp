@@ -26,7 +26,7 @@
  * it in the license file.
  */
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include <boost/smart_ptr.hpp>
 #include <vector>
@@ -149,6 +149,10 @@ namespace mongo {
             cursor->setOwnedRecoveryUnit(txn->releaseRecoveryUnit());
             StorageEngine* storageEngine = getGlobalEnvironment()->getGlobalStorageEngine();
             txn->setRecoveryUnit(storageEngine->newRecoveryUnit(txn));
+
+            // Cursor needs to be in a saved state while we yield locks for getmore. State
+            // will be restored in newGetMore().
+            exec->saveState();
         }
 
         BSONObjBuilder cursorObj(result.subobjStart("cursor"));
@@ -223,9 +227,9 @@ namespace mongo {
                 // sharding version that we synchronize on here. This is also why we always need to
                 // create a ClientCursor even when we aren't outputting to a cursor. See the comment
                 // on ShardFilterStage for more details.
-                Client::ReadContext ctx(txn, ns);
+                AutoGetCollectionForRead ctx(txn, ns);
 
-                Collection* collection = ctx.ctx().db()->getCollection(txn, ns);
+                Collection* collection = ctx.getCollection();
 
                 // This does mongod-specific stuff like creating the input PlanExecutor and adding
                 // it to the front of the pipeline if needed.
@@ -242,10 +246,13 @@ namespace mongo {
                 auto_ptr<PipelineProxyStage> proxy(
                     new PipelineProxyStage(pPipeline, input, ws.get()));
                 if (NULL == collection) {
-                    execHolder.reset(new PlanExecutor(ws.release(), proxy.release(), ns));
+                    execHolder.reset(new PlanExecutor(txn, ws.release(), proxy.release(), ns));
                 }
                 else {
-                    execHolder.reset(new PlanExecutor(ws.release(), proxy.release(), collection));
+                    execHolder.reset(new PlanExecutor(txn,
+                                                      ws.release(),
+                                                      proxy.release(),
+                                                      collection));
                 }
                 exec = execHolder.get();
 

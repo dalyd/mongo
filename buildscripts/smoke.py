@@ -239,8 +239,8 @@ class mongod(NullMongod):
             argv += ['--nopreallocj']
         if self.kwargs.get('auth'):
             argv += ['--auth', '--setParameter', 'enableLocalhostAuthBypass=false']
-            authMechanism = self.kwargs.get('authMechanism', 'MONGODB-CR')
-            if authMechanism != 'MONGODB-CR':
+            authMechanism = self.kwargs.get('authMechanism', 'SCRAM-SHA-1')
+            if authMechanism != 'SCRAM-SHA-1':
                 argv += ['--setParameter', 'authenticationMechanisms=' + authMechanism]
             self.auth = True
         if self.kwargs.get('keyFile'):
@@ -521,6 +521,10 @@ def runTest(test, result):
             if smoke_db_prefix:
                 dir_name = smoke_db_prefix + '/unittests'
                 argv.extend(["--dbpath", dir_name] )
+
+            if storage_engine:
+                argv.extend(["--storageEngine", storage_engine])
+
         # more blech
         elif os.path.basename(path) in ['mongos', 'mongos.exe']:
             argv = [path, "--test"]
@@ -1238,7 +1242,7 @@ def main():
     parser.add_option('--use-x509', dest='use_x509', default=False,
                       action="store_true",
                       help='Use x509 auth for internal cluster authentication')
-    parser.add_option('--authMechanism', dest='authMechanism', default='MONGODB-CR',
+    parser.add_option('--authMechanism', dest='authMechanism', default='SCRAM-SHA-1',
                       help='Use the given authentication mechanism, when --auth is used.')
     parser.add_option('--keyFile', dest='keyFile', default=None,
                       help='Path to keyFile to use to run replSet and sharding tests with authentication enabled')

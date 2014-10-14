@@ -88,7 +88,6 @@ namespace repl {
         SyncSourceFeedback syncSourceFeedback;
 
         OpTime lastOpTimeWritten;
-        OpTime getEarliestOpTimeWritten() const;
 
         Status forceSyncFrom(const string& host, BSONObjBuilder* result);
         // Check if the current sync target is suboptimal. This must be called while holding a mutex
@@ -274,28 +273,13 @@ namespace repl {
                                     OplogReader* r,
                                     const Member* source);
         void _initialSync();
-        void _syncThread();
         void syncTail();
-        void syncFixUp(OperationContext* txn, FixUpInfo& h, OplogReader& r);
 
     public:
         // keep a list of hosts that we've tried recently that didn't work
         map<string,time_t> _veto;
 
-        // Allow index prefetching to be turned on/off
-        enum IndexPrefetchConfig {
-            PREFETCH_NONE=0, PREFETCH_ID_ONLY=1, PREFETCH_ALL=2
-        };
-
-        void setIndexPrefetchConfig(const IndexPrefetchConfig cfg) {
-            _indexPrefetchConfig = cfg;
-        }
-        IndexPrefetchConfig getIndexPrefetchConfig() {
-            return _indexPrefetchConfig;
-        }
-
         const ReplSetConfig::MemberCfg& myConfig() const { return _config; }
-        void syncThread();
         const OpTime lastOtherOpTime() const;
         /**
          * The most up to date electable replica
@@ -303,8 +287,6 @@ namespace repl {
         const OpTime lastOtherElectableOpTime() const;
 
         BSONObj getLastErrorDefault;
-    private:
-        IndexPrefetchConfig _indexPrefetchConfig;
     };
 } // namespace repl
 } // namespace mongo

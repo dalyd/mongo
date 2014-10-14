@@ -25,6 +25,8 @@
  *    then also delete it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
+
 #include "mongo/base/init.h"
 #include "mongo/client/connpool.h"
 #include "mongo/platform/cstdint.h"
@@ -33,6 +35,7 @@
 #include "mongo/util/net/message_server.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
+#include "mongo/util/quick_exit.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
 #include "mongo/unittest/unittest.h"
@@ -82,7 +85,7 @@ namespace mongo {
             shuttingDown = true;
         }
 
-        ::_exit(rc);
+        quickExit(rc);
     }
 
     void exitCleanly(ExitCode rc, OperationContext* txn) {

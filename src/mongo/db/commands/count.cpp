@@ -26,6 +26,8 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommands
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/catalog/database.h"
@@ -74,20 +76,22 @@ namespace mongo {
                 return parseStatus;
             }
 
+            request.explain = true;
+
             // Acquire the db read lock.
-            Client::ReadContext ctx(txn, request.ns);
-            Collection* collection = ctx.ctx().db()->getCollection(txn, request.ns);
+            AutoGetCollectionForRead ctx(txn, request.ns);
+            Collection* collection = ctx.getCollection();
 
             PlanExecutor* rawExec;
             Status getExecStatus = getExecutorCount(txn, collection, request, &rawExec);
             if (!getExecStatus.isOK()) {
                 return getExecStatus;
             }
+
             scoped_ptr<PlanExecutor> exec(rawExec);
+            exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
 
-            const ScopedExecutorRegistration safety(exec.get());
-
-            return Explain::explainStages(exec.get(), verbosity, out);
+            return Explain::explainStages(txn, exec.get(), verbosity, out);
         }
 
         virtual bool run(OperationContext* txn,
@@ -103,24 +107,22 @@ namespace mongo {
                 return appendCommandStatus(result, parseStatus);
             }
 
-            Client::ReadContext ctx(txn, request.ns);
-            Collection* collection = ctx.ctx().db()->getCollection(txn, request.ns);
+            AutoGetCollectionForRead ctx(txn, request.ns);
+            Collection* collection = ctx.getCollection();
 
             PlanExecutor* rawExec;
             Status getExecStatus = getExecutorCount(txn, collection, request, &rawExec);
             if (!getExecStatus.isOK()) {
                 return appendCommandStatus(result, getExecStatus);
             }
+
             scoped_ptr<PlanExecutor> exec(rawExec);
+            exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
 
             // Store the plan summary string in CurOp.
             if (NULL != txn->getCurOp()) {
-                PlanSummaryStats stats;
-                Explain::getSummaryStats(exec.get(), &stats);
-                txn->getCurOp()->debug().planSummary = stats.summaryStr.c_str();
+                txn->getCurOp()->debug().planSummary = Explain::getPlanSummary(exec.get());
             }
-
-            const ScopedExecutorRegistration safety(exec.get());
 
             Status execPlanStatus = exec->executePlan();
             if (!execPlanStatus.isOK()) {
@@ -191,6 +193,9 @@ namespace mongo {
             request->limit = limit;
             request->skip = skip;
 
+            // By default, count requests are regular count not explain of count.
+            request->explain = false;
+
             return Status::OK();
         }
 
@@ -229,19 +234,19 @@ namespace mongo {
                        string &err,
                        int &errCode) {
 
-        // Lock 'ns'.
-        Client::ReadContext ctx(txn, ns);
-        Collection* collection = ctx.ctx().db()->getCollection(txn, ns);
-        const string& dbname = ctx.ctx().db()->name();
+        AutoGetCollectionForRead ctx(txn, ns);
 
+        Collection* collection = ctx.getCollection();
         if (NULL == collection) {
             err = "ns missing";
             return -1;
         }
 
+        const NamespaceString nss(ns);
+
         CountRequest request;
         CmdCount* countComm = static_cast<CmdCount*>(Command::findCommand("count"));
-        Status parseStatus = countComm->parseRequest(dbname, cmd, &request);
+        Status parseStatus = countComm->parseRequest(nss.db().toString(), cmd, &request);
         if (!parseStatus.isOK()) {
             err = parseStatus.reason();
             errCode = parseStatus.code();
@@ -259,16 +264,14 @@ namespace mongo {
             errCode = parseStatus.code();
             return -1;
         }
+
         scoped_ptr<PlanExecutor> exec(rawExec);
+        exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
 
         // Store the plan summary string in CurOp.
         if (NULL != txn->getCurOp()) {
-            PlanSummaryStats stats;
-            Explain::getSummaryStats(exec.get(), &stats);
-            txn->getCurOp()->debug().planSummary = stats.summaryStr.c_str();
+            txn->getCurOp()->debug().planSummary = Explain::getPlanSummary(exec.get());
         }
-
-        const ScopedExecutorRegistration safety(exec.get());
 
         Status execPlanStatus = exec->executePlan();
         if (!execPlanStatus.isOK()) {

@@ -35,7 +35,7 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/catalog/database.h"
-#include "mongo/db/client_basic.h"
+#include "mongo/db/client.h"
 #include "mongo/db/exec/group.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/query/get_executor.h"
@@ -67,6 +67,9 @@ namespace mongo {
                                       const BSONObj& cmdObj,
                                       GroupRequest* request) const {
         request->ns = parseNs(dbname, cmdObj);
+
+        // By default, group requests are regular group not explain of group.
+        request->explain = false;
 
         const BSONObj& p = cmdObj.firstElement().embeddedObjectUserCheck();
 
@@ -131,15 +134,17 @@ namespace mongo {
             return appendCommandStatus(out, parseRequestStatus);
         }
 
-        Client::ReadContext ctx(txn, groupRequest.ns);
-        Collection* coll = ctx.ctx().db()->getCollection(txn, groupRequest.ns);
+        AutoGetCollectionForRead ctx(txn, groupRequest.ns);
+        Collection* coll = ctx.getCollection();
 
         PlanExecutor *rawPlanExecutor;
         Status getExecStatus = getExecutorGroup(txn, coll, groupRequest, &rawPlanExecutor);
         if (!getExecStatus.isOK()) {
             return appendCommandStatus(out, getExecStatus);
         }
+
         scoped_ptr<PlanExecutor> planExecutor(rawPlanExecutor);
+        planExecutor->setYieldPolicy(PlanExecutor::YIELD_AUTO);
 
         // Group executors return ADVANCED exactly once, with the entire group result.
         BSONObj retval;
@@ -181,17 +186,21 @@ namespace mongo {
             return parseRequestStatus;
         }
 
-        Client::ReadContext ctx(txn, groupRequest.ns);
-        Collection* coll = ctx.ctx().db()->getCollection(txn, groupRequest.ns);
+        groupRequest.explain = true;
+
+        AutoGetCollectionForRead ctx(txn, groupRequest.ns);
+        Collection* coll = ctx.getCollection();
 
         PlanExecutor *rawPlanExecutor;
-        Status getExecStatus = getExecutorGroup(txn, coll, groupRequest, &rawPlanExecutor); 
+        Status getExecStatus = getExecutorGroup(txn, coll, groupRequest, &rawPlanExecutor);
         if (!getExecStatus.isOK()) {
             return getExecStatus;
         }
-        scoped_ptr<PlanExecutor> planExecutor(rawPlanExecutor);
 
-        return Explain::explainStages(planExecutor.get(), verbosity, out);
+        scoped_ptr<PlanExecutor> planExecutor(rawPlanExecutor);
+        planExecutor->setYieldPolicy(PlanExecutor::YIELD_AUTO);
+
+        return Explain::explainStages(txn, planExecutor.get(), verbosity, out);
     }
 
 }  // namespace mongo

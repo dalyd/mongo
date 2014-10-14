@@ -68,7 +68,6 @@
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/query_planner.h"
-#include "mongo/db/repair_database.h"
 #include "mongo/db/repl/repl_coordinator_global.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/oplog.h"
@@ -349,8 +348,7 @@ namespace mongo {
             // Needs to be locked exclusively, because creates the system.profile collection
             // in the local database.
             //
-            Lock::DBLock dbXLock(txn->lockState(), dbname, newlm::MODE_X);
-            WriteUnitOfWork wunit(txn);
+            Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
             Client::Context ctx(txn, dbname);
 
             BSONElement e = cmdObj.firstElement();
@@ -367,10 +365,10 @@ namespace mongo {
             }
 
             BSONElement slow = cmdObj["slowms"];
-            if ( slow.isNumber() )
+            if (slow.isNumber()) {
                 serverGlobalParams.slowMS = slow.numberInt();
+            }
 
-            wunit.commit();
             return ok;
         }
     } cmdProfile;
@@ -405,7 +403,7 @@ namespace mongo {
             // This doesn't look like it requires exclusive DB lock, because it uses its own diag
             // locking, but originally the lock was set to be WRITE, so preserving the behaviour.
             //
-            Lock::DBLock dbXLock(txn->lockState(), dbname, newlm::MODE_X);
+            Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
             Client::Context ctx(txn, dbname);
 
             int was = _diaglog.setLevel( cmdObj.firstElement().numberInt() );
@@ -461,7 +459,7 @@ namespace mongo {
                 return false;
             }
 
-            Lock::DBLock dbXLock(txn->lockState(), dbname, newlm::MODE_X);
+            Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
             WriteUnitOfWork wunit(txn);
             Client::Context ctx(txn, nsToDrop);
             Database* db = ctx.db();
@@ -561,7 +559,7 @@ namespace mongo {
                     !options["capped"].trueValue() || options["size"].isNumber() ||
                         options.hasField("$nExtents"));
 
-            Lock::DBLock dbXLock(txn->lockState(), dbname, newlm::MODE_X);
+            Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
             WriteUnitOfWork wunit(txn);
             Client::Context ctx(txn, ns);
 
@@ -576,51 +574,6 @@ namespace mongo {
         }
     } cmdCreate;
 
-
-    /* note an access to a database right after this will open it back up - so this is mainly
-       for diagnostic purposes.
-       */
-    class CmdCloseAllDatabases : public Command {
-    public:
-        virtual void help( stringstream& help ) const { 
-            help << "Close all database files." << endl 
-                << "A new request will cause an immediate reopening; thus, this is mostly for testing purposes.";
-        }
-
-        virtual bool adminOnly() const { return true; }
-        virtual bool slaveOk() const { return false; }
-        virtual bool isWriteCommandForConfigServer() const { return true; }
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {
-            ActionSet actions;
-            actions.addAction(ActionType::closeAllDatabases);
-            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
-        }
-
-        CmdCloseAllDatabases() : Command( "closeAllDatabases" ) {
-
-        }
-
-        bool run(OperationContext* txn, const string& dbname , BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& result, bool /*fromRepl*/) {
-            Lock::GlobalWrite globalWriteLock(txn->lockState());
-            // No WriteUnitOfWork necessary, as no actual writes happen.
-            Client::Context ctx(txn, dbname);
-
-            try {
-                return dbHolder().closeAll(txn, result, false);
-            }
-            catch(DBException&) { 
-                throw;
-            }
-            catch(...) { 
-                log() << "ERROR uncaught exception in command closeAllDatabases" << endl;
-                errmsg = "unexpected uncaught exception";
-                return false;
-            }
-        }
-
-    } cmdCloseAllDatabases;
 
     class CmdFileMD5 : public Command {
     public:
@@ -682,8 +635,8 @@ namespace mongo {
 
             // Check shard version at startup.
             // This will throw before we've done any work if shard version is outdated
-            Client::ReadContext ctx(txn, ns);
-            Collection* coll = ctx.ctx().db()->getCollection(txn, ns);
+            AutoGetCollectionForRead ctx(txn, ns);
+            Collection* coll = ctx.getCollection();
 
             CanonicalQuery* cq;
             if (!CanonicalQuery::canonicalize(ns, query, sort, BSONObj(), &cq).isOK()) {
@@ -698,10 +651,6 @@ namespace mongo {
             }
 
             auto_ptr<PlanExecutor> exec(rawExec);
-
-            // The executor must be registered to be informed of DiskLoc deletions and NS dropping
-            // when we yield the lock below.
-            const ScopedExecutorRegistration safety(exec.get());
 
             const ChunkVersion shardVersionAtStart = shardingState.getVersion(ns);
 
@@ -793,9 +742,9 @@ namespace mongo {
             BSONObj keyPattern = jsobj.getObjectField( "keyPattern" );
             bool estimate = jsobj["estimate"].trueValue();
 
-            Client::ReadContext ctx(txn, ns);
+            AutoGetCollectionForRead ctx(txn, ns);
 
-            Collection* collection = ctx.ctx().db()->getCollection( txn, ns );
+            Collection* collection = ctx.getCollection();
 
             if ( !collection || collection->numRecords(txn) == 0 ) {
                 result.appendNumber( "size" , 0 );
@@ -909,17 +858,6 @@ namespace mongo {
         }
 
         bool run(OperationContext* txn, const string& dbname, BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
-            const string ns = dbname + "." + jsobj.firstElement().valuestr();
-            Client::ReadContext cx(txn, ns);
-            Database* db = cx.ctx().db();
-            Collection* collection = db->getCollection( txn, ns );
-            if ( !collection ) {
-                errmsg = "Collection [" + ns + "] not found.";
-                return false;
-            }
-
-            result.append( "ns" , ns.c_str() );
-
             int scale = 1;
             if ( jsobj["scale"].isNumber() ) {
                 scale = jsobj["scale"].numberInt();
@@ -934,6 +872,27 @@ namespace mongo {
             }
 
             bool verbose = jsobj["verbose"].trueValue();
+
+            const NamespaceString nss(parseNs(dbname, jsobj));
+
+            if (nss.coll().empty()) {
+                errmsg = "No collection name specified";
+                return false;
+            }
+
+            AutoGetCollectionForRead ctx(txn, nss);
+            if (!ctx.getDb()) {
+                errmsg = "Database [" + nss.db().toString() + "] not found.";
+                return false;
+            }
+
+            Collection* collection = ctx.getCollection();
+            if (!collection) {
+                errmsg = "Collection [" + nss.toString() + "] not found.";
+                return false;
+            }
+
+            result.append( "ns" , nss );
 
             long long size = collection->dataSize(txn) / scale;
             long long numRecords = collection->numRecords(txn);
@@ -987,7 +946,7 @@ namespace mongo {
         bool run(OperationContext* txn, const string& dbname, BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
             const string ns = dbname + "." + jsobj.firstElement().valuestr();
 
-            Lock::DBLock dbXLock(txn->lockState(), dbname, newlm::MODE_X);
+            Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
             WriteUnitOfWork wunit(txn);
             Client::Context ctx(txn,  ns );
 
@@ -1124,10 +1083,40 @@ namespace mongo {
 
             const string ns = parseNs(dbname, jsobj);
 
-            Client::ReadContext ctx(txn, ns);
-            Database* d = ctx.ctx().db();
+            // TODO: Client::Context legacy, needs to be removed
+            txn->getCurOp()->ensureStarted();
+            txn->getCurOp()->setNS(dbname);
 
-            d->getStats( txn, &result, scale );
+            // We lock the entire database in S-mode in order to ensure that the contents will not
+            // change for the stats snapshot. This might be unnecessary and if it becomes a
+            // performance issue, we can take IS lock and then lock collection-by-collection.
+            AutoGetDb autoDb(txn, ns, MODE_S);
+
+            result.append("db", ns);
+
+            Database* db = autoDb.getDb();
+            if (!db) {
+                // TODO: This preserves old behaviour where we used to create an empty database
+                // metadata even when the database is accessed for read. Without this several
+                // unit-tests will fail, which are fairly easy to fix. If backwards compatibility
+                // is not needed for the missing DB case, we can just do the same that's done in
+                // CollectionStats.
+                result.appendNumber("collections", 0);
+                result.appendNumber("objects", 0);
+                result.append("avgObjSize", 0);
+                result.appendNumber("dataSize", 0);
+                result.appendNumber("storageSize", 0);
+                result.appendNumber("numExtents", 0);
+                result.appendNumber("indexes", 0);
+                result.appendNumber("indexSize", 0);
+                result.appendNumber("fileSize", 0);
+            }
+            else {
+                // TODO: Client::Context legacy, needs to be removed
+                txn->getCurOp()->enter(dbname.c_str(), db->getProfilingLevel());
+
+                db->getStats(txn, &result, scale);
+            }
 
             return true;
         }

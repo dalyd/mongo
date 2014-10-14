@@ -66,11 +66,13 @@ namespace mongo {
         Client::initThread(name().c_str());
         Lock::ParallelBatchWriterMode::iAmABatchParticipant(txn.lockState());
 
-        cc().getAuthorizationSession()->grantInternalAuthorization();
+        txn.getClient()->getAuthorizationSession()->grantInternalAuthorization();
 
         txn.getCurOp()->reset(HostAndPort(), dbInsert);
         NamespaceString ns(_index["ns"].String());
-        Client::WriteContext ctx(&txn, ns.getSystemIndexesCollection());
+
+        Lock::DBLock dlk(txn.lockState(), ns.db(), MODE_X);
+        Client::Context ctx(&txn, ns.getSystemIndexesCollection());
 
         Database* db = dbHolder().get(&txn, ns.db().toString());
 
@@ -78,7 +80,6 @@ namespace mongo {
         if ( !status.isOK() ) {
             log() << "IndexBuilder could not build index: " << status.toString();
         }
-        ctx.commit();
 
         txn.getClient()->shutdown();
     }

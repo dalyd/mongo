@@ -32,7 +32,6 @@
 
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/unittest/temp_dir.h"
 
 namespace mongo {
 
@@ -494,40 +493,41 @@ namespace mongo {
             }
         }
 
-        scoped_ptr<SortedDataInterface::Cursor> cursor( sorted->newCursor( NULL, 1 ) );
+        scoped_ptr<OperationContext> opCtx(harnessHelper->newOperationContext());
+        scoped_ptr<SortedDataInterface::Cursor> cursor( sorted->newCursor( opCtx.get(), 1 ) );
         ASSERT( !cursor->locate( BSON( "" << 5 ), DiskLoc(0,0) ) );
         ASSERT( !cursor->isEOF()  );
         ASSERT_EQUALS( BSON( "" << 5 ), cursor->getKey() );
         cursor->advance();
         ASSERT_EQUALS( BSON( "" << 7 ), cursor->getKey() );
 
-        cursor.reset( sorted->newCursor( NULL, -1 ) );
+        cursor.reset( sorted->newCursor( opCtx.get(), -1 ) );
         ASSERT( !cursor->locate( BSON( "" << 5 ), DiskLoc(0,0) ) );
         ASSERT( !cursor->isEOF()  );
         ASSERT_EQUALS( BSON( "" << 4 ), cursor->getKey() );
 
-        cursor.reset( sorted->newCursor( NULL, -1 ) );
+        cursor.reset( sorted->newCursor( opCtx.get(), -1 ) );
         ASSERT( !cursor->locate( BSON( "" << 5 ), maxDiskLoc ) );
         ASSERT( !cursor->isEOF()  );
         ASSERT_EQUALS( BSON( "" << 5 ), cursor->getKey() );
         cursor->advance();
         ASSERT_EQUALS( BSON( "" << 4 ), cursor->getKey() );
 
-        cursor.reset( sorted->newCursor( NULL, -1 ) );
+        cursor.reset( sorted->newCursor( opCtx.get(), -1 ) );
         ASSERT( !cursor->locate( BSON( "" << 5 ), minDiskLoc ) );
         ASSERT( !cursor->isEOF()  );
         ASSERT_EQUALS( BSON( "" << 4 ), cursor->getKey() );
         cursor->advance();
         ASSERT_EQUALS( BSON( "" << 3 ), cursor->getKey() );
 
-        cursor.reset( sorted->newCursor( NULL, -1 ) );
+        cursor.reset( sorted->newCursor( opCtx.get(), -1 ) );
         cursor->locate( BSON( "" << 6 ), maxDiskLoc );
         ASSERT( !cursor->isEOF()  );
         ASSERT_EQUALS( BSON( "" << 5 ), cursor->getKey() );
         cursor->advance();
         ASSERT_EQUALS( BSON( "" << 4 ), cursor->getKey() );
 
-        cursor.reset( sorted->newCursor( NULL, -1 ) );
+        cursor.reset( sorted->newCursor( opCtx.get(), -1 ) );
         cursor->locate( BSON( "" << 500 ), maxDiskLoc );
         ASSERT( !cursor->isEOF()  );
         ASSERT_EQUALS( BSON( "" << 9 ), cursor->getKey() );
@@ -592,4 +592,4 @@ namespace mongo {
         }
     }
 
-}
+} // namespace mongo

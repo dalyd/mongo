@@ -26,6 +26,8 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kIndexing
+
 #include "mongo/db/index/expression_keys_private.h"
 
 #include <utility>
@@ -361,7 +363,11 @@ namespace mongo {
 
         if (loc.eoo()) { return; }
 
-        uassert(16775, "latlng not an array", loc.isABSONObj());
+        // NOTE: We explicitly test nFields >= 2 to support legacy users who may have indexed
+        // (intentionally or unintentionally) objects/arrays with more than two fields.
+        uassert(16775, str::stream() << "cannot extract [lng, lat] array or object from " << obj,
+            loc.isABSONObj() && loc.Obj().nFields() >= 2);
+
         string root;
         {
             BSONObjIterator i(loc.Obj());

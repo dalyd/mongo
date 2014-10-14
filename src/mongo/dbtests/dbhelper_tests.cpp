@@ -62,7 +62,7 @@ namespace mongo {
 
             {
                 // Remove _id range [_min, _max).
-                Lock::DBLock lk(txn.lockState(), nsToDatabaseSubstring(ns), newlm::MODE_X);
+                Lock::DBLock lk(txn.lockState(), nsToDatabaseSubstring(ns), MODE_X);
                 WriteUnitOfWork wunit(&txn);
                 Client::Context ctx(&txn,  ns );
 
@@ -187,7 +187,6 @@ namespace mongo {
         long long estSizeBytes;
         {
             Lock::DBRead lk(txn.lockState(), ns);
-            Client::Context ctx(&txn,  ns );
 
             // search invalid index range
             KeyRange range( ns,
@@ -233,7 +232,7 @@ namespace mongo {
         long long estSizeBytes;
         {
             Lock::DBRead lk(txn.lockState(), ns);
-            Client::Context ctx(&txn,  ns );
+
             KeyRange range( ns,
                             BSON( "_id" << 0 ),
                             BSON( "_id" << numDocsInserted ),

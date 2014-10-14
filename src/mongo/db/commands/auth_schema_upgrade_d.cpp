@@ -26,6 +26,8 @@
  * then also delete it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommands
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/auth/authorization_manager.h"
@@ -95,8 +97,7 @@ namespace {
                               versionArray["0"] << '.' << versionArray["1"]);
             }
         }
-        return Status(ErrorCodes::InternalError,
-                      "Auth schema upgrade check for replica sets not implemented");
+        return Status::OK();
     }
 
     class CmdAuthSchemaUpgradeD : public CmdAuthSchemaUpgrade {

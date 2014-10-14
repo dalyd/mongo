@@ -26,20 +26,24 @@
 *    it in the license file.
 */
 
+#include "mongo/platform/basic.h"
+
 #include <list>
 #include <vector>
 #include <boost/scoped_ptr.hpp>
 
 #include "mongo/client/connpool.h"
 #include "mongo/db/commands/server_status.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/repl/is_master_response.h"
 #include "mongo/db/repl/master_slave.h"
+#include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplogreader.h"
 #include "mongo/db/repl/repl_coordinator_global.h"
 #include "mongo/db/repl/rs.h"
-#include "mongo/db/operation_context_impl.h"
 #include "mongo/db/storage_options.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/s/write_ops/batched_command_request.h"
@@ -74,12 +78,9 @@ namespace repl {
             list<BSONObj> src;
             {
                 const char* localSources = "local.sources";
-                Client::ReadContext ctx(txn, localSources);
+                AutoGetCollectionForRead ctx(txn, localSources);
                 auto_ptr<PlanExecutor> exec(
-                    InternalPlanner::collectionScan(txn,
-                                                    localSources,
-                                                    ctx.ctx().db()->getCollection(txn,
-                                                                                  localSources)));
+                    InternalPlanner::collectionScan(txn, localSources, ctx.getCollection()));
                 BSONObj obj;
                 PlanExecutor::ExecState state;
                 while (PlanExecutor::ADVANCED == (state = exec->getNext(&obj, NULL))) {
@@ -153,14 +154,19 @@ namespace repl {
         bool includeByDefault() const { return false; }
 
         BSONObj generateSection(const BSONElement& configElement) const {
-            if (!theReplSet)
+            ReplicationCoordinator* replCoord = getGlobalReplicationCoordinator();
+            if (!replCoord->isReplEnabled()) {
                 return BSONObj();
+            }
 
+            OperationContextImpl txn;
             BSONObjBuilder result;
-            result.appendTimestamp("latestOptime", theReplSet->lastOpTimeWritten.asDate());
-            result.appendTimestamp("earliestOptime",
-                                   theReplSet->getEarliestOpTimeWritten().asDate());
-
+            result.append("latestOptime", replCoord->getMyLastOptime());
+            BSONObj o;
+            uassert(17347,
+                    "Problem reading earliest entry from oplog",
+                    Helpers::getSingleton(&txn, rsoplog, o));
+            result.append("earliestOptime", o["ts"]._opTime());
             return result.obj();
         }
     } oplogInfoServerStatus;

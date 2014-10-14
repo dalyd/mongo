@@ -50,6 +50,7 @@ namespace mongo {
         PlanSummaryStats() : nReturned(0),
                              totalKeysExamined(0),
                              totalDocsExamined(0),
+                             executionTimeMillis(0),
                              isIdhack(false),
                              hasSortStage(false),
                              summaryStr("") { }
@@ -93,7 +94,8 @@ namespace mongo {
          *
          * Does not take ownership of its arguments.
          */
-        static Status explainStages(PlanExecutor* exec,
+        static Status explainStages(OperationContext* opCtx,
+                                    PlanExecutor* exec,
                                     ExplainCommon::Verbosity verbosity,
                                     BSONObjBuilder* out);
 
@@ -121,6 +123,7 @@ namespace mongo {
         /**
          * Returns a short plan summary std::string describing the leaves of the query plan.
          */
+        static std::string getPlanSummary(PlanExecutor* exec);
         static std::string getPlanSummary(PlanStage* root);
 
         /**
@@ -169,13 +172,20 @@ namespace mongo {
          * Generates the execution stats section for the stats tree 'stats',
          * adding the resulting BSON to 'out'.
          *
+         * The 'totalTimeMillis' value passed here will be added to the top level of
+         * the execution stats section, but will not affect the reporting of timing for
+         * individual stages. If 'totalTimeMillis' is not specified, then the default
+         * value of -1 indicates that we should only use the approximate timing information
+         * collected by the stages.
+         *
          * Stats are generated at the verbosity specified by 'verbosity'.
          *
          * This is a helper for generating explain BSON. It is used by explainStages(...).
          */
         static void generateExecStats(PlanStageStats* stats,
                                       ExplainCommon::Verbosity verbosity,
-                                      BSONObjBuilder* out);
+                                      BSONObjBuilder* out,
+                                      long long totalTimeMillis = -1);
 
         /**
          * Adds the 'serverInfo' explain section to the BSON object being build

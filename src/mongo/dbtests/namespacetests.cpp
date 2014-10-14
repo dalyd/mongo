@@ -29,6 +29,8 @@
  *    then also delete it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
+
 #include "mongo/platform/basic.h"
 
 #include <string>
@@ -524,10 +526,10 @@ namespace NamespaceTests {
 
                 OperationContextImpl txn;
 
-                Lock::DBLock lk(txn.lockState(), dbName, newlm::MODE_X);
+                Lock::DBLock lk(txn.lockState(), dbName, MODE_X);
 
                 bool justCreated;
-                Database* db = dbHolder().getOrCreate(&txn, dbName, justCreated);
+                Database* db = dbHolder().openDb(&txn, dbName, &justCreated);
                 ASSERT(justCreated);
 
                 Collection* committedColl;
@@ -567,10 +569,10 @@ namespace NamespaceTests {
 
                 OperationContextImpl txn;
 
-                Lock::DBLock lk(txn.lockState(), dbName, newlm::MODE_X);
+                Lock::DBLock lk(txn.lockState(), dbName, MODE_X);
 
                 bool justCreated;
-                Database* db = dbHolder().getOrCreate(&txn, dbName, justCreated);
+                Database* db = dbHolder().openDb(&txn, dbName, &justCreated);
                 ASSERT(justCreated);
 
                 {

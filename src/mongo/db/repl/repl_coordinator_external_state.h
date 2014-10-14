@@ -62,14 +62,18 @@ namespace repl {
         virtual ~ReplicationCoordinatorExternalState();
 
         /**
-         * Simple wrapper around SyncSourceFeedback::run().  Loops continuously until shutdown() is
-         * called.
+         * Starts the background sync, producer, and sync source feedback threads, and sets up logOp
          */
-        virtual void runSyncSourceFeedback() = 0;
+        virtual void startThreads() = 0;
 
         /**
-         * Performs any necessary external state specific shutdown tasks, such as signaling
-         * the SyncSourceFeedback thread to terminate.
+         * Starts the Master/Slave threads and sets up logOp
+         */
+        virtual void startMasterSlave() = 0;
+
+        /**
+         * Performs any necessary external state specific shutdown tasks, such as cleaning up
+         * the threads it started.
          */
         virtual void shutdown() = 0;
 
@@ -123,10 +127,16 @@ namespace repl {
         virtual HostAndPort getClientHostAndPort(const OperationContext* txn) = 0;
 
         /**
-         * Closes all client connections.
+         * Closes all connections except those marked with the keepOpen property, which should
+         * just be connections used for heartbeating.
          * This is used during stepdown, and transition out of primary.
          */
-        virtual void closeClientConnections() = 0;
+        virtual void closeConnections() = 0;
+
+        /**
+         * Notifies the bgsync and syncSourceFeedback threads to choose a new sync source.
+         */
+        virtual void signalApplierToChooseNewSyncSource() = 0;
 
         /**
          * Returns an instance of GlobalSharedLockAcquirer that can be used to acquire the global
@@ -139,6 +149,14 @@ namespace repl {
          * the same instance that require an OperationContext.
          */
         virtual OperationContext* createOperationContext() = 0;
+
+        /**
+         * Drops all temporary collections on all databases except "local".
+         *
+         * The implementation may assume that the caller has acquired the global exclusive lock
+         * for "txn".
+         */
+        virtual void dropAllTempCollections(OperationContext* txn) = 0;
     };
 
     /**

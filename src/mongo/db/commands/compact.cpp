@@ -28,6 +28,8 @@
 *    it in the license file.
 */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommands
+
 #include <string>
 #include <vector>
 
@@ -144,7 +146,7 @@ namespace mongo {
                 compactOptions.validateDocuments = cmdObj["validate"].trueValue();
 
 
-            Lock::DBLock lk(txn->lockState(), db, newlm::MODE_X);
+            Lock::DBLock lk(txn->lockState(), db, MODE_X);
             BackgroundOperation::assertNoBgOpInProgForNs(ns.ns());
             Client::Context ctx(txn, ns);
 

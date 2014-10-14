@@ -125,6 +125,7 @@ if ( typeof _threadInject != "undefined" ){
                                    "profile3.js",
                                    "profile4.js",
                                    "profile5.js",
+                                   "geo_s2cursorlimitskip.js",
 
                                    "mr_drop.js",
                                    "mr3.js",

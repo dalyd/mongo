@@ -26,6 +26,8 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kReplication
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/repl/repl_coordinator_external_state_impl.h"
@@ -36,15 +38,22 @@
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/oid.h"
+#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/global_environment_experiment.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context_impl.h"
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/connections.h"
 #include "mongo/db/repl/isself.h"
+#include "mongo/db/repl/master_slave.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/rs_sync.h"
+#include "mongo/db/storage/storage_engine.h"
+#include "mongo/stdx/functional.h"
+#include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/message_port.h"
@@ -54,8 +63,7 @@ namespace mongo {
 namespace repl {
 
 namespace {
-    // TODO: Change this to local.system.replset when we remove disable the hybrid coordinator.
-    const char configCollectionName[] = "local.new.replset";
+    const char configCollectionName[] = "local.system.replset";
     const char configDatabaseName[] = "local";
     const char meCollectionName[] = "local.me";
     const char meDatabaseName[] = "local";
@@ -65,17 +73,27 @@ namespace {
     ReplicationCoordinatorExternalStateImpl::ReplicationCoordinatorExternalStateImpl() {}
     ReplicationCoordinatorExternalStateImpl::~ReplicationCoordinatorExternalStateImpl() {}
 
-    void ReplicationCoordinatorExternalStateImpl::runSyncSourceFeedback() {
-        _syncSourceFeedback.run();
+    void ReplicationCoordinatorExternalStateImpl::startThreads() {
+        _backgroundSyncThread.reset(new boost::thread(runSyncThread));
+        BackgroundSync* bgsync = BackgroundSync::get();
+        _producerThread.reset(new boost::thread(stdx::bind(&BackgroundSync::producerThread,
+                                                           bgsync)));
+        _syncSourceFeedbackThread.reset(new boost::thread(stdx::bind(&SyncSourceFeedback::run,
+                                                                     &_syncSourceFeedback)));
+        newReplUp();
+    }
+
+    void ReplicationCoordinatorExternalStateImpl::startMasterSlave() {
+        repl::startMasterSlave();
     }
 
     void ReplicationCoordinatorExternalStateImpl::shutdown() {
         _syncSourceFeedback.shutdown();
         BackgroundSync* bgsync = BackgroundSync::get();
-        // bgsync can be null if we shut down prior to installing our initial replset config.
-        if (bgsync) {
-            bgsync->shutdown();
-        }
+        bgsync->shutdown();
+        _syncSourceFeedbackThread->join();
+        _backgroundSyncThread->join();
+        _producerThread->join();
     }
 
     void ReplicationCoordinatorExternalStateImpl::forwardSlaveHandshake() {
@@ -90,7 +108,7 @@ namespace {
         std::string myname = getHostName();
         OID myRID;
         {
-            Lock::DBLock lock(txn->lockState(), meDatabaseName, newlm::MODE_X);
+            Lock::DBLock lock(txn->lockState(), meDatabaseName, MODE_X);
 
             BSONObj me;
             // local.me is an identifier for a server for getLastError w:2+
@@ -119,7 +137,6 @@ namespace {
             OperationContext* txn) {
         try {
             BSONObj config;
-            Lock::DBRead dbReadLock(txn->lockState(), configCollectionName);
             if (!Helpers::getSingleton(txn, configCollectionName, config)) {
                 return StatusWith<BSONObj>(
                         ErrorCodes::NoMatchingDocument,
@@ -137,7 +154,7 @@ namespace {
             OperationContext* txn,
             const BSONObj& config) {
         try {
-            Lock::DBLock dbWriteLock(txn->lockState(), configDatabaseName, newlm::MODE_X);
+            Lock::DBLock dbWriteLock(txn->lockState(), configDatabaseName, MODE_X);
             Helpers::putSingleton(txn, configCollectionName, config);
             return Status::OK();
         }
@@ -150,7 +167,6 @@ namespace {
             OperationContext* txn) {
 
         try {
-            Lock::DBRead lk(txn->lockState(), rsoplog);
             BSONObj oplogEntry;
             if (!Helpers::getLast(txn, rsoplog, oplogEntry)) {
                 return StatusWith<OpTime>(
@@ -188,8 +204,12 @@ namespace {
         return HostAndPort(txn->getClient()->clientAddress(true));
     }
 
-    void ReplicationCoordinatorExternalStateImpl::closeClientConnections() {
+    void ReplicationCoordinatorExternalStateImpl::closeConnections() {
         MessagingPort::closeAllSockets(ScopedConn::keepOpen);
+    }
+
+    void ReplicationCoordinatorExternalStateImpl::signalApplierToChooseNewSyncSource() {
+        BackgroundSync::get()->clearSyncTarget();
     }
 
     OperationContext* ReplicationCoordinatorExternalStateImpl::createOperationContext() {
@@ -197,6 +217,22 @@ namespace {
         sb << "repl" << boost::this_thread::get_id();
         Client::initThreadIfNotAlready(sb.str().c_str());
         return new OperationContextImpl;
+    }
+
+    void ReplicationCoordinatorExternalStateImpl::dropAllTempCollections(OperationContext* txn) {
+        std::vector<std::string> dbNames;
+        StorageEngine* storageEngine = getGlobalEnvironment()->getGlobalStorageEngine();
+        storageEngine->listDatabases(&dbNames);
+
+        for (std::vector<std::string>::iterator it = dbNames.begin(); it != dbNames.end(); ++it) {
+            // The local db is special because it isn't replicated. It is cleared at startup even on
+            // replica set members.
+            if (*it == "local")
+                continue;
+            LOG(2) << "Removing temporary collections from " << *it;
+            Database* db = dbHolder().get(txn, *it);
+            db->clearTmpCollections(txn);
+        }
     }
 
 namespace {

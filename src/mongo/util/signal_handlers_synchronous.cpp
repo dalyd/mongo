@@ -26,6 +26,8 @@
  *    then also delete it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/util/signal_handlers_synchronous.h"
@@ -46,6 +48,7 @@
 #include "mongo/util/exception_filter_win32.h"
 #include "mongo/util/exit_code.h"
 #include "mongo/util/log.h"
+#include "mongo/util/quick_exit.h"
 #include "mongo/util/stacktrace.h"
 #include "mongo/util/text.h"
 
@@ -132,7 +135,7 @@ namespace {
         doMinidump();
 #endif
 
-        ::_exit(EXIT_ABRUPT);
+        quickExit(EXIT_ABRUPT);
     }
 
     void abruptQuit(int signalNum) {
@@ -140,7 +143,7 @@ namespace {
         printSignalAndBacktrace(signalNum);
 
         // Don't go through normal shutdown procedure. It may make things worse.
-        ::_exit(EXIT_ABRUPT);
+        quickExit(EXIT_ABRUPT);
     }
 
 #if defined(_WIN32)
@@ -186,7 +189,7 @@ namespace {
         writeMallocFreeStreamToLog();
 
         printSignalAndBacktrace(signalNum);
-        ::_exit(EXIT_ABRUPT);
+        quickExit(EXIT_ABRUPT);
     }
 
 #endif
@@ -228,6 +231,6 @@ namespace {
         boost::mutex::scoped_lock lk(streamMutex);
         printStackTrace(mallocFreeOStream << "out of memory.\n");
         writeMallocFreeStreamToLog();
-        ::_exit(EXIT_ABRUPT);
+        quickExit(EXIT_ABRUPT);
     }
 }  // namespace mongo

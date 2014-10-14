@@ -41,7 +41,6 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/catalog/collection_catalog_entry.h"
 #include "mongo/db/catalog/database.h"
-#include "mongo/db/concurrency/lock_mgr.h"
 #include "mongo/db/catalog/index_create.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/operation_context.h"
@@ -161,10 +160,18 @@ namespace mongo {
         return  _recordStore->dataFor( txn, loc ).toBson();
     }
 
+    bool Collection::findDoc(OperationContext* txn, const DiskLoc& loc, BSONObj* out) const {
+        RecordData rd;
+        if ( !_recordStore->findRecord( txn, loc, &rd ) )
+            return false;
+        *out = rd.toBson();
+        return true;
+    }
+
     StatusWith<DiskLoc> Collection::insertDocument( OperationContext* txn,
                                                     const DocWriter* doc,
                                                     bool enforceQuota ) {
-        verify( _indexCatalog.numIndexesTotal( txn ) == 0 ); // eventually can implement, just not done
+        invariant( !_indexCatalog.haveAnyIndexes() ); // eventually can implement, just not done
 
         StatusWith<DiskLoc> loc = _recordStore->insertRecord( txn,
                                                               doc,
@@ -409,7 +416,6 @@ namespace mongo {
         // Broadcast the mutation so that query results stay correct.
         _cursorCache.invalidateDocument(loc, INVALIDATION_MUTATION);
 
-        ExclusiveResourceLock lk(txn->getTransaction(), *(size_t*)&loc);
         return _recordStore->updateWithDamages( txn, loc, damangeSource, damages );
     }
 

@@ -537,8 +537,15 @@ namespace mongo {
                 ScopedDbConnection conn(config->getPrimary().getConnString());
 
                 //check that collection is not capped
-                BSONObj res = conn->findOne( config->getName() + ".system.namespaces",
-                                             BSON( "name" << ns ) );
+                BSONObj res;
+                {
+                    std::list<BSONObj> all = conn->getCollectionInfos( config->getName(),
+                                                                       BSON( "name" << nsToCollectionSubstring( ns ) ) );
+                    if ( !all.empty() ) {
+                        res = all.front().getOwned();
+                    }
+                }
+
                 if ( res["options"].type() == Object &&
                      res["options"].embeddedObject()["capped"].trueValue() ) {
                     errmsg = "can't shard capped collection";
@@ -573,18 +580,15 @@ namespace mongo {
                 // 5. If the collection is empty, and it's still possible to create an index
                 //    on the proposed key, we go ahead and do so.
 
-                string indexNS = config->getName() + ".system.indexes";
+                list<BSONObj> indexes = conn->getIndexSpecs( ns );
 
                 // 1.  Verify consistency with existing unique indexes
-                BSONObj uniqueQuery = BSON( "ns" << ns << "unique" << true );
-                auto_ptr<DBClientCursor> uniqueQueryResult =
-                                conn->query( indexNS , uniqueQuery );
-
                 ShardKeyPattern proposedShardKey( proposedKey );
-                while ( uniqueQueryResult->more() ) {
-                    BSONObj idx = uniqueQueryResult->next();
+                for ( list<BSONObj>::iterator it = indexes.begin(); it != indexes.end(); ++it ) {
+                    BSONObj idx = *it;
                     BSONObj currentKey = idx["key"].embeddedObject();
-                    if( ! proposedShardKey.isUniqueIndexCompatible( currentKey ) ) {
+                    bool isUnique = idx["unique"].trueValue();
+                    if (isUnique && !proposedShardKey.isUniqueIndexCompatible(currentKey)) {
                         errmsg = str::stream() << "can't shard collection '" << ns << "' "
                                                << "with unique index on " << currentKey << " "
                                                << "and proposed shard key " << proposedKey << ". "
@@ -598,14 +602,8 @@ namespace mongo {
                 // 2. Check for a useful index
                 bool hasUsefulIndexForKey = false;
 
-                BSONObj allQuery = BSON( "ns" << ns );
-                auto_ptr<DBClientCursor> allQueryResult =
-                                conn->query( indexNS , allQuery );
-
-                BSONArrayBuilder allIndexes;
-                while ( allQueryResult->more() ) {
-                    BSONObj idx = allQueryResult->next();
-                    allIndexes.append( idx );
+                for ( list<BSONObj>::iterator it = indexes.begin(); it != indexes.end(); ++it ) {
+                    BSONObj idx = *it;
                     BSONObj currentKey = idx["key"].embeddedObject();
                     // Check 2.i. and 2.ii.
                     if ( ! idx["sparse"].trueValue() && proposedKey.isPrefixOf( currentKey ) ) {
@@ -633,7 +631,14 @@ namespace mongo {
                 bool careAboutUnique = cmdObj["unique"].trueValue();
                 if ( hasUsefulIndexForKey && careAboutUnique ) {
                     BSONObj eqQuery = BSON( "ns" << ns << "key" << proposedKey );
-                    BSONObj eqQueryResult = conn->findOne( indexNS, eqQuery );
+                    BSONObj eqQueryResult;
+                    for ( list<BSONObj>::iterator it = indexes.begin(); it != indexes.end(); ++it ) {
+                        BSONObj idx = *it;
+                        if ( idx["key"].embeddedObject() == proposedKey ) {
+                            eqQueryResult = idx;
+                            break;
+                        }
+                    }
                     if ( eqQueryResult.isEmpty() ) {
                         hasUsefulIndexForKey = false;  // if no exact match, index not useful,
                                                        // but still possible to create one later
@@ -669,7 +674,7 @@ namespace mongo {
                     errmsg = str::stream() << "please create an index that starts with the "
                                            << "shard key before sharding.";
                     result.append( "proposedKey" , proposedKey );
-                    result.appendArray( "curIndexes" , allIndexes.done() );
+                    result.append( "curIndexes" , indexes );
                     conn.done();
                     return false;
                 }
@@ -1856,28 +1861,6 @@ namespace mongo {
         }
 
     } cmdListDatabases;
-
-    class CmdCloseAllDatabases : public Command {
-    public:
-        CmdCloseAllDatabases() : Command("closeAllDatabases", false , "closeAllDatabases" ) {}
-        virtual bool slaveOk() const { return true; }
-        virtual bool slaveOverrideOk() const { return true; }
-        virtual bool adminOnly() const { return true; }
-        virtual bool isWriteCommandForConfigServer() const { return false; }
-        virtual void help( stringstream& help ) const { help << "Not supported sharded"; }
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {
-            ActionSet actions;
-            actions.addAction(ActionType::closeAllDatabases);
-            out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
-        }
-
-        bool run(OperationContext* txn, const string& , BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& /*result*/, bool /*fromRepl*/) {
-            errmsg = "closeAllDatabases isn't supported through mongos";
-            return false;
-        }
-    } cmdCloseAllDatabases;
 
 
     class CmdReplSetGetStatus : public Command {

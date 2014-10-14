@@ -91,7 +91,10 @@ namespace {
         }
         // Update config and set selfIndex
         // If "now" is passed in, set _now to now+1
-        void updateConfig(BSONObj cfg, int selfIndex, Date_t now = Date_t(-1)) {
+        void updateConfig(BSONObj cfg,
+                          int selfIndex,
+                          Date_t now = Date_t(-1),
+                          OpTime lastOp = OpTime()) {
             ReplicaSetConfig config;
             ASSERT_OK(config.initialize(cfg));
             ASSERT_OK(config.validate());
@@ -99,46 +102,91 @@ namespace {
             _selfIndex = selfIndex;
 
             if (now == Date_t(-1)) {
-                getTopoCoord().updateConfig(config, selfIndex, _now++, OpTime(0,0));
+                getTopoCoord().updateConfig(config, selfIndex, _now++, lastOp);
             }
             else {
                 invariant(now > _now);
-                getTopoCoord().updateConfig(config, selfIndex, now, OpTime(0,0));
+                getTopoCoord().updateConfig(config, selfIndex, now, lastOp);
                 _now = now + 1;
             }
         }
 
-        HeartbeatResponseAction downMember(const HostAndPort& member, const std::string& setName) {
-            StatusWith<ReplSetHeartbeatResponse> hbResponse =
-                    StatusWith<ReplSetHeartbeatResponse>(Status(ErrorCodes::HostUnreachable, ""));
-            getTopoCoord().prepareHeartbeatRequest(_now++, setName, member);
-            return getTopoCoord().processHeartbeatResponse(_now++,
-                                                           Milliseconds(0),
-                                                           member,
-                                                           hbResponse,
-                                                           OpTime(0,0));
+        HeartbeatResponseAction receiveUpHeartbeat(
+                const HostAndPort& member,
+                const std::string& setName,
+                MemberState memberState,
+                OpTime electionTime,
+                OpTime lastOpTimeSender,
+                OpTime lastOpTimeReceiver) {
+            return _receiveHeartbeatHelper(Status::OK(),
+                                           member,
+                                           setName,
+                                           memberState,
+                                           electionTime,
+                                           lastOpTimeSender,
+                                           lastOpTimeReceiver,
+                                           Milliseconds(0));
         }
 
-        void heartbeatFromMember(const HostAndPort& member,
-                                 const std::string& setName,
-                                 MemberState memberState,
-                                 OpTime opTime,
-                                 Milliseconds roundTripTime = Milliseconds(0)) {
-            ReplSetHeartbeatResponse hb;
-            hb.initialize(BSON("ok" << 1 <<
-                               "v" << 1 <<
-                               "state" << memberState.s));
-            hb.setOpTime(opTime);
+        HeartbeatResponseAction receiveDownHeartbeat(
+                const HostAndPort& member,
+                const std::string& setName,
+                OpTime lastOpTimeReceiver,
+                ErrorCodes::Error errcode = ErrorCodes::HostUnreachable) {
+            return _receiveHeartbeatHelper(Status(errcode, ""),
+                                           member,
+                                           setName,
+                                           MemberState::RS_UNKNOWN,
+                                           OpTime(),
+                                           OpTime(),
+                                           lastOpTimeReceiver,
+                                           Milliseconds(0));
+        }
+
+        HeartbeatResponseAction heartbeatFromMember(const HostAndPort& member,
+                                                    const std::string& setName,
+                                                    MemberState memberState,
+                                                    OpTime lastOpTimeSender,
+                                                    Milliseconds roundTripTime = Milliseconds(0)) {
+            return _receiveHeartbeatHelper(Status::OK(),
+                                           member,
+                                           setName,
+                                           memberState,
+                                           OpTime(),
+                                           lastOpTimeSender,
+                                           OpTime(),
+                                           roundTripTime);
+        }
+
+    private:
+
+        HeartbeatResponseAction _receiveHeartbeatHelper(Status responseStatus,
+                                                        const HostAndPort& member,
+                                                        const std::string& setName,
+                                                        MemberState memberState,
+                                                        OpTime electionTime,
+                                                        OpTime lastOpTimeSender,
+                                                        OpTime lastOpTimeReceiver,
+                                                        Milliseconds roundTripTime) {
             StatusWith<ReplSetHeartbeatResponse> hbResponse =
-                    StatusWith<ReplSetHeartbeatResponse>(hb);
-            getTopoCoord().prepareHeartbeatRequest(_now++,
+                    StatusWith<ReplSetHeartbeatResponse>(responseStatus);
+
+            if (responseStatus.isOK()) {
+                ReplSetHeartbeatResponse hb;
+                hb.setVersion(1);
+                hb.setState(memberState);
+                hb.setOpTime(lastOpTimeSender);
+                hb.setElectionTime(electionTime);
+                hbResponse = StatusWith<ReplSetHeartbeatResponse>(hb);
+            }
+            getTopoCoord().prepareHeartbeatRequest(now()++,
                                                    setName,
                                                    member);
-            getTopoCoord().processHeartbeatResponse(_now++,
-                                                    roundTripTime,
-                                                    member,
-                                                    hbResponse,
-                                                    OpTime(0,0));
+            return getTopoCoord().processHeartbeatResponse(now()++,
+                                                           roundTripTime,
+                                                           member,
+                                                           hbResponse,
+                                                           lastOpTimeReceiver);
         }
 
     private:
@@ -195,7 +243,7 @@ namespace {
         ASSERT_EQUALS(HostAndPort("h3"), getTopoCoord().getSyncSourceAddress());
 
         // h3 goes down
-        downMember(HostAndPort("h3"), "rs0");
+        receiveDownHeartbeat(HostAndPort("h3"), "rs0", OpTime());
         getTopoCoord().chooseNewSyncSource(now()++, OpTime(0,0));
         ASSERT_EQUALS(HostAndPort("h2"), getTopoCoord().getSyncSourceAddress());
 
@@ -276,29 +324,29 @@ namespace {
         ASSERT_EQUALS(HostAndPort("h4"), getTopoCoord().getSyncSourceAddress());
         
         // h4 goes down; should choose h1
-        downMember(HostAndPort("h4"), "rs0");
+        receiveDownHeartbeat(HostAndPort("h4"), "rs0", OpTime());
         getTopoCoord().chooseNewSyncSource(now()++, lastOpTimeWeApplied);
         ASSERT_EQUALS(HostAndPort("h1"), getTopoCoord().getSyncSourceAddress());
 
         // Primary and h1 go down; should choose h6 
-        downMember(HostAndPort("h1"), "rs0");
-        downMember(HostAndPort("hprimary"), "rs0");
+        receiveDownHeartbeat(HostAndPort("h1"), "rs0", OpTime());
+        receiveDownHeartbeat(HostAndPort("hprimary"), "rs0", OpTime());
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         getTopoCoord().chooseNewSyncSource(now()++, lastOpTimeWeApplied);
         ASSERT_EQUALS(HostAndPort("h6"), getTopoCoord().getSyncSourceAddress());
 
         // h6 goes down; should choose h5
-        downMember(HostAndPort("h6"), "rs0");
+        receiveDownHeartbeat(HostAndPort("h6"), "rs0", OpTime());
         getTopoCoord().chooseNewSyncSource(now()++, lastOpTimeWeApplied);
         ASSERT_EQUALS(HostAndPort("h5"), getTopoCoord().getSyncSourceAddress());
 
         // h5 goes down; should choose h3
-        downMember(HostAndPort("h5"), "rs0");
+        receiveDownHeartbeat(HostAndPort("h5"), "rs0", OpTime());
         getTopoCoord().chooseNewSyncSource(now()++, lastOpTimeWeApplied);
         ASSERT_EQUALS(HostAndPort("h3"), getTopoCoord().getSyncSourceAddress());
 
         // h3 goes down; no sync source candidates remain
-        downMember(HostAndPort("h3"), "rs0");
+        receiveDownHeartbeat(HostAndPort("h3"), "rs0", OpTime());
         getTopoCoord().chooseNewSyncSource(now()++, lastOpTimeWeApplied);
         ASSERT(getTopoCoord().getSyncSourceAddress().empty());
     }
@@ -408,6 +456,45 @@ namespace {
         ASSERT_EQUALS(HostAndPort("h3"), getTopoCoord().getSyncSourceAddress());
     }
 
+    TEST_F(TopoCoordTest, OnlyUnauthorizedUpCausesRecovering) {
+        updateConfig(BSON("_id" << "rs0" <<
+                          "version" << 1 <<
+                          "members" << BSON_ARRAY(
+                              BSON("_id" << 10 << "host" << "hself") <<
+                              BSON("_id" << 20 << "host" << "h2") <<
+                              BSON("_id" << 30 << "host" << "h3"))),
+                     0);
+
+        setSelfMemberState(MemberState::RS_SECONDARY);
+
+        // Generate enough heartbeats to select a sync source below
+        heartbeatFromMember(HostAndPort("h2"), "rs0", MemberState::RS_SECONDARY,
+                            OpTime(1, 0), Milliseconds(300));
+        heartbeatFromMember(HostAndPort("h2"), "rs0", MemberState::RS_SECONDARY,
+                            OpTime(1, 0), Milliseconds(300));
+        heartbeatFromMember(HostAndPort("h3"), "rs0", MemberState::RS_SECONDARY,
+                            OpTime(2, 0), Milliseconds(100));
+        heartbeatFromMember(HostAndPort("h3"), "rs0", MemberState::RS_SECONDARY,
+                            OpTime(2, 0), Milliseconds(100));
+
+        ASSERT_EQUALS(HostAndPort("h3"),
+                      getTopoCoord().chooseNewSyncSource(now()++, OpTime(0,0)));
+        ASSERT_EQUALS(MemberState::RS_SECONDARY, getTopoCoord().getMemberState().s);
+        // Good state setup done
+
+        // Mark nodes down, ensure that we have no source and are secondary
+        receiveDownHeartbeat(HostAndPort("h2"), "rs0", OpTime(), ErrorCodes::NetworkTimeout);
+        receiveDownHeartbeat(HostAndPort("h3"), "rs0", OpTime(), ErrorCodes::NetworkTimeout);
+        ASSERT_TRUE(getTopoCoord().chooseNewSyncSource(now()++, OpTime(0,0)).empty());
+        ASSERT_EQUALS(MemberState::RS_SECONDARY, getTopoCoord().getMemberState().s);
+
+        // Mark nodes down + unauth, ensure that we have no source and are secondary
+        receiveDownHeartbeat(HostAndPort("h2"), "rs0", OpTime(), ErrorCodes::NetworkTimeout);
+        receiveDownHeartbeat(HostAndPort("h3"), "rs0", OpTime(), ErrorCodes::Unauthorized);
+        ASSERT_TRUE(getTopoCoord().chooseNewSyncSource(now()++, OpTime(0,0)).empty());
+        ASSERT_EQUALS(MemberState::RS_RECOVERING, getTopoCoord().getMemberState().s);
+    }
+
     TEST_F(TopoCoordTest, PrepareSyncFromResponse) {
         // Test trying to sync from another node when we are an arbiter
         updateConfig(BSON("_id" << "rs0" <<
@@ -487,7 +574,7 @@ namespace {
                       result.reason());
 
         // Try to sync from a member that is down
-        downMember(HostAndPort("h4"), "rs0");
+        receiveDownHeartbeat(HostAndPort("h4"), "rs0", OpTime());
 
         BSONObjBuilder response7;
         getTopoCoord().prepareSyncFromResponse(
@@ -529,9 +616,30 @@ namespace {
         BSONObj response10Obj = response10.obj();
         ASSERT_FALSE(response10Obj.hasField("warning"));
         ASSERT_EQUALS(HostAndPort("h6").toString(), response10Obj["prevSyncTarget"].String());
-        downMember(HostAndPort("h6"), "rs0");
-        getTopoCoord().chooseNewSyncSource(now()++, OpTime(0,0));
-        ASSERT_EQUALS(HostAndPort("h6"), getTopoCoord().getSyncSourceAddress());
+        receiveDownHeartbeat(HostAndPort("h6"), "rs0", OpTime());
+        HostAndPort syncSource = getTopoCoord().chooseNewSyncSource(now()++, OpTime(0,0));
+        ASSERT_EQUALS(HostAndPort("h6"), syncSource);
+
+        // Try to sync from a member that is unauth'd
+        receiveDownHeartbeat(HostAndPort("h5"), "rs0", OpTime(), ErrorCodes::Unauthorized);
+
+        BSONObjBuilder response11;
+        getTopoCoord().prepareSyncFromResponse(
+                cbData(), HostAndPort("h5"), ourOpTime, &response11, &result);
+        ASSERT_NOT_OK(result);
+        ASSERT_EQUALS(ErrorCodes::Unauthorized, result.code());
+        ASSERT_EQUALS("not authorized to communicate with h5:27017",
+                      result.reason());
+
+        // Sync successfully from an up-to-date member.
+        heartbeatFromMember(HostAndPort("h6"), "rs0", MemberState::RS_SECONDARY,
+                            ourOpTime, Milliseconds(100));
+        BSONObjBuilder response12;
+        getTopoCoord().prepareSyncFromResponse(
+                cbData(), HostAndPort("h6"), ourOpTime, &response12, &result);
+        ASSERT_OK(result);
+        syncSource = getTopoCoord().chooseNewSyncSource(now()++, OpTime(0,0));
+        ASSERT_EQUALS(HostAndPort("h6"), syncSource);
     }
 
     TEST_F(TopoCoordTest, ReplSetGetStatus) {
@@ -620,7 +728,8 @@ namespace {
         ASSERT_EQUALS("(not reachable/healthy)", member0Status["stateStr"].String());
         ASSERT_EQUALS(0, member0Status["uptime"].Int());
         ASSERT_EQUALS(OpTime(), OpTime(member0Status["optime"].timestampValue()));
-        ASSERT_EQUALS(OpTime().asDate(), member0Status["optimeDate"].Date().millis);
+        ASSERT_EQUALS(Date_t(OpTime().getSecs() * 1000ULL),
+                      member0Status["optimeDate"].Date().millis);
         ASSERT_EQUALS(heartbeatTime, member0Status["lastHeartbeat"].Date());
         ASSERT_EQUALS(Date_t(), member0Status["lastHeartbeatRecv"].Date());
 
@@ -633,7 +742,8 @@ namespace {
                       member1Status["stateStr"].String());
         ASSERT_EQUALS(uptimeSecs.total_seconds(), member1Status["uptime"].Int());
         ASSERT_EQUALS(oplogProgress, OpTime(member1Status["optime"].timestampValue()));
-        ASSERT_EQUALS(oplogProgress.asDate(), member1Status["optimeDate"].Date().millis);
+        ASSERT_EQUALS(Date_t(oplogProgress.getSecs() * 1000ULL),
+                      member1Status["optimeDate"].Date().millis);
         ASSERT_EQUALS(heartbeatTime, member1Status["lastHeartbeat"].Date());
         ASSERT_EQUALS(Date_t(), member1Status["lastHeartbeatRecv"].Date());
         ASSERT_EQUALS("READY", member1Status["lastHeartbeatMessage"].String());
@@ -663,7 +773,8 @@ namespace {
                       selfStatus["stateStr"].String());
         ASSERT_EQUALS(uptimeSecs.total_seconds(), selfStatus["uptime"].Int());
         ASSERT_EQUALS(oplogProgress, OpTime(selfStatus["optime"].timestampValue()));
-        ASSERT_EQUALS(oplogProgress.asDate(), selfStatus["optimeDate"].Date().millis);
+        ASSERT_EQUALS(Date_t(oplogProgress.getSecs() * 1000ULL),
+                      selfStatus["optimeDate"].Date().millis);
 
         // TODO(spencer): Test electionTime and pingMs are set properly
     }
@@ -694,7 +805,7 @@ namespace {
 
         BSONObjBuilder responseBuilder0;
         Status status0 = internalErrorStatus;
-        getTopoCoord().prepareFreshResponse(cbData(), args, ourOpTime, &responseBuilder0, &status0);
+        getTopoCoord().prepareFreshResponse(args, Date_t(), ourOpTime, &responseBuilder0, &status0);
         ASSERT_EQUALS(ErrorCodes::ReplicaSetNotFound, status0);
         ASSERT_TRUE(responseBuilder0.obj().isEmpty());
 
@@ -709,7 +820,7 @@ namespace {
 
         BSONObjBuilder responseBuilder1;
         Status status1 = internalErrorStatus;
-        getTopoCoord().prepareFreshResponse(cbData(), args, ourOpTime, &responseBuilder1, &status1);
+        getTopoCoord().prepareFreshResponse(args, Date_t(), ourOpTime, &responseBuilder1, &status1);
         ASSERT_OK(status1);
         BSONObj response1 = responseBuilder1.obj();
         ASSERT_EQUALS("config version stale", response1["info"].String());
@@ -725,7 +836,7 @@ namespace {
 
         BSONObjBuilder responseBuilder2;
         Status status2 = internalErrorStatus;
-        getTopoCoord().prepareFreshResponse(cbData(), args, ourOpTime, &responseBuilder2, &status2);
+        getTopoCoord().prepareFreshResponse(args, Date_t(), ourOpTime, &responseBuilder2, &status2);
         ASSERT_OK(status2);
         BSONObj response2 = responseBuilder2.obj();
         ASSERT_EQUALS(ourOpTime, OpTime(response2["opTime"].timestampValue()));
@@ -742,7 +853,7 @@ namespace {
 
         BSONObjBuilder responseBuilder3;
         Status status3 = internalErrorStatus;
-        getTopoCoord().prepareFreshResponse(cbData(), args, ourOpTime, &responseBuilder3, &status3);
+        getTopoCoord().prepareFreshResponse(args, Date_t(), ourOpTime, &responseBuilder3, &status3);
         ASSERT_OK(status3);
         BSONObj response3 = responseBuilder3.obj();
         ASSERT_FALSE(response3.hasField("info"));
@@ -760,7 +871,7 @@ namespace {
 
         BSONObjBuilder responseBuilder4;
         Status status4 = internalErrorStatus;
-        getTopoCoord().prepareFreshResponse(cbData(), args, ourOpTime, &responseBuilder4, &status4);
+        getTopoCoord().prepareFreshResponse(args, Date_t(), ourOpTime, &responseBuilder4, &status4);
         ASSERT_OK(status4);
         BSONObj response4 = responseBuilder4.obj();
         ASSERT_FALSE(response4.hasField("info"));
@@ -780,26 +891,25 @@ namespace {
 
         BSONObjBuilder responseBuilder5;
         Status status5 = internalErrorStatus;
-        getTopoCoord().prepareFreshResponse(cbData(), args, ourOpTime, &responseBuilder5, &status5);
+        getTopoCoord().prepareFreshResponse(args, Date_t(), ourOpTime, &responseBuilder5, &status5);
         ASSERT_OK(status5);
         BSONObj response5 = responseBuilder5.obj();
         ASSERT_FALSE(response5.hasField("info"));
         ASSERT_EQUALS(ourOpTime, OpTime(response5["opTime"].timestampValue()));
         ASSERT_FALSE(response5["fresher"].Bool());
         ASSERT_TRUE(response5["veto"].Bool());
-        ASSERT_EQUALS("h1:27017 has lower priority of 1 than h3:27017 which has a priority of 10",
-                      response5["errmsg"].String());
-
+        ASSERT(response5["errmsg"].String().find("h1:27017 has lower priority of 1 than") !=
+               std::string::npos) << response5["errmsg"].String();
 
         // Test trying to elect a node that isn't electable because its down
         args.id = 40;
         args.who = HostAndPort("h3");
 
-        downMember(HostAndPort("h3"), "rs0");
+        receiveDownHeartbeat(HostAndPort("h3"), "rs0", OpTime());
 
         BSONObjBuilder responseBuilder6;
         Status status6 = internalErrorStatus;
-        getTopoCoord().prepareFreshResponse(cbData(), args, ourOpTime, &responseBuilder6, &status6);
+        getTopoCoord().prepareFreshResponse(args, Date_t(), ourOpTime, &responseBuilder6, &status6);
         ASSERT_OK(status6);
         BSONObj response6 = responseBuilder6.obj();
         ASSERT_FALSE(response6.hasField("info"));
@@ -818,7 +928,7 @@ namespace {
 
         BSONObjBuilder responseBuilder7;
         Status status7 = internalErrorStatus;
-        getTopoCoord().prepareFreshResponse(cbData(), args, ourOpTime, &responseBuilder7, &status7);
+        getTopoCoord().prepareFreshResponse(args, Date_t(), ourOpTime, &responseBuilder7, &status7);
         ASSERT_OK(status7);
         BSONObj response7 = responseBuilder7.obj();
         ASSERT_FALSE(response7.hasField("info"));
@@ -835,7 +945,7 @@ namespace {
 
         BSONObjBuilder responseBuilder8;
         Status status8 = internalErrorStatus;
-        getTopoCoord().prepareFreshResponse(cbData(), args, ourOpTime, &responseBuilder8, &status8);
+        getTopoCoord().prepareFreshResponse(args, Date_t(), ourOpTime, &responseBuilder8, &status8);
         ASSERT_OK(status8);
         BSONObj response8 = responseBuilder8.obj();
         ASSERT_FALSE(response8.hasField("info"));
@@ -852,7 +962,7 @@ namespace {
 
         BSONObjBuilder responseBuilder9;
         Status status9 = internalErrorStatus;
-        getTopoCoord().prepareFreshResponse(cbData(), args, ourOpTime, &responseBuilder9, &status9);
+        getTopoCoord().prepareFreshResponse(args, Date_t(), ourOpTime, &responseBuilder9, &status9);
         ASSERT_OK(status9);
         BSONObj response9 = responseBuilder9.obj();
         ASSERT_FALSE(response9.hasField("info"));
@@ -875,27 +985,27 @@ namespace {
 
         BSONObjBuilder responseBuilder10;
         Status status10 = internalErrorStatus;
-        getTopoCoord().prepareFreshResponse(cbData(), args, ourOpTime, &responseBuilder10, &status10);
+        getTopoCoord().prepareFreshResponse(args, Date_t(), ourOpTime, &responseBuilder10, &status10);
         ASSERT_OK(status10);
         BSONObj response10 = responseBuilder10.obj();
         ASSERT_FALSE(response10.hasField("info"));
         ASSERT_EQUALS(ourOpTime, OpTime(response10["opTime"].timestampValue()));
         ASSERT_TRUE(response10["fresher"].Bool());
-        ASSERT_FALSE(response10["veto"].Bool());
-        ASSERT_FALSE(response10.hasField("errmsg"));
+        ASSERT_TRUE(response10["veto"].Bool());
+        ASSERT_TRUE(response10.hasField("errmsg"));
 
 
         // Finally, test trying to elect a valid node
         args.id = 40;
         args.who = HostAndPort("h3");
 
-        downMember(HostAndPort("h2"), "rs0");
+        receiveDownHeartbeat(HostAndPort("h2"), "rs0", OpTime());
         heartbeatFromMember(HostAndPort("h3"), "rs0", MemberState::RS_SECONDARY, ourOpTime);
 
         BSONObjBuilder responseBuilder11;
         Status status11 = internalErrorStatus;
         getTopoCoord().prepareFreshResponse(
-                cbData(), args, ourOpTime, &responseBuilder11, &status11);
+                args, Date_t(), ourOpTime, &responseBuilder11, &status11);
         ASSERT_OK(status11);
         BSONObj response11 = responseBuilder11.obj();
         ASSERT_FALSE(response11.hasField("info")) << response11.toString();
@@ -920,35 +1030,6 @@ namespace {
                          0);
         }
 
-        HeartbeatResponseAction receiveUpHeartbeat(
-                const HostAndPort& member,
-                const std::string& setName,
-                const MemberState& memberState,
-                const OpTime& electionTime,
-                const OpTime& lastOpTimeSender,
-                const OpTime& lastOpTimeReceiver) {
-            ReplSetHeartbeatResponse hb;
-            hb.initialize(BSON("ok" << 1 <<
-                               "v" << 1 <<
-                               "state" << memberState.s));
-            hb.setOpTime(lastOpTimeSender);
-            hb.setElectionTime(electionTime);
-            StatusWith<ReplSetHeartbeatResponse> hbResponse =
-                    StatusWith<ReplSetHeartbeatResponse>(hb);
-            getTopoCoord().prepareHeartbeatRequest(now()++,
-                                                   setName,
-                                                   member);
-            return getTopoCoord().processHeartbeatResponse(now()++,
-                                                           Milliseconds(0),
-                                                           member,
-                                                           hbResponse,
-                                                           lastOpTimeReceiver);
-        }
-
-        HeartbeatResponseAction receiveDownHeartbeat(const HostAndPort& member,
-                                                     const std::string& setName) {
-            return downMember(member, setName);
-        }
     };
 
     class HeartbeatResponseTestOneRetry : public HeartbeatResponseTest {
@@ -1233,7 +1314,9 @@ namespace {
         // action.
         
         // acknowledge the other member so that we see a majority
-        HeartbeatResponseAction action = receiveDownHeartbeat(HostAndPort("host3"), "rs0");
+        HeartbeatResponseAction action = receiveDownHeartbeat(HostAndPort("host3"),
+                                                              "rs0",
+                                                              OpTime(100, 0));
         ASSERT_NO_ACTION(action.getAction());
 
         // make us PRIMARY
@@ -1264,8 +1347,8 @@ namespace {
         // action.
         
         // acknowledge the other member so that we see a majority
-        OpTime election = OpTime(4,0);
-        OpTime lastOpTimeApplied = OpTime(3,0);
+        OpTime election = OpTime(400,0);
+        OpTime lastOpTimeApplied = OpTime(300,0);
         HeartbeatResponseAction action = receiveUpHeartbeat(HostAndPort("host3"),
                                                             "rs0",
                                                             MemberState::RS_SECONDARY,
@@ -1289,7 +1372,7 @@ namespace {
                     Milliseconds(400), // Spent 0.4 of the 0.5 second in the network.
                     target(),
                     StatusWith<ReplSetHeartbeatResponse>(startElectionResponse),
-                    OpTime(0, 0));  // We've never applied anything.
+                    election);
         ASSERT_EQUALS(HeartbeatResponseAction::StartElection, action.getAction());
         ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
         ASSERT_EQUALS(Date_t(firstRequestDate() + 6500), action.getNextHeartbeatStartDate());
@@ -1353,7 +1436,9 @@ namespace {
         // action.
         
         // acknowledge the other member so that we see a majority
-        HeartbeatResponseAction action = receiveDownHeartbeat(HostAndPort("host3"), "rs0");
+        HeartbeatResponseAction action = receiveDownHeartbeat(HostAndPort("host3"),
+                                                              "rs0",
+                                                              OpTime(100, 0));
         ASSERT_NO_ACTION(action.getAction());
 
         // make us PRIMARY
@@ -1384,8 +1469,8 @@ namespace {
         // action.
         
         // acknowledge the other member so that we see a majority
-        OpTime election = OpTime(4,0);
-        OpTime lastOpTimeApplied = OpTime(3,0);
+        OpTime election = OpTime(400,0);
+        OpTime lastOpTimeApplied = OpTime(300,0);
         HeartbeatResponseAction action = receiveUpHeartbeat(HostAndPort("host3"),
                                                             "rs0",
                                                             MemberState::RS_SECONDARY,
@@ -1409,7 +1494,7 @@ namespace {
                     Milliseconds(400), // Spent 0.4 of the 0.5 second in the network.
                     target(),
                     StatusWith<ReplSetHeartbeatResponse>(startElectionResponse),
-                    OpTime(0, 0));  // We've never applied anything.
+                    election);
         ASSERT_EQUALS(HeartbeatResponseAction::StartElection, action.getAction());
         ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
         ASSERT_EQUALS(Date_t(firstRequestDate() + 7000), action.getNextHeartbeatStartDate());
@@ -1554,6 +1639,131 @@ namespace {
         ASSERT_TRUE(TopologyCoordinator::Role::leader == getTopoCoord().getRole());
     }
 
+    TEST_F(HeartbeatResponseTest, UpdateHeartbeatDataStepDownPrimaryForHighPriorityFreshNode) {
+        // In this test, the Topology coordinator sees a PRIMARY ("host2") and then sees a higher
+        // priority and similarly fresh node ("host3"). As a result it responds with a
+        // StepDownRemote action for the PRIMARY ("host2").
+        updateConfig(BSON("_id" << "rs0" <<
+                          "version" << 6 <<
+                          "members" << BSON_ARRAY(
+                              BSON("_id" << 0 << "host" << "host1:27017") <<
+                              BSON("_id" << 1 << "host" << "host2:27017") <<
+                              BSON("_id" << 2 << "host" << "host3:27017" << "priority" << 3)) <<
+                          "settings" << BSON("heartbeatTimeoutSecs" << 5)),
+                     0);
+        setSelfMemberState(MemberState::RS_SECONDARY);
+
+        OpTime election = OpTime(0,0);
+        OpTime lastOpTimeApplied = OpTime(13,0);
+        OpTime slightlyLessFreshLastOpTimeApplied = OpTime(3,0);
+
+        ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
+        HeartbeatResponseAction nextAction = receiveUpHeartbeat(HostAndPort("host2"),
+                                                                "rs0",
+                                                                MemberState::RS_PRIMARY,
+                                                                election,
+                                                                lastOpTimeApplied,
+                                                                lastOpTimeApplied);
+        ASSERT_EQUALS(1, getCurrentPrimaryIndex());
+
+        nextAction = receiveUpHeartbeat(HostAndPort("host3"),
+                                        "rs0",
+                                        MemberState::RS_SECONDARY,
+                                        election,
+                                        slightlyLessFreshLastOpTimeApplied,
+                                        lastOpTimeApplied);
+        ASSERT_EQUALS(HeartbeatResponseAction::StepDownRemotePrimary, nextAction.getAction());
+        ASSERT_EQUALS(1, nextAction.getPrimaryConfigIndex());
+    }
+
+    TEST_F(HeartbeatResponseTest, UpdateHeartbeatDataStepDownSelfForHighPriorityFreshNode) {
+        // In this test, the Topology coordinator becomes PRIMARY and then sees a higher priority
+        // and equally fresh node ("host3"). As a result it responds with a StepDownSelf action.
+        updateConfig(BSON("_id" << "rs0" <<
+                          "version" << 6 <<
+                          "members" << BSON_ARRAY(
+                              BSON("_id" << 0 << "host" << "host1:27017") <<
+                              BSON("_id" << 1 << "host" << "host2:27017") <<
+                              BSON("_id" << 2 << "host" << "host3:27017" << "priority" << 3)) <<
+                          "settings" << BSON("heartbeatTimeoutSecs" << 5)),
+                     0);
+        OpTime election = OpTime(1000,0);
+
+        ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
+        makeSelfPrimary(election);
+        ASSERT_EQUALS(0, getCurrentPrimaryIndex());
+
+        HeartbeatResponseAction nextAction = receiveUpHeartbeat(HostAndPort("host3"),
+                                                                "rs0",
+                                                                MemberState::RS_SECONDARY,
+                                                                election,
+                                                                election,
+                                                                election);
+        ASSERT_EQUALS(HeartbeatResponseAction::StepDownSelf, nextAction.getAction());
+        ASSERT_EQUALS(0, nextAction.getPrimaryConfigIndex());
+    }
+
+    TEST_F(HeartbeatResponseTest, UpdateHeartbeatDataDoNotStepDownSelfForHighPriorityStaleNode) {
+        // In this test, the Topology coordinator becomes PRIMARY and then sees a higher priority
+        // and stale node ("host3"). As a result it responds with NoAction.
+        updateConfig(BSON("_id" << "rs0" <<
+                          "version" << 6 <<
+                          "members" << BSON_ARRAY(
+                              BSON("_id" << 0 << "host" << "host1:27017") <<
+                              BSON("_id" << 1 << "host" << "host2:27017") <<
+                              BSON("_id" << 2 << "host" << "host3:27017" << "priority" << 3)) <<
+                          "settings" << BSON("heartbeatTimeoutSecs" << 5)),
+                     0);
+        OpTime election = OpTime(1000,0);
+        OpTime staleTime = OpTime(0,0);
+
+        ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
+        makeSelfPrimary(election);
+        ASSERT_EQUALS(0, getCurrentPrimaryIndex());
+
+        HeartbeatResponseAction nextAction = receiveUpHeartbeat(HostAndPort("host3"),
+                                                                "rs0",
+                                                                MemberState::RS_SECONDARY,
+                                                                election,
+                                                                staleTime,
+                                                                election);
+        ASSERT_NO_ACTION(nextAction.getAction());
+    }
+
+    TEST_F(HeartbeatResponseTest, UpdateHeartbeatDataDoNotStepDownPrimaryForHighPriorityStaleNode) {
+        // In this test, the Topology coordinator sees a PRIMARY ("host2") and then sees a higher
+        // priority and stale node ("host3"). As a result it responds with NoAction.
+        updateConfig(BSON("_id" << "rs0" <<
+                          "version" << 6 <<
+                          "members" << BSON_ARRAY(
+                              BSON("_id" << 0 << "host" << "host1:27017") <<
+                              BSON("_id" << 1 << "host" << "host2:27017") <<
+                              BSON("_id" << 2 << "host" << "host3:27017" << "priority" << 3)) <<
+                          "settings" << BSON("heartbeatTimeoutSecs" << 5)),
+                     0);
+        setSelfMemberState(MemberState::RS_SECONDARY);
+
+        OpTime election = OpTime(1000,0);
+        OpTime stale = OpTime(0,0);
+
+        ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
+        HeartbeatResponseAction nextAction = receiveUpHeartbeat(HostAndPort("host2"),
+                                                                "rs0",
+                                                                MemberState::RS_PRIMARY,
+                                                                election,
+                                                                election,
+                                                                election);
+        ASSERT_EQUALS(1, getCurrentPrimaryIndex());
+
+        nextAction = receiveUpHeartbeat(HostAndPort("host3"),
+                                        "rs0",
+                                        MemberState::RS_SECONDARY,
+                                        election,
+                                        stale,
+                                        election);
+        ASSERT_NO_ACTION(nextAction.getAction());
+    }
+
     TEST_F(HeartbeatResponseTest, UpdateHeartbeatDataTwoPrimariesIncludingMeNewOneNewer) {
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         makeSelfPrimary(OpTime(2,0));
@@ -1577,8 +1787,8 @@ namespace {
     TEST_F(HeartbeatResponseTest, UpdateHeartbeatDataPrimaryDownNoMajority) {
         setSelfMemberState(MemberState::RS_SECONDARY);
 
-        OpTime election = OpTime(4,0);
-        OpTime lastOpTimeApplied = OpTime(3,0);
+        OpTime election = OpTime(400,0);
+        OpTime lastOpTimeApplied = OpTime(300,0);
 
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         HeartbeatResponseAction nextAction = receiveUpHeartbeat(HostAndPort("host2"),
@@ -1590,7 +1800,7 @@ namespace {
         ASSERT_NO_ACTION(nextAction.getAction());
         ASSERT_EQUALS(1, getCurrentPrimaryIndex());
 
-        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0", lastOpTimeApplied);
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         ASSERT_NO_ACTION(nextAction.getAction());
         ASSERT_TRUE(TopologyCoordinator::Role::follower == getTopoCoord().getRole());
@@ -1607,8 +1817,8 @@ namespace {
                               BSON("_id" << 2 << "host" << "host3:27017"))),
                      0);
 
-        OpTime election = OpTime(4,0);
-        OpTime lastOpTimeApplied = OpTime(3,0);
+        OpTime election = OpTime(400,0);
+        OpTime lastOpTimeApplied = OpTime(300,0);
 
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         HeartbeatResponseAction nextAction = receiveUpHeartbeat(HostAndPort("host2"),
@@ -1629,7 +1839,7 @@ namespace {
         ASSERT_NO_ACTION(nextAction.getAction());
         ASSERT_EQUALS(1, getCurrentPrimaryIndex());
 
-        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0", lastOpTimeApplied);
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         ASSERT_NO_ACTION(nextAction.getAction());
         ASSERT_TRUE(TopologyCoordinator::Role::follower == getTopoCoord().getRole());
@@ -1638,8 +1848,8 @@ namespace {
     TEST_F(HeartbeatResponseTest, UpdateHeartbeatDataPrimaryDownMajorityButIAmStarting) {
         setSelfMemberState(MemberState::RS_STARTUP);
 
-        OpTime election = OpTime(4,0);
-        OpTime lastOpTimeApplied = OpTime(3,0);
+        OpTime election = OpTime(400,0);
+        OpTime lastOpTimeApplied = OpTime(300,0);
 
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         HeartbeatResponseAction nextAction = receiveUpHeartbeat(HostAndPort("host2"),
@@ -1659,7 +1869,7 @@ namespace {
                                         lastOpTimeApplied);
         ASSERT_NO_ACTION(nextAction.getAction());
 
-        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0", lastOpTimeApplied);
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         ASSERT_NO_ACTION(nextAction.getAction());
         ASSERT_TRUE(TopologyCoordinator::Role::follower == getTopoCoord().getRole());
@@ -1668,8 +1878,8 @@ namespace {
     TEST_F(HeartbeatResponseTest, UpdateHeartbeatDataPrimaryDownMajorityButIAmRecovering) {
         setSelfMemberState(MemberState::RS_RECOVERING);
 
-        OpTime election = OpTime(4,0);
-        OpTime lastOpTimeApplied = OpTime(3,0);
+        OpTime election = OpTime(400,0);
+        OpTime lastOpTimeApplied = OpTime(300,0);
 
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         HeartbeatResponseAction nextAction = receiveUpHeartbeat(HostAndPort("host2"),
@@ -1681,7 +1891,7 @@ namespace {
         ASSERT_NO_ACTION(nextAction.getAction());
         ASSERT_EQUALS(1, getCurrentPrimaryIndex());
 
-        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0", lastOpTimeApplied);
         ASSERT_NO_ACTION(nextAction.getAction());
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         ASSERT_TRUE(TopologyCoordinator::Role::follower == getTopoCoord().getRole());
@@ -1690,8 +1900,8 @@ namespace {
     TEST_F(HeartbeatResponseTest, UpdateHeartbeatDataPrimaryDownMajorityButIHaveStepdownWait) {
         setSelfMemberState(MemberState::RS_SECONDARY);
 
-        OpTime election = OpTime(4,0);
-        OpTime lastOpTimeApplied = OpTime(3,0);
+        OpTime election = OpTime(400,0);
+        OpTime lastOpTimeApplied = OpTime(300,0);
 
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         HeartbeatResponseAction nextAction = receiveUpHeartbeat(HostAndPort("host2"),
@@ -1716,7 +1926,7 @@ namespace {
         BSONObjBuilder response;
         getTopoCoord().prepareFreezeResponse(cbData(), now()++, 20, &response, &result);
 
-        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0", lastOpTimeApplied);
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         ASSERT_NO_ACTION(nextAction.getAction());
         ASSERT_TRUE(TopologyCoordinator::Role::follower == getTopoCoord().getRole());
@@ -1732,8 +1942,8 @@ namespace {
                               BSON("_id" << 2 << "host" << "host3:27017"))),
                      0);
 
-        OpTime election = OpTime(4,0);
-        OpTime lastOpTimeApplied = OpTime(3,0);
+        OpTime election = OpTime(400,0);
+        OpTime lastOpTimeApplied = OpTime(300,0);
 
         HeartbeatResponseAction nextAction = receiveUpHeartbeat(HostAndPort("host3"),
                                                                 "rs0",
@@ -1753,7 +1963,7 @@ namespace {
         ASSERT_NO_ACTION(nextAction.getAction());
         ASSERT_EQUALS(1, getCurrentPrimaryIndex());
 
-        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0", lastOpTimeApplied);
         ASSERT_NO_ACTION(nextAction.getAction());
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         ASSERT_TRUE(TopologyCoordinator::Role::follower == getTopoCoord().getRole());
@@ -1762,8 +1972,8 @@ namespace {
     TEST_F(HeartbeatResponseTest, UpdateHeartbeatDataPrimaryDownMajority) {
         setSelfMemberState(MemberState::RS_SECONDARY);
 
-        OpTime election = OpTime(4,0);
-        OpTime lastOpTimeApplied = OpTime(3,0);
+        OpTime election = OpTime(400,0);
+        OpTime lastOpTimeApplied = OpTime(399,0);
 
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         HeartbeatResponseAction nextAction = receiveUpHeartbeat(HostAndPort("host2"),
@@ -1783,7 +1993,7 @@ namespace {
                                         lastOpTimeApplied);
         ASSERT_NO_ACTION(nextAction.getAction());
 
-        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0", lastOpTimeApplied);
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         ASSERT_EQUALS(HeartbeatResponseAction::StartElection, nextAction.getAction());
         ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
@@ -1807,7 +2017,7 @@ namespace {
                        // some Date_t math goes horribly awry
 
         OpTime election = OpTime(0,0);
-        OpTime lastOpTimeApplied = OpTime(13,0);
+        OpTime lastOpTimeApplied = OpTime(130,0);
         OID round = OID::gen();
 
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
@@ -1829,7 +2039,7 @@ namespace {
         ASSERT_NO_ACTION(nextAction.getAction());
 
         // candidate time!
-        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0", lastOpTimeApplied);
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         ASSERT_EQUALS(HeartbeatResponseAction::StartElection, nextAction.getAction());
         ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
@@ -1851,7 +2061,7 @@ namespace {
         ASSERT_TRUE(getTopoCoord().voteForMyself(now()++));
 
         // now win election and ensure _electionId and _electionTime are set properly
-        getTopoCoord().processWinElection(now()++, round, lastOpTimeApplied, election);
+        getTopoCoord().processWinElection(round, election);
         ASSERT_EQUALS(round, getTopoCoord().getElectionId());
         ASSERT_EQUALS(election, getTopoCoord().getElectionTime());
         ASSERT_TRUE(TopologyCoordinator::Role::leader == getTopoCoord().getRole());
@@ -1877,8 +2087,8 @@ namespace {
                        // some Date_t math goes horribly awry
 
         OpTime election = OpTime(0,0);
-        OpTime lastOpTimeApplied = OpTime(10,0);
-        OpTime fresherLastOpTimeApplied = OpTime(20,0);
+        OpTime lastOpTimeApplied = OpTime(100,0);
+        OpTime fresherOpApplied = OpTime(200,0);
 
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         HeartbeatResponseAction nextAction = receiveUpHeartbeat(HostAndPort("host2"),
@@ -1894,12 +2104,12 @@ namespace {
                                         "rs0",
                                         MemberState::RS_SECONDARY,
                                         election,
-                                        fresherLastOpTimeApplied,
+                                        lastOpTimeApplied,
                                         lastOpTimeApplied);
         ASSERT_NO_ACTION(nextAction.getAction());
 
         // candidate time!
-        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0", lastOpTimeApplied);
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         ASSERT_EQUALS(HeartbeatResponseAction::StartElection, nextAction.getAction());
         ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
@@ -1912,16 +2122,16 @@ namespace {
         freshArgs.cfgver = 5;
         freshArgs.id = 2;
         freshArgs.who = HostAndPort("host3");
-        freshArgs.opTime = lastOpTimeApplied;
+        freshArgs.opTime = fresherOpApplied;
 
         BSONObjBuilder freshResponseBuilder;
         Status result = Status(ErrorCodes::InternalError, "status not set by prepareElectResponse");
         getTopoCoord().prepareFreshResponse(
-                cbData(), freshArgs, lastOpTimeApplied, &freshResponseBuilder, &result);
+                freshArgs, now()++, lastOpTimeApplied, &freshResponseBuilder, &result);
         BSONObj response = freshResponseBuilder.obj();
         ASSERT_OK(result);
         ASSERT_EQUALS(lastOpTimeApplied, OpTime(response["opTime"].timestampValue()));
-        ASSERT_TRUE(response["fresher"].trueValue());
+        ASSERT_FALSE(response["fresher"].trueValue());
         ASSERT_FALSE(response["veto"].trueValue());
         ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
         // make sure incoming fresh commands do not change electionTime and electionId
@@ -1940,7 +2150,7 @@ namespace {
         result = Status(ErrorCodes::InternalError, "status not set by prepareElectResponse");
         startCapturingLogMessages();
         getTopoCoord().prepareElectResponse(
-                cbData(), electArgs, now()++, &electResponseBuilder, &result);
+                electArgs, now()++, OpTime(), &electResponseBuilder, &result);
         stopCapturingLogMessages();
         response = electResponseBuilder.obj();
         ASSERT_OK(result);
@@ -1969,7 +2179,7 @@ namespace {
         ASSERT_EQUALS(originalElectionId, getTopoCoord().getElectionId());
 
         // now lose election and ensure _electionTime and _electionId are 0'd out 
-        getTopoCoord().processLoseElection(now()++, lastOpTimeApplied);
+        getTopoCoord().processLoseElection();
         ASSERT_EQUALS(OID(), getTopoCoord().getElectionId());
         ASSERT_EQUALS(OpTime(0,0), getTopoCoord().getElectionTime());
         ASSERT_TRUE(TopologyCoordinator::Role::follower == getTopoCoord().getRole());
@@ -1995,8 +2205,8 @@ namespace {
                        // some Date_t math goes horribly awry
 
         OpTime election = OpTime(0,0);
-        OpTime lastOpTimeApplied = OpTime(10,0);
-        OpTime fresherLastOpTimeApplied = OpTime(20,0);
+        OpTime lastOpTimeApplied = OpTime(100,0);
+        OpTime fresherLastOpTimeApplied = OpTime(200,0);
         OID round = OID::gen();
         OID remoteRound = OID::gen();
 
@@ -2014,12 +2224,12 @@ namespace {
                                         "rs0",
                                         MemberState::RS_SECONDARY,
                                         election,
-                                        fresherLastOpTimeApplied,
+                                        lastOpTimeApplied,
                                         lastOpTimeApplied);
         ASSERT_NO_ACTION(nextAction.getAction());
 
         // candidate time!
-        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0", lastOpTimeApplied);
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         ASSERT_EQUALS(HeartbeatResponseAction::StartElection, nextAction.getAction());
         ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
@@ -2030,23 +2240,23 @@ namespace {
         freshArgs.cfgver = 5;
         freshArgs.id = 2;
         freshArgs.who = HostAndPort("host3");
-        freshArgs.opTime = lastOpTimeApplied;
+        freshArgs.opTime = fresherLastOpTimeApplied;
 
         BSONObjBuilder freshResponseBuilder;
         Status result = Status(ErrorCodes::InternalError, "status not set by prepareElectResponse");
         getTopoCoord().prepareFreshResponse(
-                cbData(), freshArgs, lastOpTimeApplied, &freshResponseBuilder, &result);
+                freshArgs, now()++, lastOpTimeApplied, &freshResponseBuilder, &result);
         BSONObj response = freshResponseBuilder.obj();
         ASSERT_OK(result);
         ASSERT_EQUALS(lastOpTimeApplied, OpTime(response["opTime"].timestampValue()));
-        ASSERT_TRUE(response["fresher"].trueValue());
+        ASSERT_FALSE(response["fresher"].trueValue());
         ASSERT_FALSE(response["veto"].trueValue());
         ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
 
         // now voteForSelf as though we received all our fresh responses
         ASSERT_TRUE(getTopoCoord().voteForMyself(now()++));
         // now win election and ensure _electionId and _electionTime are set properly
-        getTopoCoord().processWinElection(now()++, round, lastOpTimeApplied, election);
+        getTopoCoord().processWinElection(round, election);
         ASSERT_EQUALS(round, getTopoCoord().getElectionId());
         ASSERT_EQUALS(election, getTopoCoord().getElectionTime());
         ASSERT_TRUE(TopologyCoordinator::Role::leader == getTopoCoord().getRole());
@@ -2063,7 +2273,7 @@ namespace {
         result = Status(ErrorCodes::InternalError, "status not set by prepareElectResponse");
         startCapturingLogMessages();
         getTopoCoord().prepareElectResponse(
-                cbData(), electArgs, now()++, &electResponseBuilder, &result);
+                electArgs, now()++, OpTime(), &electResponseBuilder, &result);
         stopCapturingLogMessages();
         response = electResponseBuilder.obj();
         ASSERT_OK(result);
@@ -2092,8 +2302,8 @@ namespace {
                        // some Date_t math goes horribly awry
 
         OpTime election = OpTime(0,0);
-        OpTime lastOpTimeApplied = OpTime(10,0);
-        OpTime fresherLastOpTimeApplied = OpTime(20,0);
+        OpTime lastOpTimeApplied = OpTime(100,0);
+        OpTime fresherLastOpTimeApplied = OpTime(200,0);
         OID round = OID::gen();
         OID remoteRound = OID::gen();
 
@@ -2111,12 +2321,12 @@ namespace {
                                         "rs0",
                                         MemberState::RS_SECONDARY,
                                         election,
-                                        fresherLastOpTimeApplied,
+                                        lastOpTimeApplied,
                                         lastOpTimeApplied);
         ASSERT_NO_ACTION(nextAction.getAction());
 
         // candidate time!
-        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0", lastOpTimeApplied);
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         ASSERT_EQUALS(HeartbeatResponseAction::StartElection, nextAction.getAction());
         ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
@@ -2124,7 +2334,7 @@ namespace {
         // now voteForSelf as though we received all our fresh responses
         ASSERT_TRUE(getTopoCoord().voteForMyself(now()++));
         // now win election
-        getTopoCoord().processWinElection(now()++, round, lastOpTimeApplied, election);
+        getTopoCoord().processWinElection(round, election);
         ASSERT_EQUALS(0, getTopoCoord().getCurrentPrimaryIndex());
         ASSERT_TRUE(TopologyCoordinator::Role::leader == getTopoCoord().getRole());
 
@@ -2134,17 +2344,17 @@ namespace {
         freshArgs.cfgver = 5;
         freshArgs.id = 2;
         freshArgs.who = HostAndPort("host3");
-        freshArgs.opTime = lastOpTimeApplied;
+        freshArgs.opTime = fresherLastOpTimeApplied;
 
         BSONObjBuilder freshResponseBuilder;
         Status result = Status(ErrorCodes::InternalError, "status not set by prepareElectResponse");
         getTopoCoord().prepareFreshResponse(
-                cbData(), freshArgs, lastOpTimeApplied, &freshResponseBuilder, &result);
+                freshArgs, now()++, lastOpTimeApplied, &freshResponseBuilder, &result);
         BSONObj response = freshResponseBuilder.obj();
         ASSERT_OK(result);
         ASSERT_EQUALS(lastOpTimeApplied, OpTime(response["opTime"].timestampValue()));
-        ASSERT_TRUE(response["fresher"].trueValue());
-        ASSERT_FALSE(response["veto"].trueValue());
+        ASSERT_FALSE(response["fresher"].trueValue());
+        ASSERT_TRUE(response["veto"].trueValue()) << response["errmsg"];
         ASSERT_TRUE(TopologyCoordinator::Role::leader == getTopoCoord().getRole());
         ASSERT_EQUALS(0, getCurrentPrimaryIndex());
 
@@ -2159,7 +2369,7 @@ namespace {
         result = Status(ErrorCodes::InternalError, "status not set by prepareElectResponse");
         startCapturingLogMessages();
         getTopoCoord().prepareElectResponse(
-                cbData(), electArgs, now()++, &electResponseBuilder, &result);
+                electArgs, now()++, OpTime(), &electResponseBuilder, &result);
         stopCapturingLogMessages();
         response = electResponseBuilder.obj();
         ASSERT_OK(result);
@@ -2185,8 +2395,8 @@ namespace {
 
         setSelfMemberState(MemberState::RS_SECONDARY);
 
-        OpTime election = OpTime(4,0);
-        OpTime lastOpTimeApplied = OpTime(3,0);
+        OpTime election = OpTime(400,0);
+        OpTime lastOpTimeApplied = OpTime(300,0);
 
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         HeartbeatResponseAction nextAction = receiveUpHeartbeat(HostAndPort("host2"),
@@ -2200,23 +2410,23 @@ namespace {
 
         // make sure all non-voting nodes are down, that way we do not have a majority of nodes
         // but do have a majority of votes since one of two voting members is up and so are we
-        nextAction = receiveDownHeartbeat(HostAndPort("host3"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host3"), "rs0", lastOpTimeApplied);
         ASSERT_NO_ACTION(nextAction.getAction());
-        nextAction = receiveDownHeartbeat(HostAndPort("host4"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host4"), "rs0", lastOpTimeApplied);
         ASSERT_NO_ACTION(nextAction.getAction());
-        nextAction = receiveDownHeartbeat(HostAndPort("host5"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host5"), "rs0", lastOpTimeApplied);
         ASSERT_NO_ACTION(nextAction.getAction());
-        nextAction = receiveDownHeartbeat(HostAndPort("host6"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host6"), "rs0", lastOpTimeApplied);
         ASSERT_NO_ACTION(nextAction.getAction());
         nextAction = receiveUpHeartbeat(HostAndPort("host7"),
                                         "rs0",
                                         MemberState::RS_SECONDARY,
                                         election,
-                                        election,
+                                        lastOpTimeApplied,
                                         lastOpTimeApplied);
         ASSERT_NO_ACTION(nextAction.getAction());
 
-        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0", lastOpTimeApplied);
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
         ASSERT_EQUALS(HeartbeatResponseAction::StartElection, nextAction.getAction());
         ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
@@ -2235,9 +2445,11 @@ namespace {
         heartbeatFromMember(HostAndPort("host3"), "rs0", MemberState::RS_SECONDARY, OpTime(0,0));
 
         // lose that awareness and be sure we are going to stepdown
-        HeartbeatResponseAction nextAction = receiveDownHeartbeat(HostAndPort("host2"), "rs0");
+        HeartbeatResponseAction nextAction = receiveDownHeartbeat(HostAndPort("host2"),
+                                                                  "rs0",
+                                                                  OpTime(100, 0));
         ASSERT_NO_ACTION(nextAction.getAction());
-        nextAction = receiveDownHeartbeat(HostAndPort("host3"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host3"), "rs0", OpTime(100, 0));
         ASSERT_EQUALS(HeartbeatResponseAction::StepDownSelf, nextAction.getAction());
         ASSERT_EQUALS(0, nextAction.getPrimaryConfigIndex());
         ASSERT_TRUE(TopologyCoordinator::Role::follower == getTopoCoord().getRole());
@@ -2300,7 +2512,7 @@ namespace {
         BSONObjBuilder responseBuilder;
         Status result = Status(ErrorCodes::InternalError, "status not set by prepareElectResponse");
         startCapturingLogMessages();
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder, &result);
+        getTopoCoord().prepareElectResponse(args, now += 60000, OpTime(), &responseBuilder, &result);
         stopCapturingLogMessages();
         BSONObj response = responseBuilder.obj();
         ASSERT_OK(result);
@@ -2313,7 +2525,7 @@ namespace {
         // Make sure nay votes, do not prevent subsequent yeas (the way a yea vote would)
         args.set = "rs0";
         BSONObjBuilder responseBuilder2;
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder2, &result);
+        getTopoCoord().prepareElectResponse(args, now++, OpTime(), &responseBuilder2, &result);
         BSONObj response2 = responseBuilder2.obj();
         ASSERT_EQUALS(1, response2["vote"].Int());
         ASSERT_EQUALS(round, response2["round"].OID());
@@ -2330,7 +2542,7 @@ namespace {
         BSONObjBuilder responseBuilder;
         Status result = Status(ErrorCodes::InternalError, "status not set by prepareElectResponse");
         startCapturingLogMessages();
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder, &result);
+        getTopoCoord().prepareElectResponse(args, now += 60000, OpTime(), &responseBuilder, &result);
         stopCapturingLogMessages();
         BSONObj response = responseBuilder.obj();
         ASSERT_OK(result);
@@ -2342,7 +2554,7 @@ namespace {
         // Make sure nay votes, do not prevent subsequent yeas (the way a yea vote would)
         args.cfgver = 10;
         BSONObjBuilder responseBuilder2;
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder2, &result);
+        getTopoCoord().prepareElectResponse(args, now++, OpTime(), &responseBuilder2, &result);
         BSONObj response2 = responseBuilder2.obj();
         ASSERT_EQUALS(1, response2["vote"].Int());
         ASSERT_EQUALS(round, response2["round"].OID());
@@ -2359,7 +2571,7 @@ namespace {
         BSONObjBuilder responseBuilder;
         Status result = Status(ErrorCodes::InternalError, "status not set by prepareElectResponse");
         startCapturingLogMessages();
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder, &result);
+        getTopoCoord().prepareElectResponse(args, now += 60000, OpTime(), &responseBuilder, &result);
         stopCapturingLogMessages();
         BSONObj response = responseBuilder.obj();
         ASSERT_OK(result);
@@ -2371,7 +2583,7 @@ namespace {
         // Make sure nay votes, do not prevent subsequent yeas (the way a yea vote would)
         args.cfgver = 10;
         BSONObjBuilder responseBuilder2;
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder2, &result);
+        getTopoCoord().prepareElectResponse(args, now++, OpTime(), &responseBuilder2, &result);
         BSONObj response2 = responseBuilder2.obj();
         ASSERT_EQUALS(1, response2["vote"].Int());
         ASSERT_EQUALS(round, response2["round"].OID());
@@ -2388,7 +2600,7 @@ namespace {
         BSONObjBuilder responseBuilder;
         Status result = Status(ErrorCodes::InternalError, "status not set by prepareElectResponse");
         startCapturingLogMessages();
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder, &result);
+        getTopoCoord().prepareElectResponse(args, now += 60000, OpTime(), &responseBuilder, &result);
         stopCapturingLogMessages();
         BSONObj response = responseBuilder.obj();
         ASSERT_OK(result);
@@ -2399,7 +2611,7 @@ namespace {
         // Make sure nay votes, do not prevent subsequent yeas (the way a yea vote would)
         args.whoid = 1;
         BSONObjBuilder responseBuilder2;
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder2, &result);
+        getTopoCoord().prepareElectResponse(args, now++, OpTime(), &responseBuilder2, &result);
         BSONObj response2 = responseBuilder2.obj();
         ASSERT_EQUALS(1, response2["vote"].Int());
         ASSERT_EQUALS(round, response2["round"].OID());
@@ -2418,7 +2630,7 @@ namespace {
         BSONObjBuilder responseBuilder;
         Status result = Status(ErrorCodes::InternalError, "status not set by prepareElectResponse");
         startCapturingLogMessages();
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder, &result);
+        getTopoCoord().prepareElectResponse(args, now += 60000, OpTime(), &responseBuilder, &result);
         stopCapturingLogMessages();
         BSONObj response = responseBuilder.obj();
         ASSERT_OK(result);
@@ -2429,7 +2641,7 @@ namespace {
         // Make sure nay votes, do not prevent subsequent yeas (the way a yea vote would)
         getTopoCoord()._setCurrentPrimaryForTest(-1);
         BSONObjBuilder responseBuilder2;
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder2, &result);
+        getTopoCoord().prepareElectResponse(args, now++, OpTime(), &responseBuilder2, &result);
         BSONObj response2 = responseBuilder2.obj();
         ASSERT_EQUALS(1, response2["vote"].Int());
         ASSERT_EQUALS(round, response2["round"].OID());
@@ -2447,7 +2659,7 @@ namespace {
         BSONObjBuilder responseBuilder;
         Status result = Status(ErrorCodes::InternalError, "status not set by prepareElectResponse");
         startCapturingLogMessages();
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder, &result);
+        getTopoCoord().prepareElectResponse(args, now += 60000, OpTime(), &responseBuilder, &result);
         stopCapturingLogMessages();
         BSONObj response = responseBuilder.obj();
         ASSERT_OK(result);
@@ -2458,7 +2670,7 @@ namespace {
         // Make sure nay votes, do not prevent subsequent yeas (the way a yea vote would)
         getTopoCoord()._setCurrentPrimaryForTest(-1);
         BSONObjBuilder responseBuilder2;
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder2, &result);
+        getTopoCoord().prepareElectResponse(args, now++, OpTime(), &responseBuilder2, &result);
         BSONObj response2 = responseBuilder2.obj();
         ASSERT_EQUALS(1, response2["vote"].Int());
         ASSERT_EQUALS(round, response2["round"].OID());
@@ -2477,7 +2689,7 @@ namespace {
         BSONObjBuilder responseBuilder;
         Status result = Status(ErrorCodes::InternalError, "status not set by prepareElectResponse");
         startCapturingLogMessages();
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder, &result);
+        getTopoCoord().prepareElectResponse(args, now += 60000, OpTime(), &responseBuilder, &result);
         stopCapturingLogMessages();
         BSONObj response = responseBuilder.obj();
         ASSERT_OK(result);
@@ -2488,7 +2700,7 @@ namespace {
         // Make sure nay votes, do not prevent subsequent yeas (the way a yea vote would)
         args.whoid = 3;
         BSONObjBuilder responseBuilder2;
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder2, &result);
+        getTopoCoord().prepareElectResponse(args, now++, OpTime(), &responseBuilder2, &result);
         BSONObj response2 = responseBuilder2.obj();
         ASSERT_EQUALS(1, response2["vote"].Int());
         ASSERT_EQUALS(round, response2["round"].OID());
@@ -2503,13 +2715,13 @@ namespace {
         args.cfgver = 10;
         args.whoid = 1;
 
-        downMember(HostAndPort("h3"), "rs0");
-        downMember(HostAndPort("h2"), "rs0");
+        receiveDownHeartbeat(HostAndPort("h3"), "rs0", OpTime());
+        receiveDownHeartbeat(HostAndPort("h2"), "rs0", OpTime());
 
         BSONObjBuilder responseBuilder;
         Status result = Status::OK();
         startCapturingLogMessages();
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder, &result);
+        getTopoCoord().prepareElectResponse(args, now += 60000, OpTime(), &responseBuilder, &result);
         stopCapturingLogMessages();
         BSONObj response = responseBuilder.obj();
         ASSERT_EQUALS(1, response["vote"].Int());
@@ -2528,7 +2740,7 @@ namespace {
         BSONObjBuilder responseBuilder1;
         Status result = Status(ErrorCodes::InternalError, "status not set by prepareElectResponse");
         startCapturingLogMessages();
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder1, &result);
+        getTopoCoord().prepareElectResponse(args, now += 60000, OpTime(), &responseBuilder1, &result);
         stopCapturingLogMessages();
         BSONObj response1 = responseBuilder1.obj();
         ASSERT_OK(result);
@@ -2541,7 +2753,7 @@ namespace {
 
         BSONObjBuilder responseBuilder2;
         startCapturingLogMessages();
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder2, &result);
+        getTopoCoord().prepareElectResponse(args, now, OpTime(), &responseBuilder2, &result);
         stopCapturingLogMessages();
         BSONObj response2 = responseBuilder2.obj();
         ASSERT_OK(result);
@@ -2551,11 +2763,11 @@ namespace {
                 "voted for h2:27017 0 secs ago"));
 
         // Test that after enough time passes the same vote can proceed
-        now = Date_t(now.millis + 3 * 1000); // 3 seconds later
+        now += 3 * 1001; // just over 3 seconds later
 
         BSONObjBuilder responseBuilder3;
         startCapturingLogMessages();
-        getTopoCoord().prepareElectResponse(cbData, args, now++, &responseBuilder3, &result);
+        getTopoCoord().prepareElectResponse(args, now++, OpTime(), &responseBuilder3, &result);
         stopCapturingLogMessages();
         BSONObj response3 = responseBuilder3.obj();
         ASSERT_OK(result);
@@ -2681,45 +2893,6 @@ namespace {
 
     }
 
-    TEST_F(ShutdownInProgressTest, ShutDownInProgressWhenCallbackCanceledFresh) {
-        Status result = Status::OK();
-        BSONObjBuilder response;
-        getTopoCoord().prepareFreshResponse(cbData(),
-                                            ReplicationCoordinator::ReplSetFreshArgs(),
-                                            OpTime(0,0),
-                                            &response,
-                                            &result);
-        ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, result);
-        ASSERT_TRUE(response.obj().isEmpty());
-    }
-
-    TEST_F(ShutdownInProgressTest, ShutDownInProgressWhenCallbackCanceledElectCmd) {
-        Status result = Status::OK();
-        BSONObjBuilder response;
-        getTopoCoord().prepareElectResponse(cbData(),
-                                            ReplicationCoordinator::ReplSetElectArgs(),
-                                            Date_t(0),
-                                            &response,
-                                            &result);
-        ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, result);
-        ASSERT_TRUE(response.obj().isEmpty());
-    }
-
-    TEST_F(ShutdownInProgressTest, ShutDownInProgressWhenCallbackCanceledHeartbeat) {
-        Status result = Status::OK();
-        ReplSetHeartbeatResponse response;
-        getTopoCoord().prepareHeartbeatResponse(cbData(),
-                                                Date_t(0),
-                                                ReplSetHeartbeatArgs(),
-                                                "",
-                                                OpTime(0,0),
-                                                &response,
-                                                &result);
-        ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, result);
-        // hbmsg is always present in ReplSetHeartbeatArgs, but nothing else should be populated
-        ASSERT_EQUALS(1, response.toBSON().nFields());
-    }
-
     TEST_F(ShutdownInProgressTest, ShutDownInProgressWhenCallbackCanceledStatus) {
         Status result = Status::OK();
         BSONObjBuilder response;
@@ -2764,13 +2937,11 @@ namespace {
                                       OpTime lastOpApplied,
                                       ReplSetHeartbeatResponse* response,
                                       Status* result) {
-            getTopoCoord().prepareHeartbeatResponse(cbData(),
-                                                    now()++,
-                                                    args,
-                                                    "rs0",
-                                                    lastOpApplied,
-                                                    response,
-                                                    result);
+            *result = getTopoCoord().prepareHeartbeatResponse(now()++,
+                                                              args,
+                                                              "rs0",
+                                                              lastOpApplied,
+                                                              response);
         }
 
     };
@@ -2797,12 +2968,12 @@ namespace {
         ReplSetHeartbeatResponse response;
         Status result(ErrorCodes::InternalError, "prepareHeartbeatResponse didn't set result");
 
-        // prepare response and check the results, including log messages
         startCapturingLogMessages();
         prepareHeartbeatResponse(args, OpTime(0,0), &response, &result);
         stopCapturingLogMessages();
-        ASSERT_EQUALS(ErrorCodes::BadValue, result);
-        ASSERT_EQUALS("repl set names do not match", result.reason());
+        ASSERT_EQUALS(ErrorCodes::InconsistentReplicaSetNames, result);
+        ASSERT(result.reason().find("repl set names do not match")) << "Actual string was \"" <<
+               result.reason() << '"';
         ASSERT_EQUALS(1,
                       countLogLinesContaining("replSet set names do not match, ours: rs0; remote "
                             "node's: rs1"));
@@ -2939,13 +3110,13 @@ namespace {
         Status result(ErrorCodes::InternalError, "prepareHeartbeatResponse didn't set result");
 
         // prepare response and check the results
-        prepareHeartbeatResponse(args, OpTime(0,0), &response, &result);
+        prepareHeartbeatResponse(args, OpTime(100,0), &response, &result);
         ASSERT_OK(result);
         // this change to true because we can now see a majority, unlike in the previous cases
         ASSERT_TRUE(response.isElectable());
         ASSERT_TRUE(response.isReplSet());
         ASSERT_EQUALS(MemberState::RS_SECONDARY, response.getState().s);
-        ASSERT_EQUALS(OpTime(0,0), response.getOpTime());
+        ASSERT_EQUALS(OpTime(100,0), response.getOpTime());
         ASSERT_EQUALS(Seconds(0).total_milliseconds(), response.getTime().total_milliseconds());
         ASSERT_EQUALS("", response.getHbMsg());
         ASSERT_EQUALS("rs0", response.getReplicaSetName());
@@ -2997,12 +3168,12 @@ namespace {
         Status result(ErrorCodes::InternalError, "prepareHeartbeatResponse didn't set result");
 
         // prepare response and check the results
-        prepareHeartbeatResponse(args, OpTime(0,0), &response, &result);
+        prepareHeartbeatResponse(args, OpTime(100,0), &response, &result);
         ASSERT_OK(result);
         ASSERT_TRUE(response.isElectable());
         ASSERT_TRUE(response.isReplSet());
         ASSERT_EQUALS(MemberState::RS_SECONDARY, response.getState().s);
-        ASSERT_EQUALS(OpTime(0,0), response.getOpTime());
+        ASSERT_EQUALS(OpTime(100,0), response.getOpTime());
         ASSERT_EQUALS(Seconds(0).total_milliseconds(), response.getTime().total_milliseconds());
         // changed to a syncing message because our sync source changed recently
         ASSERT_EQUALS("syncing from: h2:27017", response.getHbMsg());
@@ -3011,7 +3182,7 @@ namespace {
         ASSERT_EQUALS(HostAndPort("h2").toString(), response.getSyncingTo());
     }
 
-    TEST_F(TopoCoordTest, ReconfigToBeTheLoneNode) {
+    TEST_F(TopoCoordTest, SetFollowerSecondaryWhenLoneNode) {
         ASSERT_TRUE(TopologyCoordinator::Role::follower == getTopoCoord().getRole());
         ASSERT_EQUALS(MemberState::RS_STARTUP, getTopoCoord().getMemberState().s);
         updateConfig(BSON("_id" << "rs0" <<
@@ -3019,13 +3190,42 @@ namespace {
                           "members" << BSON_ARRAY(
                               BSON("_id" << 1 << "host" << "hself"))),
                      0);
-
-        // if we are the only node, we should become a candidate
-        ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
         ASSERT_EQUALS(MemberState::RS_STARTUP2, getTopoCoord().getMemberState().s);
+
+        // if we are the only node, we should become a candidate when we transition to SECONDARY
+        ASSERT_FALSE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
+        getTopoCoord().setFollowerMode(MemberState::RS_SECONDARY);
+        ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
+        ASSERT_EQUALS(MemberState::RS_SECONDARY, getTopoCoord().getMemberState().s);
     }
 
-    TEST_F(TopoCoordTest, ReconfigToBeTheLoneUnelectableNode) {
+    TEST_F(TopoCoordTest, CandidateWhenLoneSecondaryNodeReconfig) {
+        ASSERT_TRUE(TopologyCoordinator::Role::follower == getTopoCoord().getRole());
+        ASSERT_EQUALS(MemberState::RS_STARTUP, getTopoCoord().getMemberState().s);
+        ReplicaSetConfig cfg;
+        cfg.initialize(BSON("_id" << "rs0" <<
+                            "version" << 1 <<
+                            "members" << BSON_ARRAY(
+                                BSON("_id" << 1 << "host" << "hself" << "priority" << 0))));
+        getTopoCoord().updateConfig(cfg, 0, now()++, OpTime());
+        ASSERT_EQUALS(MemberState::RS_STARTUP2, getTopoCoord().getMemberState().s);
+
+        ASSERT_FALSE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
+        getTopoCoord().setFollowerMode(MemberState::RS_SECONDARY);
+        ASSERT_FALSE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
+        ASSERT_EQUALS(MemberState::RS_SECONDARY, getTopoCoord().getMemberState().s);
+
+        // we should become a candidate when we reconfig to become electable
+
+        updateConfig(BSON("_id" << "rs0" <<
+                          "version" << 1 <<
+                          "members" << BSON_ARRAY(
+                              BSON("_id" << 1 << "host" << "hself"))),
+                     0);
+        ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
+    }
+
+    TEST_F(TopoCoordTest, SetFollowerSecondaryWhenLoneUnelectableNode) {
         ASSERT_TRUE(TopologyCoordinator::Role::follower == getTopoCoord().getRole());
         ASSERT_EQUALS(MemberState::RS_STARTUP, getTopoCoord().getMemberState().s);
         ReplicaSetConfig cfg;
@@ -3034,11 +3234,14 @@ namespace {
                             "members" << BSON_ARRAY(
                                 BSON("_id" << 1 << "host" << "hself" << "priority" << 0))));
 
-        getTopoCoord().updateConfig(cfg, 0, now()++, OpTime(0,0));
-
-        // despite being the only node, we are unelectable, so we should not become primary
-        ASSERT_TRUE(TopologyCoordinator::Role::follower == getTopoCoord().getRole());
+        getTopoCoord().updateConfig(cfg, 0, now()++, OpTime());
         ASSERT_EQUALS(MemberState::RS_STARTUP2, getTopoCoord().getMemberState().s);
+
+        // despite being the only node, we are unelectable, so we should not become a candidate
+        ASSERT_FALSE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
+        getTopoCoord().setFollowerMode(MemberState::RS_SECONDARY);
+        ASSERT_FALSE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
+        ASSERT_EQUALS(MemberState::RS_SECONDARY, getTopoCoord().getMemberState().s);
     }
 
     TEST_F(TopoCoordTest, ReconfigToBeAddedToTheSet) {
@@ -3101,11 +3304,13 @@ namespace {
                           "members" << BSON_ARRAY(
                               BSON("_id" << 0 << "host" << "host1:27017"))),
                      0);
-        ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
+        ASSERT_FALSE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
         ASSERT_EQUALS(MemberState::RS_STARTUP2, getTopoCoord().getMemberState().s);
+        getTopoCoord().setFollowerMode(MemberState::RS_SECONDARY);
+        ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
 
         // win election and primary
-        getTopoCoord().processWinElection(now()++, OID::gen(), OpTime(0,0), OpTime(0,0));
+        getTopoCoord().processWinElection(OID::gen(), OpTime(0,0));
         ASSERT_TRUE(TopologyCoordinator::Role::leader == getTopoCoord().getRole());
         ASSERT_EQUALS(MemberState::RS_PRIMARY, getTopoCoord().getMemberState().s);
 
@@ -3129,15 +3334,17 @@ namespace {
                           "members" << BSON_ARRAY(
                               BSON("_id" << 0 << "host" << "host1:27017"))),
                      0);
-        ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
+        ASSERT_FALSE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
         ASSERT_EQUALS(MemberState::RS_STARTUP2, getTopoCoord().getMemberState().s);
+        getTopoCoord().setFollowerMode(MemberState::RS_SECONDARY);
+        ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
 
         // win election and primary
-        getTopoCoord().processWinElection(now()++, OID::gen(), OpTime(0,0), OpTime(0,0));
+        getTopoCoord().processWinElection(OID::gen(), OpTime(0,0));
         ASSERT_TRUE(TopologyCoordinator::Role::leader == getTopoCoord().getRole());
         ASSERT_EQUALS(MemberState::RS_PRIMARY, getTopoCoord().getMemberState().s);
 
-        // now lose primary due to lose of electability
+        // now lose primary due to loss of electability
         updateConfig(BSON("_id" << "rs0" <<
                           "version" << 2 <<
                           "members" << BSON_ARRAY(
@@ -3146,32 +3353,57 @@ namespace {
                               BSON("_id" << 2 << "host" << "host3:27017"))),
                      0);
         ASSERT_TRUE(TopologyCoordinator::Role::follower == getTopoCoord().getRole());
-        ASSERT_EQUALS(MemberState::RS_STARTUP2, getTopoCoord().getMemberState().s);
+        ASSERT_EQUALS(MemberState::RS_SECONDARY, getTopoCoord().getMemberState().s);
     }
 
-//     uncomment once primariness can be maintained through a reconfig
-//     TEST_F(TopoCoordTest, ReconfigContinueToBePrimary) {
-//         ASSERT_TRUE(TopologyCoordinator::Role::follower == getTopoCoord().getRole());
-//         ASSERT_EQUALS(MemberState::RS_STARTUP, getTopoCoord().getMemberState().s);
-//         updateConfig(BSON("_id" << "rs0" <<
-//                           "version" << 1 <<
-//                           "members" << BSON_ARRAY(
-//                               BSON("_id" << 1 << "host" << "host1:27017"))),
-//                      0);
-//         ASSERT_TRUE(TopologyCoordinator::Role::leader == getTopoCoord().getRole());
-//         ASSERT_EQUALS(MemberState::RS_PRIMARY, getTopoCoord().getMemberState().s);
-// 
-//         // reconfig in a manner that leaves us electable and ensure we are still the primary
-//         updateConfig(BSON("_id" << "rs0" <<
-//                           "version" << 2 <<
-//                           "members" << BSON_ARRAY(
-//                               BSON("_id" << 0 << "host" << "host1:27017") <<
-//                               BSON("_id" << 1 << "host" << "host2:27017") <<
-//                               BSON("_id" << 2 << "host" << "host3:27017"))),
-//                      0);
-//         ASSERT_TRUE(TopologyCoordinator::Role::leader == getTopoCoord().getRole());
-//         ASSERT_EQUALS(MemberState::RS_PRIMARY, getTopoCoord().getMemberState().s);
-//     }
+     TEST_F(TopoCoordTest, ReconfigContinueToBePrimary) {
+         ASSERT_TRUE(TopologyCoordinator::Role::follower == getTopoCoord().getRole());
+         ASSERT_EQUALS(MemberState::RS_STARTUP, getTopoCoord().getMemberState().s);
+         updateConfig(BSON("_id" << "rs0" <<
+                           "version" << 1 <<
+                           "members" << BSON_ARRAY(
+                               BSON("_id" << 0 << "host" << "host1:27017"))),
+                      0);
+
+         ASSERT_FALSE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
+         ASSERT_EQUALS(MemberState::RS_STARTUP2, getTopoCoord().getMemberState().s);
+         getTopoCoord().setFollowerMode(MemberState::RS_SECONDARY);
+         ASSERT_TRUE(TopologyCoordinator::Role::candidate == getTopoCoord().getRole());
+
+         // win election and primary
+         getTopoCoord().processWinElection(OID::gen(), OpTime(0,0));
+         ASSERT_TRUE(TopologyCoordinator::Role::leader == getTopoCoord().getRole());
+         ASSERT_EQUALS(MemberState::RS_PRIMARY, getTopoCoord().getMemberState().s);
+
+         // Now reconfig in ways that leave us electable and ensure we are still the primary.
+         // Add hosts
+         updateConfig(BSON("_id" << "rs0" <<
+                           "version" << 2 <<
+                           "members" << BSON_ARRAY(
+                               BSON("_id" << 0 << "host" << "host1:27017") <<
+                               BSON("_id" << 1 << "host" << "host2:27017") <<
+                               BSON("_id" << 2 << "host" << "host3:27017"))),
+                      0,
+                      Date_t(-1),
+                      OpTime(10,0));
+         ASSERT_TRUE(TopologyCoordinator::Role::leader == getTopoCoord().getRole());
+         ASSERT_EQUALS(MemberState::RS_PRIMARY, getTopoCoord().getMemberState().s);
+
+         // Change priorities and tags
+         updateConfig(BSON("_id" << "rs0" <<
+                           "version" << 2 <<
+                           "members" << BSON_ARRAY(
+                               BSON("_id" << 0 << "host" << "host1:27017" << "priority" << 10) <<
+                               BSON("_id" << 1 <<
+                                    "host" << "host2:27017" <<
+                                    "priority" << 5 <<
+                                    "tags" <<  BSON("dc" << "NA" << "rack" << "rack1")))),
+                      0,
+                      Date_t(-1),
+                      OpTime(10,0));
+         ASSERT_TRUE(TopologyCoordinator::Role::leader == getTopoCoord().getRole());
+         ASSERT_EQUALS(MemberState::RS_PRIMARY, getTopoCoord().getMemberState().s);
+     }
 
     TEST_F(TopoCoordTest, ReconfigKeepSecondary) {
         updateConfig(BSON("_id" << "rs0" <<
@@ -3206,7 +3438,7 @@ namespace {
 
         HeartbeatResponseAction nextAction = receiveUpHeartbeat(HostAndPort("host3"),
                                                                 "rs0",
-                                                                MemberState::RS_SECONDARY,
+                                                                MemberState::RS_PRIMARY,
                                                                 election,
                                                                 lastOpTimeApplied,
                                                                 lastOpTimeApplied);
@@ -3257,7 +3489,7 @@ namespace {
 
         HeartbeatResponseAction nextAction = receiveUpHeartbeat(HostAndPort("host3"),
                                                                 "rs0",
-                                                                MemberState::RS_SECONDARY,
+                                                                MemberState::RS_PRIMARY,
                                                                 election,
                                                                 lastOpTimeApplied,
                                                                 lastOpTimeApplied);
@@ -3348,7 +3580,7 @@ namespace {
         // "host2" and to "host3" despite "host2" being more than maxSyncSourceLagSecs(30) behind
         // "host3", since "host3" is down
         OpTime election = OpTime(0,0);
-        OpTime lastOpTimeApplied = OpTime(4,0);
+        OpTime lastOpTimeApplied = OpTime(400,0);
         // ahead by more than maxSyncSourceLagSecs (30)
         OpTime fresherLastOpTimeApplied = OpTime(3005,0);
 
@@ -3369,7 +3601,7 @@ namespace {
         ASSERT_NO_ACTION(nextAction.getAction());
 
         // set up complete, time for actual check
-        nextAction = receiveDownHeartbeat(HostAndPort("host3"), "rs0");
+        nextAction = receiveDownHeartbeat(HostAndPort("host3"), "rs0", lastOpTimeApplied);
         ASSERT_NO_ACTION(nextAction.getAction());
         ASSERT_FALSE(getTopoCoord().shouldChangeSyncSource(HostAndPort("host2")));
     }

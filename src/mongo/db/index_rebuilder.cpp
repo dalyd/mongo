@@ -64,7 +64,7 @@ namespace {
 
             // This write lock is held throughout the index building process
             // for this namespace.
-            Lock::DBLock lk(txn->lockState(), nsToDatabaseSubstring(ns), newlm::MODE_X);
+            Lock::DBLock lk(txn->lockState(), nsToDatabaseSubstring(ns), MODE_X);
             Client::Context ctx(txn, ns);
 
             Collection* collection = ctx.db()->getCollection(txn, ns);
@@ -134,10 +134,8 @@ namespace {
     }
 } // namespace
 
-    void restartInProgressIndexesFromLastShutdown() {
-        OperationContextImpl txn;
-
-        txn.getClient()->getAuthorizationSession()->grantInternalAuthorization();
+    void restartInProgressIndexesFromLastShutdown(OperationContext* txn) {
+        txn->getClient()->getAuthorizationSession()->grantInternalAuthorization();
 
         std::vector<std::string> dbNames;
 
@@ -149,12 +147,12 @@ namespace {
             for (std::vector<std::string>::const_iterator dbName = dbNames.begin();
                  dbName < dbNames.end();
                  ++dbName) {
-                Client::ReadContext ctx(&txn, *dbName);
+                AutoGetDb autoDb(txn, *dbName, MODE_S);
 
-                Database* db = ctx.ctx().db();
+                Database* db = autoDb.getDb();
                 db->getDatabaseCatalogEntry()->getCollectionNamespaces(&collNames);
             }
-            checkNS(&txn, collNames);
+            checkNS(txn, collNames);
         }
         catch (const DBException& e) {
             error() << "Index rebuilding did not complete: " << e.toString();

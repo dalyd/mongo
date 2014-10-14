@@ -140,23 +140,21 @@ namespace repl {
                                              const OpTime& lastOpApplied,
                                              BSONObjBuilder* response,
                                              Status* result);
-        virtual void prepareFreshResponse(const ReplicationExecutor::CallbackData& data,
-                                          const ReplicationCoordinator::ReplSetFreshArgs& args,
-                                          const OpTime& lastOpApplied,
+        virtual void prepareFreshResponse(const ReplicationCoordinator::ReplSetFreshArgs& args,
+                                          Date_t now,
+                                          OpTime lastOpApplied,
                                           BSONObjBuilder* response,
                                           Status* result);
-        virtual void prepareElectResponse(const ReplicationExecutor::CallbackData& data,
-                                          const ReplicationCoordinator::ReplSetElectArgs& args,
-                                          const Date_t now,
+        virtual void prepareElectResponse(const ReplicationCoordinator::ReplSetElectArgs& args,
+                                          Date_t now,
+                                          OpTime lastOpApplied,
                                           BSONObjBuilder* response,
                                           Status* result);
-        virtual void prepareHeartbeatResponse(const ReplicationExecutor::CallbackData& data,
-                                              Date_t now,
-                                              const ReplSetHeartbeatArgs& args,
-                                              const std::string& ourSetName,
-                                              const OpTime& lastOpApplied,
-                                              ReplSetHeartbeatResponse* response,
-                                              Status* result);
+        virtual Status prepareHeartbeatResponse(Date_t now,
+                                                const ReplSetHeartbeatArgs& args,
+                                                const std::string& ourSetName,
+                                                const OpTime& lastOpApplied,
+                                                ReplSetHeartbeatResponse* response);
         virtual void prepareStatusResponse(const ReplicationExecutor::CallbackData& data,
                                            Date_t now,
                                            unsigned uptime,
@@ -172,7 +170,7 @@ namespace repl {
         virtual void updateConfig(const ReplicaSetConfig& newConfig,
                                   int selfIndex,
                                   Date_t now,
-                                  const OpTime& lastOpApplied);
+                                  OpTime lastOpApplied);
         virtual std::pair<ReplSetHeartbeatArgs, Milliseconds> prepareHeartbeatRequest(
                 Date_t now,
                 const std::string& ourSetName,
@@ -184,12 +182,8 @@ namespace repl {
                 const StatusWith<ReplSetHeartbeatResponse>& hbResponse,
                 OpTime myLastOpApplied);
         virtual bool voteForMyself(Date_t now);
-        virtual void processWinElection(
-                Date_t now,
-                OID electionId,
-                OpTime myLastOpApplied,
-                OpTime electionOpTime);
-        virtual void processLoseElection(Date_t now, OpTime myLastOpApplied);
+        virtual void processWinElection(OID electionId, OpTime electionOpTime);
+        virtual void processLoseElection();
         virtual void stepDown();
         virtual Date_t getStepDownTime() const;
 
@@ -229,7 +223,10 @@ namespace repl {
             ArbiterIAm,
             NotSecondary,
             NoPriority,
-            StepDownPeriodActive
+            StepDownPeriodActive,
+            NoData,
+            NotInitialized,
+            VotedTooRecently
         };
 
         // Returns the number of heartbeat pings which have occurred.
@@ -242,6 +239,7 @@ namespace repl {
         // we have applied locally is "lastOpApplied".
         // If we veto, the errmsg will be filled in with a reason
         bool _shouldVetoMember(unsigned int memberID,
+                               const Date_t& now,
                                const OpTime& lastOpApplied,
                                std::string* errmsg) const;
 
@@ -251,15 +249,16 @@ namespace repl {
         // Sees if a majority number of votes are held by members who are currently "up"
         bool _aMajoritySeemsToBeUp() const;
 
-        // Is optime close enough to the latest known optime to qualify for an election
-        bool _isOpTimeCloseEnoughToLatestToElect(const OpTime lastApplied) const;
+        // Is otherOpTime close enough to the latest known optime to qualify for an election
+        bool _isOpTimeCloseEnoughToLatestToElect(const OpTime& otherOpTime,
+                                                 const OpTime& ourLastOpApplied) const;
 
         // Returns reason why "self" member is unelectable
         UnelectableReason _getMyUnelectableReason(const Date_t now,
                                                   const OpTime lastOpApplied) const;
 
         // Returns reason why memberIndex is unelectable
-        UnelectableReason _getUnelectableReason(int memberIndex) const;
+        UnelectableReason _getUnelectableReason(int memberIndex, const OpTime& lastOpApplied) const;
 
         // Returns the nice text of why the node is unelectable
         std::string _getUnelectableReasonString(UnelectableReason ur) const;
@@ -267,14 +266,11 @@ namespace repl {
         // Return true if we are currently primary
         bool _iAmPrimary() const;
 
-        // Returns the total number of votes in the current config
-        int _totalVotes() const;
-
-        // Scans through all members that are 'up' and return the latest known optime
-        OpTime _latestKnownOpTime() const;
+        // Scans through all members that are 'up' and return the latest known optime.
+        OpTime _latestKnownOpTime(OpTime ourLastOpApplied) const;
 
         // Scans the electable set and returns the highest priority member index
-        int _getHighestPriorityElectableIndex() const;
+        int _getHighestPriorityElectableIndex(Date_t now, OpTime lastOpApplied) const;
 
         // Returns true if "one" member is higher priority than "two" member
         bool _isMemberHigherPriority(int memberOneIndex, int memberTwoIndex) const;
@@ -292,6 +288,16 @@ namespace repl {
                 int updatedConfigIndex,
                 Date_t now,
                 const OpTime& lastOpApplied);
+
+        /**
+         * Updates _hbdata based on the newConfig, ensuring that every member in the newConfig
+         * has an entry in _hbdata.  If any nodes in the newConfig are also present in
+         * _currentConfig, copies their heartbeat info into the corresponding entry in the updated
+         * _hbdata vector.
+         */
+        void _updateHeartbeatDataForReconfig(const ReplicaSetConfig& newConfig,
+                                             int selfIndex,
+                                             Date_t now);
 
         HeartbeatResponseAction _stepDownSelf();
         HeartbeatResponseAction _stepDownSelfAndReplaceWith(int newPrimary);

@@ -155,15 +155,11 @@ namespace {
         }
 
         //
-        // For every member config mNew in newConfig, if there exists member config mOld in
-        // oldConfig such that mNew.getId() == mOld.getId(), it is required that
-        // mNew.getHostAndPort() == mOld.getHostAndPort().
-        //
-        // Similarly, for every member config mNew in newConfig, if there exists member confg mOld
+        // For every member config mNew in newConfig, if there exists member config mOld
         // in oldConfig such that mNew.getHostAndPort() == mOld.getHostAndPort(), it is required
         // that mNew.getId() == mOld.getId().
         //
-        // Finally, one may not use reconfig to change the value of the buildIndexes or
+        // Also, one may not use reconfig to change the value of the buildIndexes or
         // arbiterOnly flags.
         //
         for (ReplicaSetConfig::MemberIterator mNew = newConfig.membersBegin();
@@ -177,18 +173,6 @@ namespace {
                 const bool hostsEqual = mOld->getHostAndPort() == mNew->getHostAndPort();
                 if (!idsEqual && !hostsEqual) {
                     continue;
-                }
-                if (idsEqual && !hostsEqual) {
-                    return Status(ErrorCodes::NewReplicaSetConfigurationIncompatible,
-                                  str::stream() <<
-                                  "New and old configurations both have members with " <<
-                                  MemberConfig::kIdFieldName << " of " << mOld->getId() <<
-                                  " but in the new configuration the " <<
-                                  MemberConfig::kHostFieldName << " field is " <<
-                                  mNew->getHostAndPort().toString() <<
-                                  " and in the old configuration it is " <<
-                                  mOld->getHostAndPort().toString() <<
-                                  " for replica set " << newConfig.getReplSetName());
                 }
                 if (hostsEqual && !idsEqual) {
                     return Status(ErrorCodes::NewReplicaSetConfigurationIncompatible,
@@ -266,11 +250,16 @@ namespace {
     StatusWith<int> validateConfigForReconfig(
             ReplicationCoordinatorExternalState* externalState,
             const ReplicaSetConfig& oldConfig,
-            const ReplicaSetConfig& newConfig) {
+            const ReplicaSetConfig& newConfig,
+            bool force) {
 
         Status status = newConfig.validate();
         if (!status.isOK()) {
             return StatusWith<int>(status);
+        }
+
+        if (force) {
+            return findSelfInConfig(externalState, newConfig);
         }
 
         status = validateOldAndNewConfigsCompatible(oldConfig, newConfig);

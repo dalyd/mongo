@@ -42,6 +42,7 @@
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/background.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/catalog/collection_catalog_entry.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/dbhash.h"
 #include "mongo/db/dbdirectclient.h"
@@ -119,7 +120,7 @@ namespace repl {
         todo : make _logOpRS() call this so we don't repeat ourself?
         */
     OpTime _logOpObjRS(OperationContext* txn, const BSONObj& op) {
-        Lock::DBLock lk(txn->lockState(), "local", newlm::MODE_X);
+        Lock::DBLock lk(txn->lockState(), "local", MODE_X);
         // XXX soon this needs to be part of an outer WUOW not its own.
         // We can't do this yet due to locking limitations.
         WriteUnitOfWork wunit(txn);
@@ -236,7 +237,7 @@ namespace repl {
                          BSONObj *o2,
                          bool *bb,
                          bool fromMigrate ) {
-        Lock::DBLock lk1(txn->lockState(), "local", newlm::MODE_X);
+        Lock::DBLock lk1(txn->lockState(), "local", MODE_X);
         WriteUnitOfWork wunit(txn);
 
         if ( strncmp(ns, "local.", 6) == 0 ) {
@@ -320,7 +321,7 @@ namespace repl {
                           BSONObj *o2,
                           bool *bb,
                           bool fromMigrate ) {
-        Lock::DBLock lk(txn->lockState(), "local", newlm::MODE_X);
+        Lock::DBLock lk(txn->lockState(), "local", MODE_X);
         WriteUnitOfWork wunit(txn);
         static BufBuilder bufbuilder(8*1024); // todo there is likely a mutex on this constructor
 
@@ -467,7 +468,10 @@ namespace repl {
         if ( collection ) {
 
             if (replSettings.oplogSize != 0) {
-                int o = (int)(collection->getRecordStore()->storageSize(txn) / ( 1024 * 1024 ) );
+                const CollectionOptions oplogOpts =
+                    collection->getCatalogEntry()->getCollectionOptions(txn);
+
+                int o = (int)(oplogOpts.cappedSize / ( 1024 * 1024 ) );
                 int n = (int)(replSettings.oplogSize / (1024 * 1024));
                 if ( n != o ) {
                     stringstream ss;

@@ -26,6 +26,8 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kReplication
+
 #include "mongo/platform/basic.h"
 
 #include <boost/thread.hpp>
@@ -36,10 +38,13 @@
 #include "mongo/db/repl/check_quorum_for_config_change.h"
 #include "mongo/db/repl/network_interface_mock.h"
 #include "mongo/db/repl/repl_set_heartbeat_args.h"
+#include "mongo/db/repl/repl_set_heartbeat_response.h"
 #include "mongo/db/repl/replica_set_config.h"
 #include "mongo/db/repl/replication_executor.h"
+#include "mongo/platform/unordered_set.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/net/hostandport.h"
 
 #define ASSERT_REASON_CONTAINS(STATUS, PATTERN) do {                    \
         const mongo::Status s_ = (STATUS);                              \
@@ -61,30 +66,84 @@ namespace {
 
     class CheckQuorumTest : public mongo::unittest::Test {
     protected:
-        NetworkInterfaceMockWithMap* _net;
+        CheckQuorumTest();
+
+        void startQuorumCheck(const ReplicaSetConfig& config, int myIndex);
+        Status waitForQuorumCheck();
+        bool isQuorumCheckDone();
+
+        NetworkInterfaceMock* _net;
         boost::scoped_ptr<ReplicationExecutor> _executor;
-        boost::scoped_ptr<boost::thread> _executorThread;
 
     private:
         void setUp();
         void tearDown();
+
+        void _runQuorumCheck(const ReplicaSetConfig& config, int myIndex);
+        virtual Status _runQuorumCheckImpl(const ReplicaSetConfig& config, int myIndex) = 0;
+
+        boost::scoped_ptr<boost::thread> _executorThread;
+        boost::scoped_ptr<boost::thread> _quorumCheckThread;
+        Status _quorumCheckStatus;
+        boost::mutex _mutex;
+        bool _isQuorumCheckDone;
     };
 
-    class CheckQuorumForInitiate : public CheckQuorumTest {};
-    class CheckQuorumForReconfig : public CheckQuorumTest {};
+    CheckQuorumTest::CheckQuorumTest() :
+        _quorumCheckStatus(ErrorCodes::InternalError, "Not executed") {
+    }
 
     void CheckQuorumTest::setUp() {
-        _net = new NetworkInterfaceMockWithMap;
+        _net = new NetworkInterfaceMock;
         _executor.reset(new ReplicationExecutor(_net, 1 /* prng */ ));
         _executorThread.reset(new boost::thread(stdx::bind(&ReplicationExecutor::run,
                                                            _executor.get())));
     }
 
     void CheckQuorumTest::tearDown() {
-        _net->unblockAll();
         _executor->shutdown();
         _executorThread->join();
     }
+
+    void CheckQuorumTest::startQuorumCheck(const ReplicaSetConfig& config, int myIndex) {
+        ASSERT_FALSE(_quorumCheckThread);
+        _isQuorumCheckDone = false;
+        _quorumCheckThread.reset(new boost::thread(stdx::bind(&CheckQuorumTest::_runQuorumCheck,
+                                                              this,
+                                                              config,
+                                                              myIndex)));
+    }
+
+    Status CheckQuorumTest::waitForQuorumCheck() {
+        ASSERT_TRUE(_quorumCheckThread);
+        _quorumCheckThread->join();
+        return _quorumCheckStatus;
+    }
+
+    bool CheckQuorumTest::isQuorumCheckDone() {
+        boost::lock_guard<boost::mutex> lk(_mutex);
+        return _isQuorumCheckDone;
+    }
+
+    void CheckQuorumTest::_runQuorumCheck(const ReplicaSetConfig& config, int myIndex) {
+        _quorumCheckStatus = _runQuorumCheckImpl(config, myIndex);
+        boost::lock_guard<boost::mutex> lk(_mutex);
+        _isQuorumCheckDone = true;
+    }
+
+    class CheckQuorumForInitiate : public CheckQuorumTest {
+    private:
+        virtual Status _runQuorumCheckImpl(const ReplicaSetConfig& config, int myIndex) {
+            return checkQuorumForInitiate(_executor.get(), config, myIndex);
+        }
+    };
+
+    class CheckQuorumForReconfig : public CheckQuorumTest {
+    protected:
+        virtual Status _runQuorumCheckImpl(const ReplicaSetConfig& config, int myIndex) {
+            return checkQuorumForReconfig(_executor.get(), config, myIndex);
+        }
+    };
 
     ReplicaSetConfig assertMakeRSConfig(const BSONObj& configBson) {
         ReplicaSetConfig config;
@@ -99,7 +158,8 @@ namespace {
                      "version" << 1 <<
                      "members" << BSON_ARRAY(
                              BSON("_id" << 1 << "host" << "h1"))));
-        ASSERT_OK(checkQuorumForInitiate(_executor.get(), config, 0));
+        startQuorumCheck(config, 0);
+        ASSERT_OK(waitForQuorumCheck());
     }
 
     TEST_F(CheckQuorumForInitiate, QuorumCheckCanceledByShutdown) {
@@ -109,8 +169,8 @@ namespace {
                      "version" << 1 <<
                      "members" << BSON_ARRAY(
                              BSON("_id" << 1 << "host" << "h1"))));
-        ASSERT_EQUALS(ErrorCodes::ShutdownInProgress,
-                      checkQuorumForInitiate(_executor.get(), config, 0));
+        startQuorumCheck(config, 0);
+        ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, waitForQuorumCheck());
     }
 
     TEST_F(CheckQuorumForInitiate, QuorumCheckFailedDueToSeveralDownNodes) {
@@ -126,7 +186,19 @@ namespace {
                              BSON("_id" << 3 << "host" << "h3:1") <<
                              BSON("_id" << 4 << "host" << "h4:1") <<
                              BSON("_id" << 5 << "host" << "h5:1"))));
-        Status status = checkQuorumForInitiate(_executor.get(), config, 2);
+        startQuorumCheck(config, 2);
+        _net->enterNetwork();
+        const Date_t startDate = _net->now();
+        const int numCommandsExpected = config.getNumMembers() - 1;
+        for (int i = 0; i < numCommandsExpected; ++i) {
+            _net->scheduleResponse(_net->getNextReadyRequest(),
+                                   startDate + 10,
+                                   ResponseStatus(ErrorCodes::NoSuchKey, "No reply"));
+        }
+        _net->runUntil(startDate + 10);
+        _net->exitNetwork();
+        ASSERT_EQUALS(startDate + 10, _net->now());
+        Status status = waitForQuorumCheck();
         ASSERT_EQUALS(ErrorCodes::NodeNotFound, status);
         ASSERT_REASON_CONTAINS(
                 status, "Could not contact the following nodes during replica set initiation");
@@ -165,24 +237,26 @@ namespace {
         const int myConfigIndex = 2;
         const BSONObj hbRequest = makeHeartbeatRequest(rsConfig, myConfigIndex);
 
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h1", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h2", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h4", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h5", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-
-        ASSERT_OK(checkQuorumForInitiate(_executor.get(), rsConfig, myConfigIndex));
+        startQuorumCheck(rsConfig, myConfigIndex);
+        const Date_t startDate = _net->now();
+        const int numCommandsExpected = rsConfig.getNumMembers() - 1;
+        unordered_set<HostAndPort> seenHosts;
+        _net->enterNetwork();
+        for (int i = 0; i < numCommandsExpected; ++i) {
+            const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
+            const ReplicationExecutor::RemoteCommandRequest& request = noi->getRequest();
+            ASSERT_EQUALS("admin", request.dbname);
+            ASSERT_EQUALS(hbRequest, request.cmdObj);
+            ASSERT(seenHosts.insert(request.target).second) <<
+                "Already saw " << request.target.toString();
+            _net->scheduleResponse(noi,
+                                   startDate + 10,
+                                   ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                                                          BSON("ok" << 1), Milliseconds(8))));
+        }
+        _net->runUntil(startDate + 10);
+        _net->exitNetwork();
+        ASSERT_OK(waitForQuorumCheck());
     }
 
     TEST_F(CheckQuorumForInitiate, QuorumCheckFailedDueToOneDownNode) {
@@ -205,24 +279,33 @@ namespace {
         const int myConfigIndex = 2;
         const BSONObj hbRequest = makeHeartbeatRequest(rsConfig, myConfigIndex);
 
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h1", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h4", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h5", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h6", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-
-        Status status = checkQuorumForInitiate(_executor.get(), rsConfig, myConfigIndex);
+        startQuorumCheck(rsConfig, myConfigIndex);
+        const Date_t startDate = _net->now();
+        const int numCommandsExpected = rsConfig.getNumMembers() - 1;
+        unordered_set<HostAndPort> seenHosts;
+        _net->enterNetwork();
+        for (int i = 0; i < numCommandsExpected; ++i) {
+            const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
+            const ReplicationExecutor::RemoteCommandRequest& request = noi->getRequest();
+            ASSERT_EQUALS("admin", request.dbname);
+            ASSERT_EQUALS(hbRequest, request.cmdObj);
+            ASSERT(seenHosts.insert(request.target).second) <<
+                "Already saw " << request.target.toString();
+            if (request.target == HostAndPort("h2", 1)) {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ErrorCodes::NoSuchKey, "No response"));
+            }
+            else {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                                                              BSON("ok" << 1), Milliseconds(8))));
+            }
+        }
+        _net->runUntil(startDate + 10);
+        _net->exitNetwork();
+        Status status = waitForQuorumCheck();
         ASSERT_EQUALS(ErrorCodes::NodeNotFound, status);
         ASSERT_REASON_CONTAINS(
                 status, "Could not contact the following nodes during replica set initiation");
@@ -251,24 +334,35 @@ namespace {
         const int myConfigIndex = 2;
         const BSONObj hbRequest = makeHeartbeatRequest(rsConfig, myConfigIndex);
 
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h1", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h2", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h4", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 0 << "mismatch" << true)));
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h5", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-
-        Status status = checkQuorumForInitiate(_executor.get(), rsConfig, myConfigIndex);
+        startQuorumCheck(rsConfig, myConfigIndex);
+        const Date_t startDate = _net->now();
+        const int numCommandsExpected = rsConfig.getNumMembers() - 1;
+        unordered_set<HostAndPort> seenHosts;
+        _net->enterNetwork();
+        for (int i = 0; i < numCommandsExpected; ++i) {
+            const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
+            const ReplicationExecutor::RemoteCommandRequest& request = noi->getRequest();
+            ASSERT_EQUALS("admin", request.dbname);
+            ASSERT_EQUALS(hbRequest, request.cmdObj);
+            ASSERT(seenHosts.insert(request.target).second) <<
+                "Already saw " << request.target.toString();
+            if (request.target == HostAndPort("h4", 1)) {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                                                              BSON("ok" << 0 << "mismatch" << true),
+                                                              Milliseconds(8))));
+            }
+            else {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                                                              BSON("ok" << 1), Milliseconds(8))));
+            }
+        }
+        _net->runUntil(startDate + 10);
+        _net->exitNetwork();
+        Status status = waitForQuorumCheck();
         ASSERT_EQUALS(ErrorCodes::NewReplicaSetConfigurationIncompatible, status);
         ASSERT_REASON_CONTAINS(
                 status, "Our set name did not match");
@@ -296,24 +390,37 @@ namespace {
         const int myConfigIndex = 2;
         const BSONObj hbRequest = makeHeartbeatRequest(rsConfig, myConfigIndex);
 
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h1", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h2", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h4", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h5", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 0 << "set" << "rs0" << "v" << 1)));
-
-        Status status = checkQuorumForInitiate(_executor.get(), rsConfig, myConfigIndex);
+        startQuorumCheck(rsConfig, myConfigIndex);
+        const Date_t startDate = _net->now();
+        const int numCommandsExpected = rsConfig.getNumMembers() - 1;
+        unordered_set<HostAndPort> seenHosts;
+        _net->enterNetwork();
+        for (int i = 0; i < numCommandsExpected; ++i) {
+            const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
+            const ReplicationExecutor::RemoteCommandRequest& request = noi->getRequest();
+            ASSERT_EQUALS("admin", request.dbname);
+            ASSERT_EQUALS(hbRequest, request.cmdObj);
+            ASSERT(seenHosts.insert(request.target).second) <<
+                "Already saw " << request.target.toString();
+            if (request.target == HostAndPort("h5", 1)) {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                                                              BSON("ok" << 0 <<
+                                                                   "set" << "rs0" <<
+                                                                   "v" << 1),
+                                                              Milliseconds(8))));
+            }
+            else {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                                                              BSON("ok" << 1), Milliseconds(8))));
+            }
+        }
+        _net->runUntil(startDate + 10);
+        _net->exitNetwork();
+        Status status = waitForQuorumCheck();
         ASSERT_EQUALS(ErrorCodes::NewReplicaSetConfigurationIncompatible, status);
         ASSERT_REASON_CONTAINS(
                 status, "Our config version of");
@@ -344,31 +451,34 @@ namespace {
         const int myConfigIndex = 2;
         const BSONObj hbRequest = makeHeartbeatRequest(rsConfig, myConfigIndex);
 
-        // Responses from nodes h1, h2 and h4 and blocked until after the test
-        // completes.
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h1", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)),
-                          true);
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h2", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)),
-                          true);
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h4", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)),
-                          true);
-
-        // h5 responds, with a version incompatibility.
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h5", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 0 << "set" << "rs0" << "v" << 1)));
-
-        Status status = checkQuorumForInitiate(_executor.get(), rsConfig, myConfigIndex);
+        startQuorumCheck(rsConfig, myConfigIndex);
+        const Date_t startDate = _net->now();
+        const int numCommandsExpected = rsConfig.getNumMembers() - 1;
+        unordered_set<HostAndPort> seenHosts;
+        _net->enterNetwork();
+        for (int i = 0; i < numCommandsExpected; ++i) {
+            const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
+            const ReplicationExecutor::RemoteCommandRequest& request = noi->getRequest();
+            ASSERT_EQUALS("admin", request.dbname);
+            ASSERT_EQUALS(hbRequest, request.cmdObj);
+            ASSERT(seenHosts.insert(request.target).second) <<
+                "Already saw " << request.target.toString();
+            if (request.target == HostAndPort("h5", 1)) {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                                                              BSON("ok" << 0 <<
+                                                                   "set" << "rs0" <<
+                                                                   "v" << 1),
+                                                              Milliseconds(8))));
+            }
+            else {
+                _net->blackHole(noi);
+            }
+        }
+        _net->runUntil(startDate + 10);
+        _net->exitNetwork();
+        Status status = waitForQuorumCheck();
         ASSERT_EQUALS(ErrorCodes::NewReplicaSetConfigurationIncompatible, status);
         ASSERT_REASON_CONTAINS(
                 status, "Our config version of");
@@ -381,9 +491,63 @@ namespace {
         ASSERT_REASON_CONTAINS(status, "h5:1");
     }
 
+    TEST_F(CheckQuorumForInitiate, QuorumCheckFailedDueToNodeWithData) {
+        // In this test, "we" are host "h3:1".  Only node "h5" responds before the test completes,
+        // and quorum check fails because "h5" declares that it has data already.
+
+        const ReplicaSetConfig rsConfig = assertMakeRSConfig(
+                BSON("_id" << "rs0" <<
+                     "version" << 1 <<
+                     "members" << BSON_ARRAY(
+                             BSON("_id" << 1 << "host" << "h1:1") <<
+                             BSON("_id" << 2 << "host" << "h2:1") <<
+                             BSON("_id" << 3 << "host" << "h3:1") <<
+                             BSON("_id" << 4 << "host" << "h4:1") <<
+                             BSON("_id" << 5 << "host" << "h5:1"))));
+        const int myConfigIndex = 2;
+        const BSONObj hbRequest = makeHeartbeatRequest(rsConfig, myConfigIndex);
+
+        startQuorumCheck(rsConfig, myConfigIndex);
+        const Date_t startDate = _net->now();
+        const int numCommandsExpected = rsConfig.getNumMembers() - 1;
+        unordered_set<HostAndPort> seenHosts;
+        _net->enterNetwork();
+        for (int i = 0; i < numCommandsExpected; ++i) {
+            const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
+            const ReplicationExecutor::RemoteCommandRequest& request = noi->getRequest();
+            ASSERT_EQUALS("admin", request.dbname);
+            ASSERT_EQUALS(hbRequest, request.cmdObj);
+            ASSERT(seenHosts.insert(request.target).second) <<
+                "Already saw " << request.target.toString();
+            ReplSetHeartbeatResponse hbResp;
+            hbResp.setVersion(0);
+            hbResp.noteHasData();
+            if (request.target == HostAndPort("h5", 1)) {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                                                              hbResp.toBSON(),
+                                                              Milliseconds(8))));
+            }
+            else {
+                _net->blackHole(noi);
+            }
+        }
+        _net->runUntil(startDate + 10);
+        _net->exitNetwork();
+        Status status = waitForQuorumCheck();
+        ASSERT_EQUALS(ErrorCodes::CannotInitializeNodeWithData, status);
+        ASSERT_REASON_CONTAINS(
+                status, "has data already");
+        ASSERT_NOT_REASON_CONTAINS(status, "h1:1");
+        ASSERT_NOT_REASON_CONTAINS(status, "h2:1");
+        ASSERT_NOT_REASON_CONTAINS(status, "h3:1");
+        ASSERT_NOT_REASON_CONTAINS(status, "h4:1");
+        ASSERT_REASON_CONTAINS(status, "h5:1");
+    }
     TEST_F(CheckQuorumForReconfig, QuorumCheckVetoedDueToHigherConfigVersion) {
-        // In this test, "we" are host "h3:1".  The request to "h2" times out,
-        // and the request to "h1" comes back indicating a higher config version.
+        // In this test, "we" are host "h3:1".  The request to "h2" does not arrive before the end
+        // of the test, and the request to "h1" comes back indicating a higher config version.
 
         const ReplicaSetConfig rsConfig = assertMakeRSConfig(
                 BSON("_id" << "rs0" <<
@@ -395,12 +559,34 @@ namespace {
         const int myConfigIndex = 2;
         const BSONObj hbRequest = makeHeartbeatRequest(rsConfig, myConfigIndex);
 
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h1", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 0 << "set" << "rs0" << "v" << 5)));
-
-        Status status = checkQuorumForReconfig(_executor.get(), rsConfig, myConfigIndex);
+        startQuorumCheck(rsConfig, myConfigIndex);
+        const Date_t startDate = _net->now();
+        const int numCommandsExpected = rsConfig.getNumMembers() - 1;
+        unordered_set<HostAndPort> seenHosts;
+        _net->enterNetwork();
+        for (int i = 0; i < numCommandsExpected; ++i) {
+            const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
+            const ReplicationExecutor::RemoteCommandRequest& request = noi->getRequest();
+            ASSERT_EQUALS("admin", request.dbname);
+            ASSERT_EQUALS(hbRequest, request.cmdObj);
+            ASSERT(seenHosts.insert(request.target).second) <<
+                "Already saw " << request.target.toString();
+            if (request.target == HostAndPort("h1", 1)) {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                                                              BSON("ok" << 0 <<
+                                                                   "set" << "rs0" <<
+                                                                   "v" << 5),
+                                                              Milliseconds(8))));
+            }
+            else {
+                _net->blackHole(noi);
+            }
+        }
+        _net->runUntil(startDate + 10);
+        _net->exitNetwork();
+        Status status = waitForQuorumCheck();
         ASSERT_EQUALS(ErrorCodes::NewReplicaSetConfigurationIncompatible, status);
         ASSERT_REASON_CONTAINS(
                 status, "Our config version of");
@@ -425,12 +611,34 @@ namespace {
         const int myConfigIndex = 2;
         const BSONObj hbRequest = makeHeartbeatRequest(rsConfig, myConfigIndex);
 
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h2", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 0 << "mismatch" << true)));
-
-        Status status = checkQuorumForReconfig(_executor.get(), rsConfig, myConfigIndex);
+        startQuorumCheck(rsConfig, myConfigIndex);
+        const Date_t startDate = _net->now();
+        const int numCommandsExpected = rsConfig.getNumMembers() - 1;
+        unordered_set<HostAndPort> seenHosts;
+        _net->enterNetwork();
+        for (int i = 0; i < numCommandsExpected; ++i) {
+            const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
+            const ReplicationExecutor::RemoteCommandRequest& request = noi->getRequest();
+            ASSERT_EQUALS("admin", request.dbname);
+            ASSERT_EQUALS(hbRequest, request.cmdObj);
+            ASSERT(seenHosts.insert(request.target).second) <<
+                "Already saw " << request.target.toString();
+            if (request.target == HostAndPort("h2", 1)) {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                                                              BSON("ok" << 0 << "mismatch" << true),
+                                                              Milliseconds(8))));
+            }
+            else {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ErrorCodes::NoSuchKey, "No response"));
+            }
+        }
+        _net->runUntil(startDate + 10);
+        _net->exitNetwork();
+        Status status = waitForQuorumCheck();
         ASSERT_EQUALS(ErrorCodes::NewReplicaSetConfigurationIncompatible, status);
         ASSERT_REASON_CONTAINS(status, "Our set name did not match");
         ASSERT_NOT_REASON_CONTAINS(status, "h1:1");
@@ -442,6 +650,8 @@ namespace {
     TEST_F(CheckQuorumForReconfig, QuorumCheckFailsDueToInsufficientVoters) {
         // In this test, "we" are host "h4".  Only "h1", "h2" and "h3" are voters,
         // and of the voters, only "h1" responds.  As a result, quorum check fails.
+        // "h5" also responds, but because it cannot vote, is irrelevant for the reconfig
+        // quorum check.
 
         const ReplicaSetConfig rsConfig = assertMakeRSConfig(
                 BSON("_id" << "rs0" <<
@@ -455,15 +665,34 @@ namespace {
         const int myConfigIndex = 3;
         const BSONObj hbRequest = makeHeartbeatRequest(rsConfig, myConfigIndex);
 
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h1", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h5", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-        Status status = checkQuorumForReconfig(_executor.get(), rsConfig, myConfigIndex);
+        startQuorumCheck(rsConfig, myConfigIndex);
+        const Date_t startDate = _net->now();
+        const int numCommandsExpected = rsConfig.getNumMembers() - 1;
+        unordered_set<HostAndPort> seenHosts;
+        _net->enterNetwork();
+        for (int i = 0; i < numCommandsExpected; ++i) {
+            const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
+            const ReplicationExecutor::RemoteCommandRequest& request = noi->getRequest();
+            ASSERT_EQUALS("admin", request.dbname);
+            ASSERT_EQUALS(hbRequest, request.cmdObj);
+            ASSERT(seenHosts.insert(request.target).second) <<
+                "Already saw " << request.target.toString();
+            if (request.target == HostAndPort("h1", 1) || request.target == HostAndPort("h5", 1)) {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                                                              BSON("ok" << 1),
+                                                              Milliseconds(8))));
+            }
+            else {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ErrorCodes::NoSuchKey, "No response"));
+            }
+        }
+        _net->runUntil(startDate + 10);
+        _net->exitNetwork();
+        Status status = waitForQuorumCheck();
         ASSERT_EQUALS(ErrorCodes::NodeNotFound, status);
         ASSERT_REASON_CONTAINS(status, "not enough voting nodes responded; required 2 but only");
         ASSERT_REASON_CONTAINS(status, "h1:1");
@@ -489,11 +718,34 @@ namespace {
         const int myConfigIndex = 3;
         const BSONObj hbRequest = makeHeartbeatRequest(rsConfig, myConfigIndex);
 
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h5", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-        Status status = checkQuorumForReconfig(_executor.get(), rsConfig, myConfigIndex);
+        startQuorumCheck(rsConfig, myConfigIndex);
+        const Date_t startDate = _net->now();
+        const int numCommandsExpected = rsConfig.getNumMembers() - 1;
+        unordered_set<HostAndPort> seenHosts;
+        _net->enterNetwork();
+        for (int i = 0; i < numCommandsExpected; ++i) {
+            const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
+            const ReplicationExecutor::RemoteCommandRequest& request = noi->getRequest();
+            ASSERT_EQUALS("admin", request.dbname);
+            ASSERT_EQUALS(hbRequest, request.cmdObj);
+            ASSERT(seenHosts.insert(request.target).second) <<
+                "Already saw " << request.target.toString();
+            if (request.target == HostAndPort("h5", 1)) {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                                                              BSON("ok" << 1),
+                                                              Milliseconds(8))));
+            }
+            else {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ErrorCodes::NoSuchKey, "No response"));
+            }
+        }
+        _net->runUntil(startDate + 10);
+        _net->exitNetwork();
+        Status status = waitForQuorumCheck();
         ASSERT_EQUALS(ErrorCodes::NodeNotFound, status);
         ASSERT_REASON_CONTAINS(status, "no electable nodes responded");
     }
@@ -516,30 +768,32 @@ namespace {
         const int myConfigIndex = 3;
         const BSONObj hbRequest = makeHeartbeatRequest(rsConfig, myConfigIndex);
 
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h1", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h2", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 1)));
-
-        // If this message arrived, the reconfig would be vetoed, but it is delayed
-        // until the quorum check completes, and so has no effect.
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h3", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 0 << "set" << "rs0" << "v" << 3)),
-                          true);
-
-        // Ditto RE veto and no effect.
-        _net->addResponse(RemoteCommandRequest(HostAndPort("h5", 1),
-                                               "admin",
-                                               hbRequest),
-                          StatusWith<BSONObj>(BSON("ok" << 0 << "set" << "rs0" << "v" << 3)),
-                          true);
-        ASSERT_OK(checkQuorumForReconfig(_executor.get(), rsConfig, myConfigIndex));
+        startQuorumCheck(rsConfig, myConfigIndex);
+        const Date_t startDate = _net->now();
+        const int numCommandsExpected = rsConfig.getNumMembers() - 1;
+        unordered_set<HostAndPort> seenHosts;
+        _net->enterNetwork();
+        for (int i = 0; i < numCommandsExpected; ++i) {
+            const NetworkInterfaceMock::NetworkOperationIterator noi = _net->getNextReadyRequest();
+            const ReplicationExecutor::RemoteCommandRequest& request = noi->getRequest();
+            ASSERT_EQUALS("admin", request.dbname);
+            ASSERT_EQUALS(hbRequest, request.cmdObj);
+            ASSERT(seenHosts.insert(request.target).second) <<
+                "Already saw " << request.target.toString();
+            if (request.target == HostAndPort("h1", 1) || request.target == HostAndPort("h2", 1)) {
+                _net->scheduleResponse(noi,
+                                       startDate + 10,
+                                       ResponseStatus(ReplicationExecutor::RemoteCommandResponse(
+                                                              BSON("ok" << 1),
+                                                              Milliseconds(8))));
+            }
+            else {
+                _net->blackHole(noi);
+            }
+        }
+        _net->runUntil(startDate + 10);
+        _net->exitNetwork();
+        ASSERT_OK(waitForQuorumCheck());
     }
 
 }  // namespace

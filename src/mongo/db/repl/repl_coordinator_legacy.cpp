@@ -119,6 +119,11 @@ namespace repl {
         return theReplSet->state();
     }
 
+    Seconds LegacyReplicationCoordinator::getSlaveDelaySecs() const {
+        invariant(getReplicationMode() == modeReplSet);
+        return Seconds(theReplSet->myConfig().slaveDelay);
+    }
+
     void LegacyReplicationCoordinator::clearSyncSourceBlacklist() {
         theReplSet->clearVetoes();
     }
@@ -455,15 +460,16 @@ namespace {
         return theReplSet->myConfig()._id;
     }
 
-    void LegacyReplicationCoordinator::setFollowerMode(const MemberState& newState) {
+    bool LegacyReplicationCoordinator::setFollowerMode(const MemberState& newState) {
         if (newState.secondary() &&
                 theReplSet->state().recovering() &&
                 theReplSet->mgr->shouldBeRecoveringDueToAuthIssue()) {
             // If tryToGoLiveAsSecondary is trying to take us from RECOVERING to SECONDARY, but we
             // still have an authIssue, don't actually change states.
-            return;
+            return false;
         }
         theReplSet->changeState(newState);
+        return true;
     }
 
     bool LegacyReplicationCoordinator::isWaitingForApplierToDrain() {
@@ -620,7 +626,8 @@ namespace {
                       << rsLog;
                 log() << "replSet s: " << args.getSetName() << rsLog;
                 response->noteMismatched();
-                return Status(ErrorCodes::BadValue, "repl set names do not match");
+                return Status(ErrorCodes::InconsistentReplicaSetNames,
+                              "repl set names do not match");
             }
         }
 
@@ -636,7 +643,8 @@ namespace {
 
         if (theReplSet->name() != args.getSetName()) {
             response->noteMismatched();
-            return Status(ErrorCodes::BadValue, "repl set names do not match (2)");
+            return Status(ErrorCodes::InconsistentReplicaSetNames,
+                          "repl set names do not match (2)");
         }
         response->setSetName(theReplSet->name());
 
@@ -761,7 +769,7 @@ namespace {
 
             log() << "replSet replSetReconfig [2]" << rsLog;
 
-            theReplSet->haveNewConfig(txn, *newConfig, true);
+            theReplSet->haveNewConfig(txn, *newConfig, false);
             ReplSet::startupStatusMsg.set("replSetReconfig'd");
         }
         catch(const DBException& e) {
@@ -806,7 +814,7 @@ namespace {
                    it is ok if the initiating member has *other* data than that.
                    */
                 BSONObj o;
-                if( Helpers::getFirst(txn, rsoplog, o) ) {
+                if (Helpers::getSingleton(txn, rsoplog, o)) {
                     return Status(ErrorCodes::AlreadyInitialized,
                                   rsoplog + string(" is not empty on the initiating member.  "
                                           "cannot initiate."));
@@ -846,11 +854,8 @@ namespace {
 
             log() << "replSet replSetInitiate all members seem up" << rsLog;
 
-            createOplog(txn);
-
             Lock::GlobalWrite lk(txn->lockState());
-            BSONObj comment = BSON( "msg" << "initiating set");
-            newConfig->saveConfigLocally(txn, comment);
+            newConfig->saveConfigLocally(txn, BSONObj());
             log() << "replSet replSetInitiate config now saved locally.  "
                 "Should come online in about a minute." << rsLog;
             resultObj->append("info",

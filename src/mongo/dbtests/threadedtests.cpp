@@ -37,8 +37,6 @@
 
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_state.h"
-#include "mongo/db/dbdirectclient.h"
-#include "mongo/db/operation_context_impl.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/bits.h"
@@ -104,16 +102,6 @@ namespace ThreadedTests {
         }
 
         void run() {
-            DEV {
-                // in _DEBUG builds on linux we mprotect each time a writelock
-                // is taken. That can greatly slow down this test if there are
-                // many open files
-                OperationContextImpl txn;
-                DBDirectClient db(&txn);
-
-                db.simpleCommand("admin", NULL, "closeAllDatabases");
-            }
-
             Timer t;
             cout << "MongoMutexTest N:" << N << endl;
             ThreadedTest<nthr>::run();
@@ -125,7 +113,7 @@ namespace ThreadedTests {
         virtual void subthread(int tnumber) {
             Client::initThread("mongomutextest");
 
-            LockState lockState;
+            LockerImpl<true> lockState;
             mongo::unittest::log().stream() 
                 << "Thread "
                 << boost::this_thread::get_id()
@@ -199,7 +187,7 @@ namespace ThreadedTests {
                                 Lock::DBRead x(&lockState, "local");
                             }
                             {
-                                Lock::DBLock x(&lockState, "local", newlm::MODE_X);
+                                Lock::DBLock x(&lockState, "local", MODE_X);
                                 //  No actual writing here, so no WriteUnitOfWork
                                 if( sometimes ) {
                                     Lock::TempRelease t(&lockState);
@@ -211,11 +199,11 @@ namespace ThreadedTests {
                             }
 
                             { 
-                                Lock::DBLock x(&lockState, "admin", newlm::MODE_X);
+                                Lock::DBLock x(&lockState, "admin", MODE_X);
                             }
                         }
                         else if( q == 3 ) {
-                            Lock::DBLock x(&lockState, "foo", newlm::MODE_X);
+                            Lock::DBLock x(&lockState, "foo", MODE_X);
                             Lock::DBRead y(&lockState, "admin");
                         }
                         else if( q == 4 ) { 
@@ -223,7 +211,7 @@ namespace ThreadedTests {
                             Lock::DBRead y(&lockState, "admin");
                         }
                         else { 
-                            Lock::DBLock w(&lockState, "foo", newlm::MODE_X);
+                            Lock::DBLock w(&lockState, "foo", MODE_X);
 
                             {
                                 Lock::TempRelease t(&lockState);
@@ -246,11 +234,11 @@ namespace ThreadedTests {
 
         virtual void validate() {
             {
-                LockState ls;
+                LockerImpl<true> ls;
                 Lock::GlobalWrite w(&ls);
             }
             {
-                LockState ls;
+                LockerImpl<true> ls;
                 Lock::GlobalRead r(&ls);
             }
         }
@@ -329,23 +317,6 @@ namespace ThreadedTests {
             tp.join();
 
             ASSERT_EQUALS(counter.load(), iterations * 2);
-        }
-    };
-
-    class LockTest {
-    public:
-        void run() {
-            // quick atomicint wrap test
-            // MSGID likely assumes this semantic
-            AtomicUInt32 counter(0xffffffff);
-            counter.fetchAndAdd(1);
-            ASSERT_EQUALS(counter.load(), 0U);
-
-            LockState lockState;
-            writelocktry lk(&lockState, 0);
-
-            ASSERT( lk.got() );
-            ASSERT( lockState.isW() );
         }
     };
 
@@ -913,8 +884,6 @@ namespace ThreadedTests {
             add< IsAtomicWordAtomic<AtomicUInt64> >();
             add< MVarTest >();
             add< ThreadPoolTest >();
-            add< LockTest >();
-
 
             add< RWLockTest1 >();
             add< RWLockTest2 >();
