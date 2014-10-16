@@ -151,6 +151,8 @@ namespace repl {
 
         virtual void signalDrainComplete();
 
+        virtual void signalUpstreamUpdater();
+
         virtual void prepareReplSetUpdatePositionCommand(OperationContext* txn,
                                                          BSONObjBuilder* cmdBuilder);
 
@@ -337,11 +339,25 @@ namespace repl {
                                          BSONObjBuilder* response,
                                          Status* result);
 
-
+        /**
+         * Bottom half of processReplSetFreeze.
+         */
+        void _processReplSetFreeze_finish(const ReplicationExecutor::CallbackData& cbData,
+                                          int secs,
+                                          BSONObjBuilder* response,
+                                          Status* result);
         /*
          * Bottom half of clearSyncSourceBlacklist
          */
         void _clearSyncSourceBlacklist_finish(const ReplicationExecutor::CallbackData& cbData);
+
+        /**
+         * Scheduled to cause the ReplicationCoordinator to reconsider any state that might
+         * need to change as a result of time passing - for instance becoming PRIMARY when a single
+         * node replica set member's stepDown period ends.
+         */
+        void _handleTimePassing(const ReplicationExecutor::CallbackData& cbData);
+
         /*
          * Returns the OpTime of the last applied operation on this node.
          */
@@ -409,14 +425,29 @@ namespace repl {
                 bool* success);
 
         /**
-         * Helper method for setLastOptime and setMyLastOptime that takes in a unique lock on
-         * _mutex.  The passed in lock must already be locked.  It is unknown what state the lock
-         * will be in after this method finishes.
+         * Helper method for setLastOptime that takes in a unique lock on
+         * _mutex.  The passed in lock must already be locked.  It is unspecified what state the 
+         * lock will be in after this method finishes.
          */
         Status _setLastOptime_inlock(boost::unique_lock<boost::mutex>* lock,
                                      const OID& rid,
                                      const OpTime& ts);
 
+        /**
+         * Helper method for setMyLastOptime that takes in a unique lock on
+         * _mutex.  The passed in lock must already be locked.  It is unspecified what state the
+         * lock will be in after this method finishes.
+         */
+        void _setMyLastOptime_inlock(boost::unique_lock<boost::mutex>* lock, const OpTime& ts);
+
+        /**
+         * Helper method for _setLastOptime_inlock and _setMyLastOptime_inlock that takes in a
+         * unique lock on _mutex.  The passed in lock must already be locked.  It is unspecified
+         * what state the lock will be in after this method finishes.
+         */
+        void _updateOptimeInMap_inlock(boost::unique_lock<boost::mutex>* lock,
+                                       SlaveInfo* slaveInfo,
+                                       OpTime ts);
         /**
          * Schedules a heartbeat to be sent to "target" at "when".
          */
@@ -432,6 +463,13 @@ namespace repl {
         void _trackHeartbeatHandle(const StatusWith<ReplicationExecutor::CallbackHandle>& handle);
 
         void _untrackHeartbeatHandle(const ReplicationExecutor::CallbackHandle& handle);
+
+        /**
+         * Helper for _handleHeartbeatResponse.
+         *
+         * Looks up target in the slave map and updates its optime if found.
+         */
+        void _updateOpTimeFromHeartbeat(const HostAndPort& target, OpTime optime);
 
         /**
          * Starts a heartbeat for each member in the current config.  Called within the executor
@@ -530,6 +568,11 @@ namespace repl {
          * finishEvh is an event that is signaled when election is complete.
          **/
         void _onElectCmdRunnerComplete();
+
+        /**
+         * Callback called after a random delay, to prevent repeated election ties.
+         */
+        void _recoverFromElectionTie(const ReplicationExecutor::CallbackData& cbData);
 
         /**
          * Chooses a new sync source.  Must be scheduled as a callback.
