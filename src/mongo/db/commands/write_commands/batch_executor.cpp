@@ -43,6 +43,7 @@
 #include "mongo/db/lasterror.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/catalog/index_create.h"
+#include "mongo/db/concurrency/deadlock.h"
 #include "mongo/db/ops/delete_executor.h"
 #include "mongo/db/ops/delete_request.h"
 #include "mongo/db/ops/insert.h"
@@ -486,8 +487,8 @@ namespace mongo {
             CollectionMetadataPtr metadata = shardingState->getCollectionMetadata( nss.ns() );
 
             if ( metadata ) {
-                if ( !isUniqueIndexCompatible( metadata->getKeyPattern(),
-                                               request.getIndexKeyPattern() ) ) {
+                ShardKeyPattern shardKeyPattern(metadata->getKeyPattern());
+                if (!shardKeyPattern.isUniqueIndexCompatible(request.getIndexKeyPattern())) {
 
                     result->setError(new WriteErrorDetail);
                     buildUniqueIndexError(metadata->getKeyPattern(),
@@ -1136,6 +1137,9 @@ namespace mongo {
         UpdateLifecycleImpl updateLifecycle(true, request.getNamespaceString());
         request.setLifecycle(&updateLifecycle);
 
+        // Updates from the write commands path can yield.
+        request.setYieldPolicy(PlanExecutor::YIELD_AUTO);
+
         UpdateExecutor executor(&request, &txn->getCurOp()->debug());
         Status status = executor.prepare();
         if (!status.isOK()) {
@@ -1143,38 +1147,92 @@ namespace mongo {
             return;
         }
 
-        ///////////////////////////////////////////
-        Lock::DBLock dbLock(txn->lockState(), nsString.db(), MODE_IX);
-        Lock::CollectionLock colLock(txn->lockState(),
-                                     nsString.ns(),
-                                     isMulti ? MODE_X : MODE_IX);
-        ///////////////////////////////////////////
+        int attempt = 1;
+        bool createCollection = false;
+        for ( int fakeLoop = 0; fakeLoop < 1; fakeLoop++ ) {
 
-        if (!checkShardVersion(txn, &shardingState, *updateItem.getRequest(), result))
-            return;
-
-        Client::Context ctx(txn, nsString.ns(), false /* don't check version */);
-
-        try {
-            UpdateResult res = executor.execute(ctx.db());
-
-            const long long numDocsModified = res.numDocsModified;
-            const long long numMatched = res.numMatched;
-            const BSONObj resUpsertedID = res.upserted;
-
-            // We have an _id from an insert
-            const bool didInsert = !resUpsertedID.isEmpty();
-
-            result->getStats().nModified = didInsert ? 0 : numDocsModified;
-            result->getStats().n = didInsert ? 1 : numMatched;
-            result->getStats().upsertedID = resUpsertedID;
-        }
-        catch (const DBException& ex) {
-            status = ex.toStatus();
-            if (ErrorCodes::isInterruption(status.code())) {
-                throw;
+            if ( createCollection ) {
+                Lock::DBLock lk(txn->lockState(), nsString.db(), MODE_X);
+                Client::Context ctx(txn, nsString.ns(), false /* don't check version */);
+                Database* db = ctx.db();
+                if ( db->getCollection( txn, nsString.ns() ) ) {
+                    // someone else beat us to it
+                }
+                else {
+                    WriteUnitOfWork wuow(txn);
+                    uassertStatusOK( userCreateNS( txn, db,
+                                                   nsString.ns(), BSONObj(),
+                                                   !request.isFromReplication() ) );
+                    wuow.commit();
+                }
             }
-            result->setError(toWriteError(status));
+
+            ///////////////////////////////////////////
+            Lock::DBLock dbLock(txn->lockState(), nsString.db(), MODE_IX);
+            Lock::CollectionLock colLock(txn->lockState(),
+                                         nsString.ns(),
+                                         MODE_IX);
+            ///////////////////////////////////////////
+
+            if (!checkShardVersion(txn, &shardingState, *updateItem.getRequest(), result))
+                return;
+
+            Client::Context ctx(txn, nsString.ns(), false /* don't check version */);
+
+            if ( ctx.db()->getCollection( txn, nsString.ns() ) == NULL ) {
+                if ( createCollection ) {
+                    // we raced with some, accept defeat
+                    result->getStats().nModified = 0;
+                    result->getStats().n = 0;
+                    return;
+                }
+
+                if ( !request.isUpsert() ) {
+                    // not an upsert, not collection, nothing to do
+                    result->getStats().nModified = 0;
+                    result->getStats().n = 0;
+                    return;
+                }
+
+                // upsert, mark that we should create collection
+                fakeLoop = -1;
+                createCollection = true;
+                continue;
+            }
+
+            try {
+                UpdateResult res = executor.execute(ctx.db());
+
+                const long long numDocsModified = res.numDocsModified;
+                const long long numMatched = res.numMatched;
+                const BSONObj resUpsertedID = res.upserted;
+
+                // We have an _id from an insert
+                const bool didInsert = !resUpsertedID.isEmpty();
+
+                result->getStats().nModified = didInsert ? 0 : numDocsModified;
+                result->getStats().n = didInsert ? 1 : numMatched;
+                result->getStats().upsertedID = resUpsertedID;
+            }
+            catch ( const DeadLockException& dle ) {
+                if ( isMulti ) {
+                    log() << "got deadlock during multi update, aborting";
+                    throw;
+                }
+                else {
+                    log() << "got deadlock doing update on " << nsString
+                          << ", attempt: " << attempt++ << " retrying";
+                    createCollection = false;
+                    fakeLoop = -1;
+                }
+            }
+            catch (const DBException& ex) {
+                status = ex.toStatus();
+                if (ErrorCodes::isInterruption(status.code())) {
+                    throw;
+                }
+                result->setError(toWriteError(status));
+            }
         }
     }
 
@@ -1194,6 +1252,10 @@ namespace mongo {
         request.setMulti( removeItem.getDelete()->getLimit() != 1 );
         request.setUpdateOpLog(true);
         request.setGod( false );
+
+        // Deletes running through the write commands path can yield.
+        request.setYieldPolicy(PlanExecutor::YIELD_AUTO);
+
         DeleteExecutor executor( &request );
         Status status = executor.prepare();
         if ( !status.isOK() ) {
@@ -1201,30 +1263,38 @@ namespace mongo {
             return;
         }
 
-        ///////////////////////////////////////////
-        Lock::DBLock writeLock(txn->lockState(), nss.db(), MODE_X);
-        ///////////////////////////////////////////
+        int attempt = 1;
+        while ( 1 ) {
+            try {
+                Lock::DBLock dbLock(txn->lockState(), nss.db(), MODE_IX);
+                Lock::CollectionLock collLock(txn->lockState(), nss.ns(), MODE_IX);
 
-        // Check version once we're locked
+                // Check version once we're locked
 
-        if (!checkShardVersion(txn, &shardingState, *removeItem.getRequest(), result)) {
-            // Version error
-            return;
-        }
+                if (!checkShardVersion(txn, &shardingState, *removeItem.getRequest(), result)) {
+                    // Version error
+                    return;
+                }
 
-        // Context once we're locked, to set more details in currentOp()
-        // TODO: better constructor?
-        Client::Context ctx(txn, nss.ns(), false /* don't check version */);
+                // Context once we're locked, to set more details in currentOp()
+                // TODO: better constructor?
+                Client::Context ctx(txn, nss.ns(), false /* don't check version */);
 
-        try {
-            result->getStats().n = executor.execute(ctx.db());
-        }
-        catch ( const DBException& ex ) {
-            status = ex.toStatus();
-            if (ErrorCodes::isInterruption(status.code())) {
-                throw;
+                result->getStats().n = executor.execute(ctx.db());
+                return;
             }
-            result->setError(toWriteError(status));
+            catch ( const DeadLockException& dle ) {
+                log() << "got deadlock doing delete on " << nss
+                      << ", attempt: " << attempt++ << " retrying";
+            }
+            catch ( const DBException& ex ) {
+                status = ex.toStatus();
+                if (ErrorCodes::isInterruption(status.code())) {
+                    throw;
+                }
+                result->setError(toWriteError(status));
+                return;
+            }
         }
     }
 

@@ -311,6 +311,14 @@ namespace {
                 }
             }
 
+            // If we are transitioning to primary state, we need to leave
+            // this loop in order to go into bgsync-pause mode.
+            if (_replCoord->isWaitingForApplierToDrain() ||
+                _replCoord->getCurrentMemberState().primary()) {
+                LOG(1) << "waiting for draining or we are primary, not adding more ops to buffer";
+                return;
+            }
+
             // At this point, we are guaranteed to have at least one thing to read out
             // of the oplogreader cursor.
             BSONObj o = _syncSourceReader.nextSafe().getOwned();
@@ -324,10 +332,10 @@ namespace {
             OCCASIONALLY {
                 LOG(2) << "bgsync buffer has " << _buffer.size() << " bytes" << rsLog;
             }
-            // the blocking queue will wait (forever) until there's room for us to push
-            _buffer.push(o);
+
             bufferCountGauge.increment();
             bufferSizeGauge.increment(getSize(o));
+            _buffer.push(o);
 
             {
                 boost::unique_lock<boost::mutex> lock(_mutex);
@@ -454,12 +462,13 @@ namespace {
     void BackgroundSync::start(OperationContext* txn) {
         massert(16235, "going to start syncing, but buffer is not empty", _buffer.empty());
 
-        boost::unique_lock<boost::mutex> lock(_mutex);
+        long long updatedLastAppliedHash = _readLastAppliedHash(txn);
+        boost::lock_guard<boost::mutex> lk(_mutex);
         _pause = false;
 
         // reset _last fields with current oplog data
+        _lastAppliedHash = updatedLastAppliedHash;
         _lastOpTimeFetched = _replCoord->getMyLastOptime();
-        loadLastAppliedHash(txn);
         _lastFetchedHash = _lastAppliedHash;
 
         LOG(1) << "replset bgsync fetch queue set to: " << _lastOpTimeFetched << 
@@ -496,13 +505,23 @@ namespace {
     }
 
     void BackgroundSync::loadLastAppliedHash(OperationContext* txn) {
+        long long result = _readLastAppliedHash(txn);
+        boost::lock_guard<boost::mutex> lk(_mutex);
+        _lastAppliedHash = result;
+    }
+
+    long long BackgroundSync::_readLastAppliedHash(OperationContext* txn) {
         BSONObj oplogEntry;
         try {
-            if (!Helpers::getLast(txn, rsoplog, oplogEntry)) {
+            // Uses WuoW because there is no way to demarcate a read transaction boundary.
+            Lock::DBLock lk(txn->lockState(), "local", MODE_X);
+            WriteUnitOfWork uow(txn);
+            bool success = Helpers::getLast(txn, rsoplog, oplogEntry);
+            uow.commit();
+            if (!success) {
                 // This can happen when we are to do an initial sync.  lastHash will be set
                 // after the initial sync is complete.
-                _lastAppliedHash = 0;
-                return;
+                return 0;
             }
         }
         catch (const DBException& ex) {
@@ -521,7 +540,7 @@ namespace {
                 typeName(hashElement.type());
             fassertFailed(18903);
         }
-        _lastAppliedHash = hashElement.safeNumberLong();
+        return hashElement.safeNumberLong();
     }
 
     bool BackgroundSync::getInitialSyncRequestedFlag() {

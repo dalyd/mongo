@@ -138,12 +138,10 @@ namespace mongo {
 
         // ---- things that should move to a CollectionAccessMethod like thing
         /**
-         * canonical to get all would be
-         * getIterator( DiskLoc(), false, CollectionScanParams::FORWARD )
+         * Default arguments will return all items in the collection.
          */
         RecordIterator* getIterator( OperationContext* txn,
                                      const DiskLoc& start = DiskLoc(),
-                                     bool tailable = false,
                                      const CollectionScanParams::Direction& dir = CollectionScanParams::FORWARD ) const;
 
         /**
@@ -203,6 +201,7 @@ namespace mongo {
          */
         Status updateDocumentWithDamages( OperationContext* txn,
                                           const DiskLoc& loc,
+                                          const RecordData& oldRec,
                                           const char* damangeSource,
                                           const mutablebson::DamageVector& damages );
 

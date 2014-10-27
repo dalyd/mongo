@@ -177,7 +177,11 @@ namespace DocumentSourceTests {
                 CanonicalQuery* cq;
                 uassertStatusOK(CanonicalQuery::canonicalize(ns, /*query=*/BSONObj(), &cq));
                 PlanExecutor* execBare;
-                uassertStatusOK(getExecutor(&_opCtx, ctx.getCollection(), cq, &execBare));
+                uassertStatusOK(getExecutor(&_opCtx,
+                                            ctx.getCollection(),
+                                            cq,
+                                            PlanExecutor::YIELD_MANUAL,
+                                            &execBare));
 
                 _exec.reset(execBare);
                 _exec->saveState();
@@ -1982,6 +1986,8 @@ namespace DocumentSourceTests {
             add<DocumentSourceMatch::RedactSafePortion>();
             add<DocumentSourceMatch::Coalesce>();
         }
-    } myall;
+    };
+
+    SuiteInstance<All> myall;
 
 } // namespace DocumentSourceTests

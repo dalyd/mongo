@@ -118,15 +118,12 @@ namespace mongo {
         if (!collection && _request->isUpsert()) {
             OperationContext* const txn = _request->getOpCtx();
 
-            //  Upgrade to an exclusive lock. While this may possibly lead to a deadlock,
-            //  collection creation is rare and a retry will definitively succeed in this
-            //  case. Add a fail point to allow reliably triggering the deadlock situation.
-
-            MONGO_FAIL_POINT_BLOCK(implicitCollectionCreationDelay, data) {
-                LOG(0) << "Sleeping for creation of collection " + nsString.ns();
-                sleepmillis(1000);
-                LOG(0) << "About to upgrade to exclusive lock on " + nsString.ns();
-            }
+            // We have to have an exclsive lock on the db to be allowed to create the collection.
+            // Callers should either get an X or create the collection.
+            const Locker* locker = txn->lockState();
+            invariant( locker->isW() ||
+                       locker->isLockHeldForMode( ResourceId( RESOURCE_DATABASE, nsString.db() ),
+                                                  MODE_X ) );
 
             Lock::DBLock lk(txn->lockState(), nsString.db(), MODE_X);
 
@@ -163,18 +160,29 @@ namespace mongo {
             _driver.refreshIndexKeys(lifecycle->getIndexKeys(_request->getOpCtx()));
         }
 
+        // If yielding is allowed for this plan, then set an auto yield policy. Otherwise set
+        // a manual yield policy.
+        const bool canYield = !_request->isGod() &&
+            PlanExecutor::YIELD_AUTO == _request->getYieldPolicy() && (
+            _canonicalQuery.get() ?
+            !QueryPlannerCommon::hasNode(_canonicalQuery->root(), MatchExpression::ATOMIC) :
+            !LiteParsedQuery::isQueryIsolated(_request->getQuery()));
+
+        PlanExecutor::YieldPolicy policy = canYield ? PlanExecutor::YIELD_AUTO :
+                                                      PlanExecutor::YIELD_MANUAL;
+
         PlanExecutor* rawExec = NULL;
         Status getExecStatus = Status::OK();
         if (_canonicalQuery.get()) {
             // This is the regular path for when we have a CanonicalQuery.
             getExecStatus = getExecutorUpdate(_request->getOpCtx(), db, _canonicalQuery.release(),
-                                              _request, &_driver, _opDebug, &rawExec);
+                                              _request, &_driver, _opDebug, policy, &rawExec);
         }
         else {
             // This is the idhack fast-path for getting a PlanExecutor without doing the work
             // to create a CanonicalQuery.
             getExecStatus = getExecutorUpdate(_request->getOpCtx(), db, nsString.ns(), _request,
-                                              &_driver, _opDebug, &rawExec);
+                                              &_driver, _opDebug, policy, &rawExec);
         }
 
         if (!getExecStatus.isOK()) {
@@ -183,18 +191,6 @@ namespace mongo {
 
         invariant(rawExec);
         _exec.reset(rawExec);
-
-        // If yielding is allowed for this plan, then set an auto yield policy. Otherwise set
-        // a manual yield policy.
-        const bool canYield = !_request->isGod() && (
-            _canonicalQuery.get() ?
-            !QueryPlannerCommon::hasNode(_canonicalQuery->root(), MatchExpression::ATOMIC) :
-            !LiteParsedQuery::isQueryIsolated(_request->getQuery()));
-
-        PlanExecutor::YieldPolicy policy = canYield ? PlanExecutor::YIELD_AUTO :
-                                                      PlanExecutor::YIELD_MANUAL;
-
-        _exec->setYieldPolicy(policy);
 
         return Status::OK();
     }

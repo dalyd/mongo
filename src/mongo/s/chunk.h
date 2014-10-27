@@ -31,13 +31,13 @@
 #pragma once
 
 #include "mongo/base/string_data.h"
+#include "mongo/db/keypattern.h"
+#include "mongo/db/query/query_solution.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/shard.h"
-#include "mongo/s/shardkey.h"
+#include "mongo/s/shard_key_pattern.h"
 #include "mongo/util/concurrency/ticketholder.h"
-#include "mongo/db/query/query_solution.h"
-
 
 namespace mongo {
 
@@ -89,12 +89,12 @@ namespace mongo {
         bool minIsInf() const;
         bool maxIsInf() const;
 
-        // Returns true if this chunk contains the given point, and false otherwise
+        // Returns true if this chunk contains the given shard key, and false otherwise
         //
         // Note: this function takes an extracted *key*, not an original document
         // (the point may be computed by, say, hashing a given field or projecting
         //  to a subset of fields).
-        bool containsPoint( const BSONObj& point ) const;
+        bool containsKey( const BSONObj& shardKey ) const;
 
         std::string genID() const;
         static std::string genID( const std::string& ns , const BSONObj& min );
@@ -112,10 +112,10 @@ namespace mongo {
         // split support
         //
 
-        long getBytesWritten() const { return _dataWritten; }
+        long long getBytesWritten() const { return _dataWritten; }
         // Const since _dataWritten is mutable and a heuristic
         // TODO: Split data tracking and chunk information
-        void setBytesWritten( long bytesWritten ) const { _dataWritten = bytesWritten; }
+        void setBytesWritten(long long bytesWritten) const { _dataWritten = bytesWritten; }
 
         /**
          * if the amount of data written nears the max size of a shard
@@ -162,7 +162,10 @@ namespace mongo {
          * @param maxPoints limits the number of split points that are needed, zero is max (optional)
          * @param maxObjs limits the number of objects in each chunk, zero is as max (optional)
          */
-        void pickSplitVector( std::vector<BSONObj>& splitPoints , int chunkSize , int maxPoints = 0, int maxObjs = 0) const;
+        void pickSplitVector(std::vector<BSONObj>& splitPoints,
+                             long long chunkSize,
+                             int maxPoints = 0,
+                             int maxObjs = 0) const;
 
         //
         // migration support
@@ -216,7 +219,7 @@ namespace mongo {
         // public constants
         //
 
-        static int MaxChunkSize;
+        static long long MaxChunkSize;
         static int MaxObjectPerChunk;
         static bool ShouldAutoSplit;
 
@@ -251,7 +254,7 @@ namespace mongo {
 
         // transient stuff
 
-        mutable long _dataWritten;
+        mutable long long _dataWritten;
 
         // methods, etc..
 
@@ -276,8 +279,6 @@ namespace mongo {
 
         /** initializes _dataWritten with a random value so that a mongos restart wouldn't cause delay in splitting */
         static int mkDataWritten();
-
-        ShardKeyPattern skey() const;
     };
 
     class ChunkRange {
@@ -289,12 +290,12 @@ namespace mongo {
         const BSONObj& getMax() const { return _max; }
 
         // clones of Chunk methods
-        // Returns true if this ChunkRange contains the given point, and false otherwise
+        // Returns true if this ChunkRange contains the given shard key, and false otherwise
         //
         // Note: this function takes an extracted *key*, not an original document
         // (the point may be computed by, say, hashing a given field or projecting
         //  to a subset of fields).
-        bool containsPoint( const BSONObj& point ) const;
+        bool containsKey( const BSONObj& shardKey ) const;
 
         ChunkRange(ChunkMap::const_iterator begin, const ChunkMap::const_iterator end)
             : _manager(begin->second->getManager())
@@ -372,11 +373,7 @@ namespace mongo {
 
         std::string getns() const { return _ns; }
 
-        const ShardKeyPattern& getShardKey() const {  return _key; }
-
-        bool hasShardKey(const BSONObj& doc) const;
-
-        bool hasTargetableShardKey(const BSONObj& doc) const;
+        const ShardKeyPattern& getShardKeyPattern() const { return _keyPattern; }
 
         bool isUnique() const { return _unique; }
 
@@ -413,26 +410,15 @@ namespace mongo {
 
         int numChunks() const { return _chunkMap.size(); }
 
-        /** Given a document, returns the chunk which contains that document.
-         *  This works by extracting the shard key part of the given document, then
-         *  calling findIntersectingChunk() on the extracted key.
+        /**
+         * Given a key that has been extracted from a document, returns the
+         * chunk that contains that key.
          *
-         *  See also the description for findIntersectingChunk().
+         * For instance, to locate the chunk for document {a : "foo" , b : "bar"}
+         * when the shard key is {a : "hashed"}, you can call
+         *  findIntersectingChunk() on {a : hash("foo") }
          */
-        ChunkPtr findChunkForDoc( const BSONObj& doc ) const;
-
-        /** Given a key that has been extracted from a document, returns the
-         *  chunk that contains that key.
-         *
-         *  For instance, to locate the chunk for document {a : "foo" , b : "bar"}
-         *  when the shard key is {a : "hashed"}, you can call
-         *      findChunkForDoc() on {a : "foo" , b : "bar"}, or
-         *      findIntersectingChunk() on {a : hash("foo") }
-         */
-        ChunkPtr findIntersectingChunk( const BSONObj& point ) const;
-
-
-        ChunkPtr findChunkOnServer( const Shard& shard ) const;
+        ChunkPtr findIntersectingChunk( const BSONObj& shardKey ) const;
 
         void getShardsForQuery( std::set<Shard>& shards , const BSONObj& query ) const;
         void getAllShards( std::set<Shard>& all ) const;
@@ -463,9 +449,6 @@ namespace mongo {
          * Returns true if, for this shard, the chunks are identical in both chunk managers
          */
         bool compatibleWith(const ChunkManager& other, const std::string& shard) const;
-
-        bool compatibleWith( const Chunk& other ) const;
-        bool compatibleWith( ChunkPtr other ) const { if( ! other ) return false; return compatibleWith( *other ); }
 
         std::string toString() const;
 
@@ -504,7 +487,7 @@ namespace mongo {
 
         // All members should be const for thread-safety
         const std::string _ns;
-        const ShardKeyPattern _key;
+        const ShardKeyPattern _keyPattern;
         const bool _unique;
 
         const ChunkMap _chunkMap;
@@ -557,7 +540,6 @@ namespace mongo {
             // (for now) for parallel or sequential oversplitting.
             // TODO: Make splitting a separate thread with notifications?
             static const int staleMinorReloadThreshold = maxParallelSplits;
-
         };
 
         mutable SplitHeuristics _splitHeuristics;
@@ -569,10 +551,8 @@ namespace mongo {
         friend class Chunk;
         friend class ChunkRangeManager; // only needed for CRM::assertValid()
         static AtomicUInt32 NextSequenceNumber;
-        
-        /** Just for testing */
+
         friend class TestableChunkManager;
-        ChunkManager();
     };
 
     // like BSONObjCmp. for use as an STL comparison functor

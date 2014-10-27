@@ -32,6 +32,7 @@
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context_noop.h"
+#include "mongo/db/repl/is_master_response.h"
 #include "mongo/db/repl/network_interface_mock.h"
 #include "mongo/db/repl/repl_coordinator_impl.h"
 #include "mongo/db/repl/repl_coordinator_test_fixture.h"
@@ -138,6 +139,17 @@ namespace {
 
         ASSERT(getReplCoord()->getCurrentMemberState().primary()) <<
             getReplCoord()->getCurrentMemberState().toString();
+        ASSERT(getReplCoord()->isWaitingForApplierToDrain());
+
+        // Since we're still in drain mode, expect that we report ismaster: false, issecondary:true.
+        IsMasterResponse imResponse;
+        getReplCoord()->fillIsMasterForReplSet(&imResponse);
+        ASSERT_FALSE(imResponse.isMaster()) << imResponse.toBSON().toString();
+        ASSERT_TRUE(imResponse.isSecondary()) << imResponse.toBSON().toString();
+        getReplCoord()->signalDrainComplete();
+        getReplCoord()->fillIsMasterForReplSet(&imResponse);
+        ASSERT_TRUE(imResponse.isMaster()) << imResponse.toBSON().toString();
+        ASSERT_FALSE(imResponse.isSecondary()) << imResponse.toBSON().toString();
     }
 
     TEST_F(ReplCoordElectTest, ElectManyNodesSuccess) {
@@ -252,49 +264,6 @@ namespace {
         ASSERT_EQUALS(1,
                 countLogLinesContaining("wrong type for vote argument in replSetElect command"));
     }
-
-// TODO(dannenberg) reenable this test once we can ensure message ordering
-//                  This test relies on the first message arriving prior to the second
-//     TEST_F(ReplCoordElectTest, ElectWrongTypeForVoteButStillElected) {
-//         // one responds with String for votes
-//         startCapturingLogMessages();
-//         BSONObj configObj = BSON("_id" << "mySet" <<
-//                                  "version" << 1 <<
-//                                  "members" << BSON_ARRAY(BSON("_id" << 1 << "host" << "node1:12345")
-//                                                       << BSON("_id" << 2 << "host" << "node2:12345")
-//                                                       << BSON("_id" << 3 << "host" << "node3:12345")
-//                                 ));
-//         assertStartSuccess(configObj, HostAndPort("node1", 12345));
-//         ReplicaSetConfig config = assertMakeRSConfig(configObj);
-
-//         OperationContextNoop txn;
-//         OID selfRID = getReplCoord()->getMyRID();
-//         OpTime time1(1, 1);
-//         getReplCoord()->setLastOptime(&txn, selfRID, time1);
-
-//         const BSONObj electRequest = makeElectRequest(config, 0);
-
-//         getNet()->addResponse(RemoteCommandRequest(HostAndPort("node2:12345"),
-//                                                    "admin",
-//                                                    electRequest),
-//                               StatusWith<BSONObj>(BSON("ok" << 1 <<
-//                                                        "vote" << 1 <<
-//                                                        "round" << 380857196671097771ll)));
-//         getNet()->addResponse(RemoteCommandRequest(HostAndPort("node3:12345"),
-//                                                    "admin",
-//                                                    electRequest),
-//                               StatusWith<BSONObj>(BSON("ok" << 1 <<
-//                                                        "vote" << "yea" <<
-//                                                        "round" << 380857196671097771ll)));
-
-//         getReplCoord()->testElection();
-//         stopCapturingLogMessages();
-//         ASSERT_EQUALS(1,
-//                 countLogLinesContaining(
-//                     "wrong type for vote argument in replSetElect command: String"));
-//         ASSERT_EQUALS(1,
-//                 countLogLinesContaining("replSet election succeeded, assuming primary role"));
-//     }
 
 }
 }

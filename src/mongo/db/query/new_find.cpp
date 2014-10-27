@@ -241,9 +241,16 @@ namespace mongo {
 
             // Restore the RecoveryUnit if we need to.
             if (fromDBDirectClient) {
-                invariant(txn->recoveryUnit() == cc->getUnownedRecoveryUnit());
+                if (cc->hasRecoveryUnit())
+                    invariant(txn->recoveryUnit() == cc->getUnownedRecoveryUnit());
             }
             else {
+                if (!cc->hasRecoveryUnit()) {
+                    // Start using a new RecoveryUnit
+                    cc->setOwnedRecoveryUnit(
+                        getGlobalEnvironment()->getGlobalStorageEngine()->newRecoveryUnit(txn));
+
+                }
                 // Swap RecoveryUnit(s) between the ClientCursor and OperationContext.
                 ruSwapper.reset(new ScopedRecoveryUnitSwapper(cc, txn));
             }
@@ -303,15 +310,6 @@ namespace mongo {
                     || bb.len() > MaxBytesToReturnToClientAtOnce) {
                     break;
                 }
-            }
-
-            if (PlanExecutor::IS_EOF == state && 0 == numResults
-                && (queryOptions & QueryOption_CursorTailable)
-                && (queryOptions & QueryOption_AwaitData) && (pass < 1000)) {
-                // If the cursor is tailable we don't kill it if it's eof.  We let it try to get
-                // data some # of times first.
-                exec->saveState();
-                return 0;
             }
 
             // We save the client cursor when there might be more results, and hence we may receive
@@ -374,6 +372,22 @@ namespace mongo {
                 QLOG() << "getMore saving client cursor ended with state "
                        << PlanExecutor::statestr(state)
                        << endl;
+
+                if (PlanExecutor::IS_EOF == state && (queryOptions & QueryOption_CursorTailable)) {
+                    if (!fromDBDirectClient) {
+                        // Don't stash the RU. Get a new one on the next getMore.
+                        ruSwapper.reset();
+                        delete cc->releaseOwnedRecoveryUnit();
+                    }
+
+                    if ((queryOptions & QueryOption_AwaitData)
+                            && (numResults == 0)
+                            && (pass < 1000)) {
+                        // Bubble up to the AwaitData handling code in receivedGetMore which will
+                        // try again.
+                        return NULL;
+                    }
+                }
 
                 // Possibly note slave's position in the oplog.
                 if ((queryOptions & QueryOption_OplogReplay) && !slaveReadTill.isNull()) {
@@ -441,8 +455,12 @@ namespace mongo {
         WorkingSet* oplogws = new WorkingSet();
         OplogStart* stage = new OplogStart(txn, collection, tsExpr, oplogws);
 
+        PlanExecutor* rawExec;
         // Takes ownership of ws and stage.
-        scoped_ptr<PlanExecutor> exec(new PlanExecutor(txn, oplogws, stage, collection));
+        Status execStatus = PlanExecutor::make(txn, oplogws, stage, collection,
+                                               PlanExecutor::YIELD_AUTO, &rawExec);
+        invariant(execStatus.isOK());
+        scoped_ptr<PlanExecutor> exec(rawExec);
 
         // The stage returns a DiskLoc of where to start.
         DiskLoc startLoc;
@@ -450,7 +468,8 @@ namespace mongo {
 
         // This is normal.  The start of the oplog is the beginning of the collection.
         if (PlanExecutor::IS_EOF == state) {
-            return getExecutor(txn, collection, autoCq.release(), execOut);
+            return getExecutor(txn, collection, autoCq.release(), PlanExecutor::YIELD_AUTO,
+                               execOut);
         }
 
         // This is not normal.  An error was encountered.
@@ -471,8 +490,8 @@ namespace mongo {
         WorkingSet* ws = new WorkingSet();
         CollectionScan* cs = new CollectionScan(txn, params, ws, cq->root());
         // Takes ownership of 'ws', 'cs', and 'cq'.
-        *execOut = new PlanExecutor(txn, ws, cs, autoCq.release(), collection);
-        return Status::OK();
+        return PlanExecutor::make(txn, ws, cs, autoCq.release(), collection,
+                                  PlanExecutor::YIELD_AUTO, execOut);
     }
 
     std::string newRunQuery(OperationContext* txn,
@@ -566,15 +585,7 @@ namespace mongo {
         // Otherwise we go through the selection of which executor is most suited to the
         // query + run-time context at hand.
         Status status = Status::OK();
-        if (collection == NULL) {
-            LOG(2) << "Collection " << ns << " does not exist."
-                   << " Using EOF stage: " << cq->toStringShort();
-            EOFStage* eofStage = new EOFStage();
-            WorkingSet* ws = new WorkingSet();
-            // Takes ownership of 'cq'.
-            rawExec = new PlanExecutor(txn, ws, eofStage, cq, NULL);
-        }
-        else if (pq.getOptions().oplogReplay) {
+        if (NULL != collection && pq.getOptions().oplogReplay) {
             // Takes ownership of 'cq'.
             status = getOplogStartHack(txn, collection, cq, &rawExec);
         }
@@ -584,7 +595,7 @@ namespace mongo {
                 options |= QueryPlannerParams::INCLUDE_SHARD_FILTER;
             }
             // Takes ownership of 'cq'.
-            status = getExecutor(txn, collection, cq, &rawExec, options);
+            status = getExecutor(txn, collection, cq, PlanExecutor::YIELD_AUTO, &rawExec, options);
         }
 
         if (!status.isOK()) {
@@ -594,11 +605,6 @@ namespace mongo {
 
         verify(NULL != rawExec);
         auto_ptr<PlanExecutor> exec(rawExec);
-
-        // We want the PlanExecutor to yield automatically, but we handle registration of the
-        // executor ourselves. We want to temporarily register the executor while we are generating
-        // this batch of results, and then unregister and re-register with ClientCursor for getmore.
-        exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
 
         // If it's actually an explain, do the explain and return rather than falling through
         // to the normal query execution loop.
@@ -805,6 +811,10 @@ namespace mongo {
 
             if (fromDBDirectClient) {
                 cc->setUnownedRecoveryUnit(txn->recoveryUnit());
+            }
+            else if (state == PlanExecutor::IS_EOF && pq.getOptions().tailable) {
+                // Don't stash the RU for tailable cursors at EOF, let them get a new RU on their
+                // next getMore.
             }
             else {
                 // We stash away the RecoveryUnit in the ClientCursor.  It's used for subsequent

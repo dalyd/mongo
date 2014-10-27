@@ -61,8 +61,7 @@ namespace QueryStageKeep {
         }
 
         void getLocs(set<DiskLoc>* out, Collection* coll) {
-            RecordIterator* it = coll->getIterator(&_txn, DiskLoc(), false,
-                                                   CollectionScanParams::FORWARD);
+            RecordIterator* it = coll->getIterator(&_txn);
             while (!it->isEOF()) {
                 DiskLoc nextLoc = it->getNext();
                 out->insert(nextLoc);
@@ -106,12 +105,14 @@ namespace QueryStageKeep {
     public:
         void run() {
             Client::WriteContext ctx(&_txn, ns());
-
             Database* db = ctx.ctx().db();
             Collection* coll = db->getCollection(&_txn, ns());
             if (!coll) {
+                WriteUnitOfWork wuow(&_txn);
                 coll = db->createCollection(&_txn, ns());
+                wuow.commit();
             }
+
             WorkingSet ws;
 
             // Add 10 objects to the collection.
@@ -127,7 +128,6 @@ namespace QueryStageKeep {
                 member->obj = BSON("x" << 2);
                 ws.flagForReview(id);
             }
-            ctx.commit();
 
             // Create a collscan to provide the 10 objects in the collection.
             CollectionScanParams params;
@@ -167,6 +167,8 @@ namespace QueryStageKeep {
         void setupTests() {
             add<KeepStageBasic>();
         }
-    }  queryStageKeepAll;
+    };
+
+    SuiteInstance<All> queryStageKeepAll;
 
 }  // namespace QueryStageKeep

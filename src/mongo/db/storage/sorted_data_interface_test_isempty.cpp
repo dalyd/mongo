@@ -40,7 +40,7 @@ namespace mongo {
     // when that is unindex.
     TEST( SortedDataInterface, IsEmpty ) {
         scoped_ptr<HarnessHelper> harnessHelper( newHarnessHelper() );
-        scoped_ptr<SortedDataInterface> sorted( harnessHelper->newSortedDataInterface() );
+        scoped_ptr<SortedDataInterface> sorted( harnessHelper->newSortedDataInterface( true ) );
 
         {
             scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
@@ -65,7 +65,8 @@ namespace mongo {
             scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
             {
                 WriteUnitOfWork uow( opCtx.get() );
-                ASSERT( sorted->unindex( opCtx.get(), key1, loc1 ) );
+                sorted->unindex( opCtx.get(), key1, loc1, false );
+                ASSERT( sorted->isEmpty( opCtx.get() ) );
                 uow.commit();
             }
         }

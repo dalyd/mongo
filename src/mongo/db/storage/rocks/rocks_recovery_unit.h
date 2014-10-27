@@ -30,10 +30,12 @@
 
 #pragma once
 
+#include <atomic>
 #include <map>
 #include <stack>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 #include <boost/scoped_ptr.hpp>
 #include <boost/shared_ptr.hpp>
@@ -69,6 +71,8 @@ namespace mongo {
 
         virtual bool awaitCommit();
 
+        virtual void commitAndRestart();
+
         virtual void* writingPtr(void* data, size_t len);
 
         virtual void syncDataAndTruncateJournal();
@@ -93,6 +97,20 @@ namespace mongo {
 
         rocksdb::Iterator* NewIterator(rocksdb::ColumnFamilyHandle* columnFamily);
 
+        void incrementCounter(const rocksdb::Slice& counterKey,
+                              std::atomic<long long>* counter, long long delta);
+
+        long long getDeltaCounter(const rocksdb::Slice& counterKey);
+
+        struct Counter {
+            std::atomic<long long>* _value;
+            long long _delta;
+            Counter() : Counter(nullptr, 0) {}
+            Counter(std::atomic<long long>* value, long long delta) : _value(value), _delta(delta) {}
+        };
+
+        typedef std::unordered_map<std::string, Counter> CounterMap;
+
         static RocksRecoveryUnit* getRocksRecoveryUnit(OperationContext* opCtx);
 
     private:
@@ -105,6 +123,8 @@ namespace mongo {
 
         // bare because we need to call ReleaseSnapshot when we're done with this
         const rocksdb::Snapshot* _snapshot; // owned
+
+        CounterMap _deltaCounters;
 
         std::vector<Change*> _changes;
 

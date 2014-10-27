@@ -85,14 +85,14 @@ namespace mongo {
 
         virtual Status updateWithDamages(OperationContext* txn,
                                          const DiskLoc& loc,
-                                         const char* damangeSource,
+                                         const RecordData& oldRec,
+                                         const char* damageSource,
                                          const mutablebson::DamageVector& damages) {
             invariant(false);
         }
 
         virtual RecordIterator* getIterator(OperationContext* txn,
                                             const DiskLoc& start,
-                                            bool tailable,
                                             const CollectionScanParams::Direction& dir) const {
             invariant(false);
         }
@@ -192,6 +192,8 @@ namespace mongo {
         virtual void endUnitOfWork();
 
         virtual bool awaitCommit() { return true; }
+
+        virtual void commitAndRestart() {}
 
         virtual void registerChange(Change* change) {}
 

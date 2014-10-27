@@ -126,6 +126,17 @@ namespace mongo {
                           str::stream() << "Not primary while removing from " << ns.ns());
         }
 
+        // If yielding is allowed for this plan, then set an auto yield policy. Otherwise set
+        // a manual yield policy.
+        const bool canYield = !_request->isGod() &&
+            PlanExecutor::YIELD_AUTO == _request->getYieldPolicy() && (
+            _canonicalQuery.get() ?
+            !QueryPlannerCommon::hasNode(_canonicalQuery->root(), MatchExpression::ATOMIC) :
+            !LiteParsedQuery::isQueryIsolated(_request->getQuery()));
+
+        PlanExecutor::YieldPolicy policy = canYield ? PlanExecutor::YIELD_AUTO :
+                                                      PlanExecutor::YIELD_MANUAL;
+
         PlanExecutor* rawExec;
         Status getExecStatus = Status::OK();
         if (_canonicalQuery.get()) {
@@ -137,6 +148,7 @@ namespace mongo {
                                               _request->shouldCallLogOp(),
                                               _request->isFromMigrate(),
                                               _request->isExplain(),
+                                              policy,
                                               &rawExec);
         }
         else {
@@ -149,6 +161,7 @@ namespace mongo {
                                               _request->shouldCallLogOp(),
                                               _request->isFromMigrate(),
                                               _request->isExplain(),
+                                              policy,
                                               &rawExec);
         }
 
@@ -158,18 +171,6 @@ namespace mongo {
 
         invariant(rawExec);
         _exec.reset(rawExec);
-
-        // If yielding is allowed for this plan, then set an auto yield policy. Otherwise set
-        // a manual yield policy.
-        const bool canYield = !_request->isGod() && (
-            _canonicalQuery.get() ?
-            !QueryPlannerCommon::hasNode(_canonicalQuery->root(), MatchExpression::ATOMIC) :
-            !LiteParsedQuery::isQueryIsolated(_request->getQuery()));
-
-        PlanExecutor::YieldPolicy policy = canYield ? PlanExecutor::YIELD_AUTO :
-                                                      PlanExecutor::YIELD_MANUAL;
-
-        _exec->setYieldPolicy(policy);
 
         return Status::OK();
     }

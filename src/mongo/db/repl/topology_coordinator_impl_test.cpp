@@ -682,11 +682,10 @@ namespace {
 
         member = HostAndPort("test1:1234");
         ReplSetHeartbeatResponse hb;
-        hb.initialize(BSON("ok" << 1 <<
-                           "v" << 1 <<
-                           "state" << MemberState::RS_SECONDARY <<
-                           "electionTime" << electionTime <<
-                           "hbmsg" << "READY"));
+        hb.setVersion(1);
+        hb.setState(MemberState::RS_SECONDARY);
+        hb.setElectionTime(electionTime);
+        hb.setHbMsg("READY");
         hb.setOpTime(oplogProgress);
         hbResponse = StatusWith<ReplSetHeartbeatResponse>(hb);
         getTopoCoord().prepareHeartbeatRequest(startupTime + 2,
@@ -721,58 +720,61 @@ namespace {
         BSONObj member2Status = memberArray[2].Obj();
 
         // Test member 0, the node that's DOWN
-        ASSERT_EQUALS(0, member0Status["_id"].Int());
-        ASSERT_EQUALS("test0:1234", member0Status["name"].String());
-        ASSERT_EQUALS(0, member0Status["health"].Double());
-        ASSERT_EQUALS(MemberState::RS_DOWN, member0Status["state"].Int());
-        ASSERT_EQUALS("(not reachable/healthy)", member0Status["stateStr"].String());
-        ASSERT_EQUALS(0, member0Status["uptime"].Int());
+        ASSERT_EQUALS(0, member0Status["_id"].numberInt());
+        ASSERT_EQUALS("test0:1234", member0Status["name"].str());
+        ASSERT_EQUALS(0, member0Status["health"].numberDouble());
+        ASSERT_EQUALS(MemberState::RS_DOWN, member0Status["state"].numberInt());
+        ASSERT_EQUALS("(not reachable/healthy)", member0Status["stateStr"].str());
+        ASSERT_EQUALS(0, member0Status["uptime"].numberInt());
         ASSERT_EQUALS(OpTime(), OpTime(member0Status["optime"].timestampValue()));
+        ASSERT_TRUE(member0Status.hasField("optimeDate"));
         ASSERT_EQUALS(Date_t(OpTime().getSecs() * 1000ULL),
                       member0Status["optimeDate"].Date().millis);
-        ASSERT_EQUALS(heartbeatTime, member0Status["lastHeartbeat"].Date());
-        ASSERT_EQUALS(Date_t(), member0Status["lastHeartbeatRecv"].Date());
+        ASSERT_EQUALS(heartbeatTime, member0Status["lastHeartbeat"].date());
+        ASSERT_EQUALS(Date_t(), member0Status["lastHeartbeatRecv"].date());
 
         // Test member 1, the node that's SECONDARY
         ASSERT_EQUALS(1, member1Status["_id"].Int());
         ASSERT_EQUALS("test1:1234", member1Status["name"].String());
         ASSERT_EQUALS(1, member1Status["health"].Double());
-        ASSERT_EQUALS(MemberState::RS_SECONDARY, member1Status["state"].Int());
+        ASSERT_EQUALS(MemberState::RS_SECONDARY, member1Status["state"].numberInt());
         ASSERT_EQUALS(MemberState(MemberState::RS_SECONDARY).toString(),
                       member1Status["stateStr"].String());
-        ASSERT_EQUALS(uptimeSecs.total_seconds(), member1Status["uptime"].Int());
+        ASSERT_EQUALS(uptimeSecs.total_seconds(), member1Status["uptime"].numberInt());
         ASSERT_EQUALS(oplogProgress, OpTime(member1Status["optime"].timestampValue()));
+        ASSERT_TRUE(member1Status.hasField("optimeDate"));
         ASSERT_EQUALS(Date_t(oplogProgress.getSecs() * 1000ULL),
                       member1Status["optimeDate"].Date().millis);
-        ASSERT_EQUALS(heartbeatTime, member1Status["lastHeartbeat"].Date());
-        ASSERT_EQUALS(Date_t(), member1Status["lastHeartbeatRecv"].Date());
-        ASSERT_EQUALS("READY", member1Status["lastHeartbeatMessage"].String());
+        ASSERT_EQUALS(heartbeatTime, member1Status["lastHeartbeat"].date());
+        ASSERT_EQUALS(Date_t(), member1Status["lastHeartbeatRecv"].date());
+        ASSERT_EQUALS("READY", member1Status["lastHeartbeatMessage"].str());
 
         // Test member 2, the node that's UNKNOWN
-        ASSERT_EQUALS(2, member2Status["_id"].Int());
-        ASSERT_EQUALS("test2:1234", member2Status["name"].String());
-        ASSERT_EQUALS(-1, member2Status["health"].Double());
-        ASSERT_EQUALS(MemberState::RS_UNKNOWN, member2Status["state"].Int());
+        ASSERT_EQUALS(2, member2Status["_id"].numberInt());
+        ASSERT_EQUALS("test2:1234", member2Status["name"].str());
+        ASSERT_EQUALS(-1, member2Status["health"].numberDouble());
+        ASSERT_EQUALS(MemberState::RS_UNKNOWN, member2Status["state"].numberInt());
         ASSERT_EQUALS(MemberState(MemberState::RS_UNKNOWN).toString(),
-                      member2Status["stateStr"].String());
-        ASSERT_FALSE(member2Status.hasField("uptime"));
-        ASSERT_FALSE(member2Status.hasField("optime"));
-        ASSERT_FALSE(member2Status.hasField("optimeDate"));
+                      member2Status["stateStr"].str());
+        ASSERT_TRUE(member2Status.hasField("uptime"));
+        ASSERT_TRUE(member2Status.hasField("optime"));
+        ASSERT_TRUE(member2Status.hasField("optimeDate"));
         ASSERT_FALSE(member2Status.hasField("lastHearbeat"));
         ASSERT_FALSE(member2Status.hasField("lastHearbeatRecv"));
 
         // Now test results for ourself, the PRIMARY
-        ASSERT_EQUALS(MemberState::RS_PRIMARY, rsStatus["myState"].Int());
+        ASSERT_EQUALS(MemberState::RS_PRIMARY, rsStatus["myState"].numberInt());
         BSONObj selfStatus = memberArray[3].Obj();
-        ASSERT_TRUE(selfStatus["self"].Bool());
-        ASSERT_EQUALS(3, selfStatus["_id"].Int());
-        ASSERT_EQUALS("test3:1234", selfStatus["name"].String());
-        ASSERT_EQUALS(1, selfStatus["health"].Double());
-        ASSERT_EQUALS(MemberState::RS_PRIMARY, selfStatus["state"].Int());
+        ASSERT_TRUE(selfStatus["self"].boolean());
+        ASSERT_EQUALS(3, selfStatus["_id"].numberInt());
+        ASSERT_EQUALS("test3:1234", selfStatus["name"].str());
+        ASSERT_EQUALS(1, selfStatus["health"].numberDouble());
+        ASSERT_EQUALS(MemberState::RS_PRIMARY, selfStatus["state"].numberInt());
         ASSERT_EQUALS(MemberState(MemberState::RS_PRIMARY).toString(),
-                      selfStatus["stateStr"].String());
-        ASSERT_EQUALS(uptimeSecs.total_seconds(), selfStatus["uptime"].Int());
+                      selfStatus["stateStr"].str());
+        ASSERT_EQUALS(uptimeSecs.total_seconds(), selfStatus["uptime"].numberInt());
         ASSERT_EQUALS(oplogProgress, OpTime(selfStatus["optime"].timestampValue()));
+        ASSERT_TRUE(selfStatus.hasField("optimeDate"));
         ASSERT_EQUALS(Date_t(oplogProgress.getSecs() * 1000ULL),
                       selfStatus["optimeDate"].Date().millis);
 
@@ -916,10 +918,9 @@ namespace {
         ASSERT_EQUALS(ourOpTime, OpTime(response6["opTime"].timestampValue()));
         ASSERT_FALSE(response6["fresher"].Bool());
         ASSERT_TRUE(response6["veto"].Bool());
-        ASSERT_EQUALS(
-            "I don't think h3:27017 is electable because the member is not currently a secondary",
-            response6["errmsg"].String());
-
+        ASSERT_NE(std::string::npos, response6["errmsg"].String().find(
+                          "I don't think h3:27017 is electable because the member is not "
+                          "currently a secondary")) << response6["errmsg"].String();
 
         // Test trying to elect a node that isn't electable because it's PRIMARY
         ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
@@ -935,10 +936,9 @@ namespace {
         ASSERT_EQUALS(ourOpTime, OpTime(response7["opTime"].timestampValue()));
         ASSERT_FALSE(response7["fresher"].Bool());
         ASSERT_TRUE(response7["veto"].Bool());
-        ASSERT_EQUALS(
-            "I don't think h3:27017 is electable because the member is not currently a secondary",
-            response7["errmsg"].String());
-
+        ASSERT_NE(std::string::npos, response7["errmsg"].String().find(
+                          "I don't think h3:27017 is electable because the member is not "
+                          "currently a secondary")) << response7["errmsg"].String();
 
         // Test trying to elect a node that isn't electable because it's STARTUP
         heartbeatFromMember(HostAndPort("h3"), "rs0", MemberState::RS_STARTUP, ourOpTime);
@@ -952,10 +952,9 @@ namespace {
         ASSERT_EQUALS(ourOpTime, OpTime(response8["opTime"].timestampValue()));
         ASSERT_FALSE(response8["fresher"].Bool());
         ASSERT_TRUE(response8["veto"].Bool());
-        ASSERT_EQUALS(
-            "I don't think h3:27017 is electable because the member is not currently a secondary",
-            response8["errmsg"].String());
-
+        ASSERT_NE(std::string::npos, response8["errmsg"].String().find(
+                          "I don't think h3:27017 is electable because the member is not "
+                          "currently a secondary")) << response8["errmsg"].String();
 
         // Test trying to elect a node that isn't electable because it's RECOVERING
         heartbeatFromMember(HostAndPort("h3"), "rs0", MemberState::RS_RECOVERING, ourOpTime);
@@ -969,10 +968,9 @@ namespace {
         ASSERT_EQUALS(ourOpTime, OpTime(response9["opTime"].timestampValue()));
         ASSERT_FALSE(response9["fresher"].Bool());
         ASSERT_TRUE(response9["veto"].Bool());
-        ASSERT_EQUALS(
-            "I don't think h3:27017 is electable because the member is not currently a secondary",
-            response9["errmsg"].String());
-
+        ASSERT_NE(std::string::npos, response9["errmsg"].String().find(
+                          "I don't think h3:27017 is electable because the member is not "
+                          "currently a secondary")) << response9["errmsg"].String();
 
         // Test trying to elect a node that is fresher but lower priority than the existing primary
         args.id = 30;
@@ -2012,8 +2010,8 @@ namespace {
         // 4. TopologyCoordinator concludes its freshness round successfully and wins the election.
 
         setSelfMemberState(MemberState::RS_SECONDARY);
-        now() += 3000; // we need to be more than LastVote::leaseTime from the start of time or else
-                       // some Date_t math goes horribly awry
+        now() += 30000; // we need to be more than LastVote::leaseTime from the start of time or
+                        // else some Date_t math goes horribly awry
 
         OpTime election = OpTime(0,0);
         OpTime lastOpTimeApplied = OpTime(130,0);
@@ -2082,8 +2080,8 @@ namespace {
         // 6. The TopologyCoordinator loses the election.
 
         setSelfMemberState(MemberState::RS_SECONDARY);
-        now() += 3000; // we need to be more than LastVote::leaseTime from the start of time or else
-                       // some Date_t math goes horribly awry
+        now() += 30000; // we need to be more than LastVote::leaseTime from the start of time or
+                        // else some Date_t math goes horribly awry
 
         OpTime election = OpTime(0,0);
         OpTime lastOpTimeApplied = OpTime(100,0);
@@ -2200,8 +2198,8 @@ namespace {
         // 5. "host3" sends an elect command, which the TopologyCoordinator responds to negatively.
 
         setSelfMemberState(MemberState::RS_SECONDARY);
-        now() += 3000; // we need to be more than LastVote::leaseTime from the start of time or else
-                       // some Date_t math goes horribly awry
+        now() += 30000; // we need to be more than LastVote::leaseTime from the start of time or
+                        // else some Date_t math goes horribly awry
 
         OpTime election = OpTime(0,0);
         OpTime lastOpTimeApplied = OpTime(100,0);
@@ -2297,8 +2295,8 @@ namespace {
         // 5. "host3" sends an elect command, which the TopologyCoordinator responds to negatively.
 
         setSelfMemberState(MemberState::RS_SECONDARY);
-        now() += 3000; // we need to be more than LastVote::leaseTime from the start of time or else
-                       // some Date_t math goes horribly awry
+        now() += 30000; // we need to be more than LastVote::leaseTime from the start of time or
+                        // else some Date_t math goes horribly awry
 
         OpTime election = OpTime(0,0);
         OpTime lastOpTimeApplied = OpTime(100,0);
@@ -2762,7 +2760,7 @@ namespace {
                 "voted for h2:27017 0 secs ago"));
 
         // Test that after enough time passes the same vote can proceed
-        now += 3 * 1001; // just over 3 seconds later
+        now += 30 * 1000 + 1; // just over 30 seconds later
 
         BSONObjBuilder responseBuilder3;
         startCapturingLogMessages();

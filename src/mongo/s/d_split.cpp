@@ -699,8 +699,11 @@ namespace mongo {
                     return false;
                 }
 
-                if (!isShardKeySizeValid(endKey, &errmsg)) {
-                    warning() << errmsg << endl;
+                // Make sure splits don't create too-big shard keys
+                Status status = ShardKeyPattern::checkShardKeySize(endKey);
+                if (!status.isOK()) {
+                    errmsg = status.reason();
+                    warning() << errmsg;
                     return false;
                 }
 
@@ -790,7 +793,8 @@ namespace mongo {
             //
             
             {
-                Lock::DBLock writeLk(txn->lockState(), nsToDatabaseSubstring(ns), MODE_X);
+                Lock::DBLock writeLk(txn->lockState(), nsToDatabaseSubstring(ns), MODE_IX);
+                Lock::CollectionLock collLock(txn->lockState(), ns, MODE_X);
 
                 // NOTE: The newShardVersion resulting from this split is higher than any
                 // other chunk version, so it's also implicitly the newCollVersion

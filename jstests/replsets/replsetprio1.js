@@ -19,7 +19,7 @@
     replTest.stop(2);
 
     // 1 should eventually be master
-    replTest.waitForState(nodes[1], replTest.PRIMARY, 30000);
+    replTest.waitForState(nodes[1], replTest.PRIMARY, 60000);
     
     // do some writes on 1
     var master = replTest.getMaster();
@@ -41,4 +41,5 @@
         assert(master.getDB("foo").bar.findOne({i:i}) != null, 'checking '+i);
         assert(master.getDB("bar").baz.findOne({i:i}) != null, 'checking '+i);
     }
-}());
+// Note: SERVER-15781 disabled this test.
+}/*()*/);

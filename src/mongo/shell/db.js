@@ -60,10 +60,10 @@ DB.prototype.runCommand = function( obj, extra ){
 
 DB.prototype._dbCommand = DB.prototype.runCommand;
 
-DB.prototype.adminCommand = function( obj ){
+DB.prototype.adminCommand = function( obj, extra ){
     if ( this._name == "admin" )
-        return this.runCommand( obj );
-    return this.getSiblingDB( "admin" ).runCommand( obj );
+        return this.runCommand( obj, extra );
+    return this.getSiblingDB( "admin" ).runCommand( obj, extra );
 }
 
 DB.prototype._adminCommand = DB.prototype.adminCommand; // alias old name
@@ -86,6 +86,20 @@ DB.prototype._adminCommand = DB.prototype.adminCommand; // alias old name
     </li>
     <li> max: maximum number of objects if capped (optional).</li>
     <li> usePowerOf2Sizes: if true, set usePowerOf2Sizes allocation for the collection.</li>
+    <li>
+        storageEngine: BSON document containing storage engine specific options. Format:
+                       {
+                           storageEngine: {
+                               storageEngine1: {
+                                   ...
+                               },
+                               storageEngine2: {
+                                   ...
+                               },
+                               ...
+                           }
+                       }
+    </li>
     </ul>
 
     <p>Example:</p>
@@ -108,6 +122,8 @@ DB.prototype.createCollection = function(name, opt) {
         cmd.size = options.size;
     if (options.usePowerOf2Sizes != undefined) 
         cmd.flags = options.usePowerOf2Sizes ? 1 : 0;
+    if (options.storageEngine != undefined)
+        cmd.storageEngine = options.storageEngine;
     var res = this._dbCommand(cmd);
     return res;
 }

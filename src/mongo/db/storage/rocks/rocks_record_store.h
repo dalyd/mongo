@@ -31,6 +31,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <memory>
 
@@ -66,7 +67,7 @@ namespace mongo {
 
         virtual long long dataSize( OperationContext* txn ) const { return _dataSize; }
 
-        virtual long long numRecords( OperationContext* txn ) const { return _numRecords; }
+        virtual long long numRecords( OperationContext* txn ) const;
 
         virtual bool isCapped() const { return _isCapped; }
 
@@ -102,12 +103,12 @@ namespace mongo {
 
         virtual Status updateWithDamages( OperationContext* txn,
                                           const DiskLoc& loc,
-                                          const char* damangeSource,
+                                          const RecordData& oldRec,
+                                          const char* damageSource,
                                           const mutablebson::DamageVector& damages );
 
         virtual RecordIterator* getIterator( OperationContext* txn,
                                              const DiskLoc& start = DiskLoc(),
-                                             bool tailable = false,
                                              const CollectionScanParams::Direction& dir =
                                              CollectionScanParams::FORWARD ) const;
 
@@ -161,7 +162,7 @@ namespace mongo {
         class Iterator : public RecordIterator {
         public:
             Iterator(OperationContext* txn, rocksdb::DB* db,
-                     boost::shared_ptr<rocksdb::ColumnFamilyHandle> columnFamily, bool tailable,
+                     boost::shared_ptr<rocksdb::ColumnFamilyHandle> columnFamily,
                      const CollectionScanParams::Direction& dir, const DiskLoc& start);
 
             virtual bool isEOF();
@@ -181,7 +182,6 @@ namespace mongo {
             OperationContext* _txn;
             rocksdb::DB* _db; // not owned
             boost::shared_ptr<rocksdb::ColumnFamilyHandle> _cf;
-            bool _tailable;
             CollectionScanParams::Direction _dir;
             bool _eof;
             DiskLoc _curr;
@@ -200,7 +200,7 @@ namespace mongo {
                                       OperationContext* txn, const DiskLoc& loc);
 
         DiskLoc _nextId();
-        bool cappedAndNeedDelete() const;
+        bool cappedAndNeedDelete(OperationContext* txn) const;
         void cappedDeleteAsNeeded(OperationContext* txn);
 
         // The use of this function requires that the passed in DiskLoc outlives the returned Slice
@@ -219,15 +219,12 @@ namespace mongo {
 
         AtomicUInt64 _nextIdNum;
         long long _dataSize;
-        long long _numRecords;
+        std::atomic<long long> _numRecords;
 
         const string _dataSizeKey;
         const string _numRecordsKey;
 
         // locks
-        // TODO I think that when you get one of these, you generally need to acquire the other.
-        // These could probably be moved into a single lock.
-        boost::mutex _numRecordsLock;
         boost::mutex _dataSizeLock;
     };
 }

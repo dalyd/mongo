@@ -1,4 +1,4 @@
-/**
+/*
  *    Copyright (C) 2014 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
@@ -26,12 +26,37 @@
  *    it in the license file.
  */
 
-#include "mongo/db/storage/heap1/heap1_database_catalog_entry.h"
+#pragma once
+
+#include <vector>
+
+#include "mongo/logger/log_component.h"
 
 namespace mongo {
-    IndexAccessMethod* Heap1DatabaseCatalogEntry::getIndex( OperationContext* txn,
-                                                            const CollectionCatalogEntry* collection,
-                                                            IndexCatalogEntry* index ) {
-        invariant( !"no indexes in test" );
-    }
-}
+
+    class BSONObj;
+    template <typename T> class StatusWith;
+
+namespace logger {
+
+    /**
+     * One parsed LogComponent and desired log level
+     */
+    struct LogComponentSetting {
+        LogComponentSetting(LogComponent c, int lvl) : component(c), level(lvl) {}
+
+        LogComponent component;
+        int level;
+    };
+
+    /**
+     * Parses instructions for modifying component log levels from "settings".
+     *
+     * Returns an error status describing why parsing failed, or a vector of LogComponentSettings,
+     * each describing how to change a particular log components verbosity level.
+     */
+    StatusWith< std::vector<LogComponentSetting> > parseLogComponentSettings(
+            const BSONObj& settings);
+
+}  // namespace logger
+}  // namespace mongo

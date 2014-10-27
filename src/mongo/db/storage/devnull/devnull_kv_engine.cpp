@@ -108,14 +108,14 @@ namespace mongo {
 
         virtual Status updateWithDamages( OperationContext* txn,
                                           const DiskLoc& loc,
-                                          const char* damangeSource,
+                                          const RecordData& oldRec,
+                                          const char* damageSource,
                                           const mutablebson::DamageVector& damages ) {
             return Status::OK();
         }
 
         virtual RecordIterator* getIterator( OperationContext* txn,
                                              const DiskLoc& start,
-                                             bool tailable,
                                              const CollectionScanParams::Direction& dir ) const {
             return new EmptyRecordIterator();
         }

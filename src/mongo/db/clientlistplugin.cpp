@@ -28,13 +28,16 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/global_environment_experiment.h"
+#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/dbwebserver.h"
 #include "mongo/util/mongoutils/html.h"
-
+#include "mongo/util/stringutils.h"
 
 namespace mongo {
 
@@ -116,5 +119,78 @@ namespace {
         }
 
     } clientListPlugin;
+
+    class CommandHelper : public GlobalEnvironmentExperiment::ProcessOperationContext {
+    public:
+        CommandHelper( MatchExpression* me )
+            : matcher( me ) {
+        }
+
+        virtual void processOpContext(OperationContext* txn) {
+            BSONObjBuilder b;
+            if ( txn->getClient() )
+                txn->getClient()->reportState( b );
+            if ( txn->getCurOp() )
+                txn->getCurOp()->reportState( &b );
+            if ( txn->lockState() ) {
+                StringBuilder ss;
+                ss << txn->lockState();
+                b.append( "lockStatePointer", ss.str() );
+                b.append( "lockState", txn->lockState()->reportState() );
+            }
+            if ( txn->recoveryUnit() )
+                txn->recoveryUnit()->reportState( &b );
+
+            BSONObj obj = b.obj();
+
+            if ( matcher && !matcher->matchesBSON( obj ) ) {
+                return;
+            }
+
+            array.append( obj );
+        }
+
+        BSONArrayBuilder array;
+        MatchExpression* matcher;
+    };
+
+    class CurrentOpContexts : public Command {
+    public:
+        CurrentOpContexts()
+            : Command( "currentOpCtx" ) {
+        }
+
+        virtual bool isWriteCommandForConfigServer() const { return false; }
+
+        virtual bool slaveOk() const { return true; }
+
+        bool run( OperationContext* txn,
+                  const string& dbname,
+                  BSONObj& cmdObj,
+                  int,
+                  string& errmsg,
+                  BSONObjBuilder& result,
+                  bool fromRepl) {
+
+            scoped_ptr<MatchExpression> filter;
+            if ( cmdObj["filter"].isABSONObj() ) {
+                StatusWithMatchExpression res =
+                    MatchExpressionParser::parse( cmdObj["filter"].Obj() );
+                if ( !res.isOK() ) {
+                    return appendCommandStatus( result, res.getStatus() );
+                }
+                filter.reset( res.getValue() );
+            }
+
+            CommandHelper helper( filter.get() );
+            getGlobalEnvironment()->forEachOperationContext(&helper);
+
+            result.appendArray( "operations", helper.array.arr() );
+
+            return true;
+        }
+
+    } currentOpContexts;
+
 }  // namespace
 }  // namespace mongo

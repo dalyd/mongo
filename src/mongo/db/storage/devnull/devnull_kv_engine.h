@@ -44,6 +44,7 @@ namespace mongo {
         }
 
         virtual Status createRecordStore( OperationContext* opCtx,
+                                          const StringData& ns,
                                           const StringData& ident,
                                           const CollectionOptions& options ) {
             return Status::OK();
@@ -72,6 +73,10 @@ namespace mongo {
         virtual Status dropSortedDataInterface( OperationContext* opCtx,
                                                 const StringData& ident ) {
             return Status::OK();
+        }
+
+        virtual bool supportsDocLocking() const {
+            return true;
         }
     };
 }

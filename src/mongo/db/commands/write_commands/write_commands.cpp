@@ -201,6 +201,9 @@ namespace mongo {
             updateRequest.setLifecycle( &updateLifecycle );
             updateRequest.setExplain();
 
+            // Explained updates can yield.
+            updateRequest.setYieldPolicy(PlanExecutor::YIELD_AUTO);
+
             // Use the request to create an UpdateExecutor, and from it extract the
             // plan tree which will be used to execute this update.
             UpdateExecutor updateExecutor( &updateRequest, &txn->getCurOp()->debug() );
@@ -211,7 +214,7 @@ namespace mongo {
 
             // Explains of write commands are read-only, but we take an exclusive lock so
             // that timing info is more accurate.
-            Lock::DBLock dlk(txn->lockState(), nsString.db(), MODE_X);
+            Lock::DBLock dlk(txn->lockState(), nsString.db(), MODE_IX);
             Client::Context ctx(txn, nsString);
 
             Status prepInLockStatus = updateExecutor.prepareInLock(ctx.db());
@@ -236,6 +239,9 @@ namespace mongo {
             deleteRequest.setGod( false );
             deleteRequest.setExplain();
 
+            // Explained deletes can yield.
+            deleteRequest.setYieldPolicy(PlanExecutor::YIELD_AUTO);
+
             // Use the request to create a DeleteExecutor, and from it extract the
             // plan tree which will be used to execute this update.
             DeleteExecutor deleteExecutor( &deleteRequest );
@@ -246,7 +252,7 @@ namespace mongo {
 
             // Explains of write commands are read-only, but we take a write lock so that timing
             // info is more accurate.
-            Lock::DBLock dlk(txn->lockState(), nsString.db(), MODE_X);
+            Lock::DBLock dlk(txn->lockState(), nsString.db(), MODE_IX);
             Client::Context ctx(txn, nsString);
 
             Status prepInLockStatus = deleteExecutor.prepareInLock(ctx.db());

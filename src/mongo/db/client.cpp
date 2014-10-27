@@ -220,7 +220,7 @@ namespace mongo {
     }
 
     void AutoGetCollectionForRead::_init() {
-        invariant(!_nss.coll().empty());
+        massert(28535, "need a non-empty collection name", !_nss.coll().empty());
 
         // TODO: Client::Context legacy, needs to be removed
         _txn->getCurOp()->ensureStarted();
@@ -264,12 +264,7 @@ namespace mongo {
           _nss(ns),
           _dblk(opCtx->lockState(), _nss.db(), MODE_IX),
           _collk(opCtx->lockState(), ns, MODE_IX),
-          _wunit(opCtx),
           _c(opCtx, ns) { }
-
-    void Client::WriteContext::commit() {
-        _wunit.commit();
-    }
 
     void Client::Context::checkNotStale() const { 
         switch ( _client->_curOp->getOp() ) {

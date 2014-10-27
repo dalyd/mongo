@@ -155,6 +155,13 @@ namespace {
             _updateOpTimeFromHeartbeat(target, hbStatusResponse.getValue().getOpTime());
         }
 
+        std::for_each(_stepDownWaiters.begin(),
+                      _stepDownWaiters.end(),
+                      stdx::bind(&ReplicationExecutor::signalEvent,
+                                 &_replExecutor,
+                                 stdx::placeholders::_1));
+        _stepDownWaiters.clear();
+
         _scheduleHeartbeatToTarget(
                 target,
                 std::max(now, action.getNextHeartbeatStartDate()));
@@ -164,6 +171,7 @@ namespace {
 
     void ReplicationCoordinatorImpl::_updateOpTimeFromHeartbeat(const HostAndPort& target, 
                                                                 OpTime optime) {
+
         boost::unique_lock<boost::mutex> lk(_mutex);
         const MemberConfig* targetMember = _rsConfig.findMemberByHostAndPort(target);
         if (!targetMember) {
@@ -270,14 +278,18 @@ namespace {
         // TODO Add invariant that we've got global shared or global exclusive lock, when supported
         // by lock manager.
         boost::unique_lock<boost::mutex> lk(_mutex);
-        _updateCurrentMemberStateFromTopologyCoordinator_inlock();
+        const PostMemberStateUpdateAction action =
+            _updateCurrentMemberStateFromTopologyCoordinator_inlock();
         lk.unlock();
-        _externalState->closeConnections();
-        _externalState->clearShardingState();
+        _performPostMemberStateUpdateAction(action);
     }
 
     void ReplicationCoordinatorImpl::_scheduleHeartbeatReconfig(const ReplicaSetConfig& newConfig) {
         boost::lock_guard<boost::mutex> lk(_mutex);
+        if (_inShutdown) {
+            return;
+        }
+
         switch (_rsConfigState) {
         case kConfigStartingUp:
             LOG(1) << "Ignoring new configuration with version " << newConfig.getConfigVersion() <<
@@ -315,9 +327,11 @@ namespace {
                                newConfig));
             return;
         }
-        boost::thread(stdx::bind(&ReplicationCoordinatorImpl::_heartbeatReconfigStore,
-                                 this,
-                                 newConfig)).detach();
+        invariant(!_heartbeatReconfigThread.get());
+        _heartbeatReconfigThread.reset(
+                new boost::thread(stdx::bind(&ReplicationCoordinatorImpl::_heartbeatReconfigStore,
+                                             this,
+                                             newConfig)));;
     }
 
     void ReplicationCoordinatorImpl::_heartbeatReconfigAfterElectionCanceled(
@@ -327,34 +341,83 @@ namespace {
             return;
         }
         fassert(18911, cbData.status);
-        boost::thread(stdx::bind(&ReplicationCoordinatorImpl::_heartbeatReconfigStore,
-                                 this,
-                                 newConfig)).detach();
+        boost::lock_guard<boost::mutex> lk(_mutex);
+        if (_inShutdown) {
+            return;
+        }
+
+        invariant(!_heartbeatReconfigThread.get());
+        _heartbeatReconfigThread.reset(
+                new boost::thread(stdx::bind(&ReplicationCoordinatorImpl::_heartbeatReconfigStore,
+                                             this,
+                                             newConfig)));
     }
 
     void ReplicationCoordinatorImpl::_heartbeatReconfigStore(const ReplicaSetConfig& newConfig) {
-        {
-            boost::scoped_ptr<OperationContext> txn(_externalState->createOperationContext());
-            Status status = _externalState->storeLocalConfigDocument(txn.get(), newConfig.toBSON());
-            if (!status.isOK()) {
-                error() << "Ignoring new configuration in heartbeat response because we failed to"
-                    " write it to stable storage; " << status;
-                boost::lock_guard<boost::mutex> lk(_mutex);
-                invariant(_rsConfigState == kConfigHBReconfiguring);
-                if (_rsConfig.isInitialized()) {
-                    _setConfigState_inlock(kConfigSteady);
+        class StoreThreadGuard {
+        public:
+            StoreThreadGuard(boost::unique_lock<boost::mutex>* lk,
+                             boost::scoped_ptr<boost::thread>* thread,
+                             bool* inShutdown) :
+                _lk(lk),
+                _thread(thread),
+                _inShutdown(inShutdown) {}
+            ~StoreThreadGuard() {
+                if (!_lk->owns_lock()) {
+                    _lk->lock();
                 }
-                else {
-                    // This is the _only_ case where we can return to kConfigUninitialized from
-                    // kConfigHBReconfiguring.
-                    _setConfigState_inlock(kConfigUninitialized);
+                if (*_inShutdown) {
+                    return;
                 }
-                return;
+                _thread->get()->detach();
+                _thread->reset(NULL);
             }
-        }
+
+        private:
+            boost::unique_lock<boost::mutex>* const _lk;
+            boost::scoped_ptr<boost::thread>* const _thread;
+            bool* const _inShutdown;
+        };
+
+        boost::unique_lock<boost::mutex> lk(_mutex, boost::defer_lock_t());
+        StoreThreadGuard guard(&lk, &_heartbeatReconfigThread, &_inShutdown);
+
         const StatusWith<int> myIndex = validateConfigForHeartbeatReconfig(
                 _externalState.get(),
                 newConfig);
+
+        if (myIndex.getStatus() == ErrorCodes::NodeNotFound) {
+            lk.lock();
+            // If this node absent in newConfig, and this node was not previously initialized,
+            // return to kConfigUninitialized immediately, rather than storing the config and
+            // transitioning into the RS_REMOVED state.  See SERVER-15740.
+            if (!_rsConfig.isInitialized()) {
+                invariant(_rsConfigState == kConfigHBReconfiguring);
+                LOG(1) << "Ignoring new configuration in heartbeat response because we are "
+                    "uninitialized and not a member of the new configuration";
+                _setConfigState_inlock(kConfigUninitialized);
+                return;
+            }
+            lk.unlock();
+        }
+
+        boost::scoped_ptr<OperationContext> txn(_externalState->createOperationContext());
+        Status status = _externalState->storeLocalConfigDocument(txn.get(), newConfig.toBSON());
+
+        lk.lock();
+        if (!status.isOK()) {
+            error() << "Ignoring new configuration in heartbeat response because we failed to"
+                " write it to stable storage; " << status;
+            invariant(_rsConfigState == kConfigHBReconfiguring);
+            if (_rsConfig.isInitialized()) {
+                _setConfigState_inlock(kConfigSteady);
+            }
+            else {
+                _setConfigState_inlock(kConfigUninitialized);
+            }
+            return;
+        }
+
         _replExecutor.scheduleWork(stdx::bind(&ReplicationCoordinatorImpl::_heartbeatReconfigFinish,
                                               this,
                                               stdx::placeholders::_1,
@@ -366,8 +429,11 @@ namespace {
             const ReplicationExecutor::CallbackData& cbData,
             const ReplicaSetConfig& newConfig,
             StatusWith<int> myIndex) {
+        if (cbData.status == ErrorCodes::CallbackCanceled) {
+            return;
+        }
 
-        boost::lock_guard<boost::mutex> lk(_mutex);
+        boost::unique_lock<boost::mutex> lk(_mutex);
         invariant(_rsConfigState == kConfigHBReconfiguring);
         invariant(!_rsConfig.isInitialized() ||
                   _rsConfig.getConfigVersion() < newConfig.getConfigVersion());
@@ -390,7 +456,10 @@ namespace {
             }
             myIndex = StatusWith<int>(-1);
         }
-        _setCurrentRSConfig_inlock(newConfig, myIndex.getValue());
+        const PostMemberStateUpdateAction action =
+            _setCurrentRSConfig_inlock(newConfig, myIndex.getValue());
+        lk.unlock();
+        _performPostMemberStateUpdateAction(action);
     }
 
     void ReplicationCoordinatorImpl::_trackHeartbeatHandle(const StatusWith<CBHandle>& handle) {

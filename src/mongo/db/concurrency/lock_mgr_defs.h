@@ -35,7 +35,6 @@
 #include "mongo/platform/cstdint.h"
 #include "mongo/platform/hash_namespace.h"
 
-
 namespace mongo {
 
     /**
@@ -61,6 +60,16 @@ namespace mongo {
         // modes above this entry.
         LockModesCount
     };
+
+    /**
+     * Returns a human-readable name for the specified lock mode.
+     */
+    const char* modeName(LockMode mode);
+
+    /**
+     * Legacy lock mode names in parity for 2.6 reports.
+     */
+    char legacyModeName(LockMode mode);
 
 
     /**
@@ -106,8 +115,11 @@ namespace mongo {
 
     /**
      * Hierarchy of resource types. The lock manager knows nothing about this hierarchy, it is
-     * purely logical. I.e., acquiring a RESOURCE_GLOBAL and then a RESOURCE_DATABASE won't block
-     * at the level of the lock manager.
+     * purely logical. Resources of different types will never conflict with each other. While the
+     * lock manager does not know or care about ordering, the general policy is that resources are
+     * acquired in the order below. For example, one might first acquire a RESOURCE_GLOBAL and then
+     * the desired RESOURCE_DATABASE, both using intent modes, and finally a RESOURCE_COLLECTION
+     * in exclusive mode.
      */
     enum ResourceType {
         // Special (singleton) resources
@@ -119,13 +131,19 @@ namespace mongo {
         RESOURCE_DATABASE,
         RESOURCE_COLLECTION,
         RESOURCE_DOCUMENT,
+        RESOURCE_MMAPv1_EXTENT_MANAGER, // Only for MMAPv1 engine, keyed on database name
 
         // Counts the rest. Always insert new resource types above this entry.
         ResourceTypesCount
     };
 
     // We only use 3 bits for the resource type in the ResourceId hash
-    BOOST_STATIC_ASSERT(ResourceTypesCount < 8);
+    BOOST_STATIC_ASSERT(ResourceTypesCount <= 8);
+
+    /**
+     * Returns a human-readable name for the specified resource type.
+     */
+    const char* resourceTypeName(ResourceType resourceType);
 
 
     /**
@@ -137,6 +155,8 @@ namespace mongo {
         ResourceId(ResourceType type, const StringData& ns);
         ResourceId(ResourceType type, const std::string& ns);
         ResourceId(ResourceType type, uint64_t hashId);
+
+        bool isValid() const { return _type != RESOURCE_INVALID; }
 
         operator size_t() const {
             return _fullHash;
@@ -182,6 +202,10 @@ namespace mongo {
     // spend too much time doing comparisons for hashing.
     BOOST_STATIC_ASSERT(sizeof(ResourceId) == sizeof(uint64_t));
 #endif
+
+
+    // Type to uniquely identify a given locker object
+    typedef uint64_t LockerId;
 
 } // namespace mongo
 

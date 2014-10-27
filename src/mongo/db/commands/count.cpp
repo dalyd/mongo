@@ -83,13 +83,16 @@ namespace mongo {
             Collection* collection = ctx.getCollection();
 
             PlanExecutor* rawExec;
-            Status getExecStatus = getExecutorCount(txn, collection, request, &rawExec);
+            Status getExecStatus = getExecutorCount(txn,
+                                                    collection,
+                                                    request,
+                                                    PlanExecutor::YIELD_AUTO,
+                                                    &rawExec);
             if (!getExecStatus.isOK()) {
                 return getExecStatus;
             }
 
             scoped_ptr<PlanExecutor> exec(rawExec);
-            exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
 
             return Explain::explainStages(exec.get(), verbosity, out);
         }
@@ -111,13 +114,16 @@ namespace mongo {
             Collection* collection = ctx.getCollection();
 
             PlanExecutor* rawExec;
-            Status getExecStatus = getExecutorCount(txn, collection, request, &rawExec);
+            Status getExecStatus = getExecutorCount(txn,
+                                                    collection,
+                                                    request,
+                                                    PlanExecutor::YIELD_AUTO,
+                                                    &rawExec);
             if (!getExecStatus.isOK()) {
                 return appendCommandStatus(result, getExecStatus);
             }
 
             scoped_ptr<PlanExecutor> exec(rawExec);
-            exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
 
             // Store the plan summary string in CurOp.
             if (NULL != txn->getCurOp()) {
@@ -258,15 +264,18 @@ namespace mongo {
         }
 
         PlanExecutor* rawExec;
-        Status getExecStatus = getExecutorCount(txn, collection, request, &rawExec);
+        Status getExecStatus = getExecutorCount(txn,
+                                                collection,
+                                                request,
+                                                PlanExecutor::YIELD_AUTO,
+                                                &rawExec);
         if (!getExecStatus.isOK()) {
             err = getExecStatus.reason();
-            errCode = parseStatus.code();
+            errCode = getExecStatus.code();
             return -1;
         }
 
         scoped_ptr<PlanExecutor> exec(rawExec);
-        exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
 
         // Store the plan summary string in CurOp.
         if (NULL != txn->getCurOp()) {

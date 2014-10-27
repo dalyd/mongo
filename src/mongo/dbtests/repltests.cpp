@@ -77,6 +77,7 @@ namespace ReplTests {
             createOplog(&_txn);
 
             Client::WriteContext ctx(&_txn, ns());
+            WriteUnitOfWork wuow(&_txn);
 
             Collection* c = ctx.ctx().db()->getCollection(&_txn, ns());
             if ( ! c ) {
@@ -84,7 +85,7 @@ namespace ReplTests {
             }
 
             ASSERT(c->getIndexCatalog()->haveIdIndex(&_txn));
-            ctx.commit();
+            wuow.commit();
         }
         ~Base() {
             try {
@@ -141,8 +142,7 @@ namespace ReplTests {
             }
 
             int count = 0;
-            RecordIterator* it = coll->getIterator( &_txn, DiskLoc(), false,
-                                                    CollectionScanParams::FORWARD );
+            RecordIterator* it = coll->getIterator(&_txn);
             for ( ; !it->isEOF(); it->getNext() ) {
                 ++count;
             }
@@ -162,8 +162,7 @@ namespace ReplTests {
             }
 
             int count = 0;
-            RecordIterator* it = coll->getIterator( &_txn, DiskLoc(), false,
-                                                    CollectionScanParams::FORWARD );
+            RecordIterator* it = coll->getIterator(&_txn);
             for ( ; !it->isEOF(); it->getNext() ) {
                 ++count;
             }
@@ -179,8 +178,7 @@ namespace ReplTests {
                 Database* db = ctx.db();
                 Collection* coll = db->getCollection( &_txn, cllNS() );
 
-                RecordIterator* it = coll->getIterator( &_txn, DiskLoc(), false,
-                                                        CollectionScanParams::FORWARD );
+                RecordIterator* it = coll->getIterator(&_txn);
                 while ( !it->isEOF() ) {
                     DiskLoc currLoc = it->getNext();
                     ops.push_back(coll->docFor(&_txn, currLoc));
@@ -213,8 +211,7 @@ namespace ReplTests {
                 coll = db->createCollection( &_txn, ns );
             }
 
-            RecordIterator* it = coll->getIterator( &_txn, DiskLoc(), false,
-                                                    CollectionScanParams::FORWARD );
+            RecordIterator* it = coll->getIterator(&_txn);
             ::mongo::log() << "all for " << ns << endl;
             while ( !it->isEOF() ) {
                 DiskLoc currLoc = it->getNext();
@@ -235,8 +232,7 @@ namespace ReplTests {
             }
 
             vector< DiskLoc > toDelete;
-            RecordIterator* it = coll->getIterator( &_txn, DiskLoc(), false,
-                                                    CollectionScanParams::FORWARD );
+            RecordIterator* it = coll->getIterator(&_txn);
             while ( !it->isEOF() ) {
                 toDelete.push_back( it->getNext() );
             }
@@ -1523,7 +1519,9 @@ namespace ReplTests {
             add< ReplSetMemberCfgEquality >();
             add< ShouldRetry >();
         }
-    } myall;
+    };
+
+    SuiteInstance<All> myall;
 
 } // namespace ReplTests
 

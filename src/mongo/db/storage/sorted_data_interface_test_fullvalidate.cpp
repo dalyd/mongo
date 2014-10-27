@@ -39,7 +39,7 @@ namespace mongo {
     // the `numKeysOut` as the number of entries in the index, or as -1.
     TEST( SortedDataInterface, FullValidate ) {
         scoped_ptr<HarnessHelper> harnessHelper( newHarnessHelper() );
-        scoped_ptr<SortedDataInterface> sorted( harnessHelper->newSortedDataInterface() );
+        scoped_ptr<SortedDataInterface> sorted( harnessHelper->newSortedDataInterface( false ) );
 
         {
             scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
@@ -53,7 +53,7 @@ namespace mongo {
                 WriteUnitOfWork uow( opCtx.get() );
                 BSONObj key = BSON( "" << i );
                 DiskLoc loc( 42, i * 2 );
-                ASSERT_OK( sorted->insert( opCtx.get(), key, loc, false ) );
+                ASSERT_OK( sorted->insert( opCtx.get(), key, loc, true ) );
                 uow.commit();
             }
         }
@@ -66,7 +66,7 @@ namespace mongo {
         {
             long long numKeysOut;
             scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
-            sorted->fullValidate( opCtx.get(), &numKeysOut );
+            sorted->fullValidate(opCtx.get(), false, &numKeysOut, NULL);
             // fullValidate() can set numKeysOut as the number of existing keys or -1.
             ASSERT( numKeysOut == nToInsert || numKeysOut == -1 );
         }
