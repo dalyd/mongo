@@ -645,9 +645,11 @@ namespace PerfTests {
     public:
         boost::thread_specific_ptr<ResourceId> resId;
         boost::thread_specific_ptr<Locker> locker; 
+        boost::thread_specific_ptr<int> id;
         LockMode lockMode; // Need to initialize this
         LockMode glockMode; // Need to initialize this
-        
+        int sharedid = 1;
+        boost::mutex lock; 
         locker_test() {lockMode = MODE_X; glockMode = MODE_IX;}
         virtual string name() { 
             stringstream mode;
@@ -657,12 +659,16 @@ namespace PerfTests {
         virtual bool testThreaded() { return true; }
         virtual void prep() {
             resId.reset(new ResourceId(RESOURCE_COLLECTION, std::string("TestDB.collection")));
-            locker.reset(new LockerImpl<true>());
+            locker.reset(new LockerImpl<true>(1));
         }
         
         virtual void prep2() {
             resId.reset(new ResourceId(RESOURCE_COLLECTION, std::string("TestDB.collection")));
-            locker.reset(new LockerImpl<true>());
+	    id.reset(new int);
+	    lock.lock();
+	    *id = sharedid++;
+	    lock.unlock();
+            locker.reset(new LockerImpl<true>(*id));
         }
 
         void timed() {
@@ -708,9 +714,13 @@ namespace PerfTests {
         virtual void prep2() {
             std::ostringstream stream;
             stream << boost::this_thread::get_id();
+	    id.reset(new int);
             
+	    lock.lock();
+	    *id = sharedid++;
+	    lock.unlock();
+            locker.reset(new LockerImpl<true>(*id));
             resId.reset(new ResourceId(RESOURCE_COLLECTION, std::string("TestDB.collection") + stream.str()));
-            locker.reset(new LockerImpl<true>());
         }
     };
 
