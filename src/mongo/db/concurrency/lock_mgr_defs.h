@@ -69,7 +69,14 @@ namespace mongo {
     /**
      * Legacy lock mode names in parity for 2.6 reports.
      */
-    char legacyModeName(LockMode mode);
+    const char* legacyModeName(LockMode mode);
+
+    /**
+     * Mode A is covered by mode B if the set of conflicts for mode A is a subset of the set of
+     * conflicts for mode B. For example S is covered by X. IS is covered by S. However, IX is not
+     * covered by S or IS.
+     */
+    bool isModeCovered(LockMode mode, LockMode coveringMode);
 
 
     /**
@@ -158,7 +165,7 @@ namespace mongo {
 
         bool isValid() const { return _type != RESOURCE_INVALID; }
 
-        operator size_t() const {
+        operator uint64_t() const {
             return _fullHash;
         }
 

@@ -32,7 +32,6 @@
 #pragma once
 
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/lock_stat.h"
 #include "mongo/db/server_options.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/concurrency/spin_lock.h"
@@ -221,7 +220,6 @@ namespace mongo {
         /** if this op is running */
         bool active() const { return _active; }
 
-        bool displayInCurop() const { return _active && ! _suppressFromCurop; }
         int getOp() const { return _op; }
 
         //
@@ -307,16 +305,13 @@ namespace mongo {
         void kill(); 
         bool killPendingStrict() const { return _killPending.load(); }
         bool killPending() const { return _killPending.loadRelaxed(); }
+        void yielded() { _numYields++; }
         int numYields() const { return _numYields; }
-        void suppressFromCurop() { _suppressFromCurop = true; }
         
         long long getExpectedLatencyMs() const { return _expectedLatencyMs; }
         void setExpectedLatencyMs( long long latency ) { _expectedLatencyMs = latency; }
 
         void recordGlobalTime(bool isWriteLocked, long long micros) const;
-        
-        const LockStat& lockStat() const { return _lockStat; }
-        LockStat& lockStat() { return _lockStat; }
 
         /**
          * this should be used very sparingly
@@ -336,7 +331,6 @@ namespace mongo {
         long long _start;
         long long _end;
         bool _active;
-        bool _suppressFromCurop; // unless $all is set
         int _op;
         bool _isCommand;
         int _dbprofile;                  // 0=off, 1=slow, 2=all
@@ -349,7 +343,6 @@ namespace mongo {
         ProgressMeter _progressMeter;
         AtomicInt32 _killPending;
         int _numYields;
-        LockStat _lockStat;
         
         // this is how much "extra" time a query might take
         // a writebacklisten for example will block for 30s 

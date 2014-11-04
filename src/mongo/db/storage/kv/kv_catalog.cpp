@@ -40,6 +40,7 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/platform/random.h"
 #include "mongo/util/log.h"
+#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 namespace {
@@ -83,13 +84,32 @@ namespace {
     };
 
     KVCatalog::KVCatalog( RecordStore* rs, bool isRsThreadSafe )
-        : _rs( rs ), _isRsThreadSafe(isRsThreadSafe) {
-        boost::scoped_ptr<SecureRandom> r( SecureRandom::create() );
-        _rand = r->nextInt64();
-    }
+        : _rs( rs )
+        , _isRsThreadSafe(isRsThreadSafe)
+        , _rand(_newRand())
+    {}
 
     KVCatalog::~KVCatalog() {
         _rs = NULL;
+    }
+
+    std::string KVCatalog::_newRand() {
+        return str::stream()
+            << boost::scoped_ptr<SecureRandom>(SecureRandom::create())->nextInt64();
+    }
+
+    bool KVCatalog::_hasEntryCollidingWithRand() const {
+        // Only called from init() so don't need to lock.
+        for (NSToIdentMap::const_iterator it = _idents.begin(); it != _idents.end(); ++it) {
+            if (StringData(it->first).endsWith(_rand))
+                return true;
+        }
+        return false;
+    }
+
+    std::string KVCatalog::_newUniqueIdent(const char* kind) {
+        // If this changes to not put _rand at the end, _hasEntryCollidingWithRand will need fixing.
+        return str::stream() << kind << '-' << _next.fetchAndAdd(1) << '-' << _rand;
     }
 
     void KVCatalog::init( OperationContext* opCtx ) {
@@ -106,6 +126,11 @@ namespace {
             string ident = obj["ident"].String();
             _idents[ns] = Entry( ident, loc );
         }
+
+        // In the unlikely event that we have used this _rand before generate a new one.
+        while (_hasEntryCollidingWithRand()) {
+            _rand = _newRand();
+        }
     }
 
     void KVCatalog::getAllCollections( std::vector<std::string>* out ) const {
@@ -118,13 +143,13 @@ namespace {
     Status KVCatalog::newCollection( OperationContext* opCtx,
                                      const StringData& ns,
                                      const CollectionOptions& options ) {
+        invariant( opCtx->lockState() == NULL ||
+                   opCtx->lockState()->isDbLockedForMode( nsToDatabaseSubstring(ns), MODE_X ) );
         boost::scoped_ptr<Lock::ResourceLock> rLk;
         if (!_isRsThreadSafe)
             rLk.reset(new Lock::ResourceLock(opCtx->lockState(), catalogRID, MODE_X));
 
-        std::stringstream ss;
-        ss << "collection-" << _rand << "-" << _next.fetchAndAdd( 1 );
-        string ident = ss.str();
+        const string ident = _newUniqueIdent("collection");
 
         boost::mutex::scoped_lock lk( _identsLock );
         Entry& old = _idents[ns.toString()];
@@ -187,7 +212,13 @@ namespace {
         }
 
         LOG(1) << "looking up metadata for: " << ns << " @ " << dl;
-        RecordData data = _rs->dataFor( opCtx, dl );
+        RecordData data;
+        if ( !_rs->findRecord( opCtx, dl, &data ) ) {
+            // since the in memory meta data isn't managed with mvcc
+            // its possible for different transactions to see slightly
+            // different things, which is ok via the locking above.
+            return BSONObj();
+        }
 
         if (out)
             *out = dl;
@@ -234,10 +265,7 @@ namespace {
                     continue;
                 }
                 // missing, create new
-                std::stringstream ss;
-                ss << getCollectionIdent( ns ) << '$' << name
-                   << '-' << _rand << '-' << _next.fetchAndAdd( 1 );
-                newIdentMap.append( name, ss.str() );
+                newIdentMap.append( name, _newUniqueIdent("index") );
             }
             b.append( "idxIdent", newIdentMap.obj() );
 
@@ -306,6 +334,8 @@ namespace {
 
     Status KVCatalog::dropCollection( OperationContext* opCtx,
                                       const StringData& ns ) {
+        invariant( opCtx->lockState() == NULL ||
+                   opCtx->lockState()->isDbLockedForMode( nsToDatabaseSubstring(ns), MODE_X ) );
         boost::scoped_ptr<Lock::ResourceLock> rLk;
         if (!_isRsThreadSafe)
             rLk.reset(new Lock::ResourceLock(opCtx->lockState(), catalogRID, MODE_X));
@@ -325,5 +355,18 @@ namespace {
         return Status::OK();
     }
 
+    std::vector<std::string> KVCatalog::getAllIdentsForDB( const StringData& db ) const {
+        std::vector<std::string> v;
+
+        boost::mutex::scoped_lock lk( _identsLock );
+        for ( NSToIdentMap::const_iterator it = _idents.begin(); it != _idents.end(); ++it ) {
+            NamespaceString ns( it->first );
+            if ( ns.db() != db )
+                continue;
+            v.push_back( it->second.ident );
+        }
+
+        return v;
+    }
 
 }

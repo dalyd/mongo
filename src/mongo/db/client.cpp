@@ -49,7 +49,7 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/authz_session_external_state_d.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/db.h"
+#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbwebserver.h"
@@ -167,22 +167,34 @@ namespace mongo {
     BSONObj CachedBSONObjBase::_tooBig = fromjson("{\"$msg\":\"query not recording (too large)\"}");
 
     Client::Context::Context(OperationContext* txn, const std::string& ns, Database * db)
-        : _client( currentClient.get() ), 
+        : _client(currentClient.get()),
           _justCreated(false),
-          _doVersion( true ),
-          _ns( ns ), 
+          _doVersion(true),
+          _ns(ns),
           _db(db),
           _txn(txn) {
+    }
 
+    Client::Context::Context(OperationContext* txn,
+                             const std::string& ns,
+                             Database* db,
+                             bool justCreated)
+        : _client(currentClient.get()),
+          _justCreated(justCreated),
+          _doVersion(true),
+          _ns(ns),
+          _db(db),
+          _txn(txn) {
+        _finishInit();
     }
 
     Client::Context::Context(OperationContext* txn,
                              const string& ns,
                              bool doVersion)
-        : _client( currentClient.get() ), 
+        : _client(currentClient.get()),
           _justCreated(false), // set for real in finishInit
           _doVersion(doVersion),
-          _ns( ns ), 
+          _ns(ns),
           _db(NULL),
           _txn(txn) {
 
@@ -196,13 +208,29 @@ namespace mongo {
 
     }
 
+    AutoGetOrCreateDb::AutoGetOrCreateDb(OperationContext* txn,
+                                         const StringData& ns,
+                                         LockMode mode)
+            : _dbLock(txn->lockState(), ns, mode),
+              _db(dbHolder().get(txn, ns)) {
+        invariant(mode == MODE_IX || mode == MODE_X);
+        _justCreated = false;
+        // If the database didn't exist, relock in MODE_X
+        if (_db == NULL) {
+            if (mode != MODE_X) {
+                _dbLock.relockWithMode(MODE_X);
+            }
+            _db = dbHolder().openDb(txn, ns);
+            _justCreated = true;
+        }
+    }
 
     AutoGetCollectionForRead::AutoGetCollectionForRead(OperationContext* txn,
                                                        const std::string& ns)
             : _txn(txn),
               _nss(ns),
-              _dbLock(_txn->lockState(), _nss.db(), MODE_IS),
-              _db(NULL),
+              _db(_txn, _nss.db(), MODE_IS),
+              _collLock(_txn->lockState(), ns, MODE_IS),
               _coll(NULL) {
 
         _init();
@@ -212,8 +240,8 @@ namespace mongo {
                                                        const NamespaceString& nss)
             : _txn(txn),
               _nss(nss),
-              _dbLock(_txn->lockState(), _nss.db(), MODE_IS),
-              _db(NULL),
+              _db(_txn, _nss.db(), MODE_IS),
+              _collLock(_txn->lockState(), _nss.toString(), MODE_IS),
               _coll(NULL) {
 
         _init();
@@ -226,45 +254,39 @@ namespace mongo {
         _txn->getCurOp()->ensureStarted();
         _txn->getCurOp()->setNS(_nss.toString());
 
-        // Lock both the DB and the collection (DB is locked in the constructor), because this is
-        // necessary in order to to shard version checking.
-        const ResourceId resId(RESOURCE_COLLECTION, _nss);
-        const LockMode collLockMode = supportsDocLocking() ? MODE_IS : MODE_S;
-
-        invariant(LOCK_OK == _txn->lockState()->lock(resId, collLockMode));
-
-        // Shard version check needs to be performed under the collection lock
+        // We have both the DB and collection locked, which the prerequisite to do a stable shard
+        // version check.
         ensureShardVersionOKOrThrow(_nss);
 
         // At this point, we are locked in shared mode for the database by the DB lock in the
         // constructor, so it is safe to load the DB pointer.
-        _db = dbHolder().get(_txn, _nss.db());
-        if (_db != NULL) {
+        if (_db.getDb()) {
             // TODO: Client::Context legacy, needs to be removed
-            _txn->getCurOp()->enter(_nss.toString().c_str(), _db->getProfilingLevel());
+            _txn->getCurOp()->enter(_nss.toString().c_str(), _db.getDb()->getProfilingLevel());
 
-            _coll = _db->getCollection(_txn, _nss);
+            _coll = _db.getDb()->getCollection(_txn, _nss);
         }
     }
 
     AutoGetCollectionForRead::~AutoGetCollectionForRead() {
-        // If the database is NULL, we would never have tried to lock the collection resource
-        if (_db) {
-            const ResourceId resId(RESOURCE_COLLECTION, _nss);
-            _txn->lockState()->unlock(resId);
-        }
-
         // Report time spent in read lock
         _txn->getCurOp()->recordGlobalTime(false, _timer.micros());
     }
 
-
     Client::WriteContext::WriteContext(OperationContext* opCtx, const std::string& ns)
         : _txn(opCtx),
           _nss(ns),
-          _dblk(opCtx->lockState(), _nss.db(), MODE_IX),
+          _autodb(opCtx, _nss.db(), MODE_IX),
           _collk(opCtx->lockState(), ns, MODE_IX),
-          _c(opCtx, ns) { }
+          _c(opCtx, ns, _autodb.getDb(), _autodb.justCreated()) {
+        _collection = _c.db()->getCollection( _txn, ns );
+        if ( !_collection && !_autodb.justCreated() ) {
+            // relock in MODE_X
+            _collk.relockWithMode( MODE_X, _autodb.lock() );
+            Database* db = dbHolder().get(_txn, ns );
+            invariant( db == _c.db() );
+        }
+    }
 
     void Client::Context::checkNotStale() const { 
         switch ( _client->_curOp->getOp() ) {
@@ -279,8 +301,15 @@ namespace mongo {
     }
        
     void Client::Context::_finishInit() {
-        _db = dbHolder().openDb(_txn, _ns, &_justCreated);
-        invariant(_db);
+        _db = dbHolder().get(_txn, _ns);
+        if (_db) {
+            _justCreated = false;
+        }
+        else {
+            invariant(_txn->lockState()->isDbLockedForMode(nsToDatabaseSubstring(_ns), MODE_X));
+            _db = dbHolder().openDb(_txn, _ns, &_justCreated);
+            invariant(_db);
+        }
 
         if( _doVersion ) checkNotStale();
 
@@ -313,6 +342,8 @@ namespace mongo {
         if (_connectionId) {
             builder.appendNumber("connectionId", _connectionId);
         }
+
+        _curOp->reportState(&builder);
     }
 
     string Client::clientAddress(bool includePort) const {
@@ -468,7 +499,6 @@ namespace mongo {
         s << " numYields:" << curop.numYields();
         
         s << " ";
-        curop.lockStat().report( s );
         
         OPDEBUG_TOSTRING_HELP( nreturned );
         if ( responseLength > 0 )
@@ -551,7 +581,6 @@ namespace mongo {
         OPDEBUG_APPEND_NUMBER( keyUpdates );
 
         b.appendNumber( "numYield" , curop.numYields() );
-        b.append( "lockStats" , curop.lockStat().report() );
 
         if ( ! exceptionInfo.empty() )
             exceptionInfo.append( b , "exception" , "exceptionCode" );

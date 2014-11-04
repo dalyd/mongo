@@ -128,7 +128,7 @@ namespace mongo {
                     return s;
             }
 
-            // Any foreground indexes make all indexes be build in the foreground.
+            // Any foreground indexes make all indexes be built in the foreground.
             _buildInBackground = (_buildInBackground && info["background"].trueValue());
         }
 
@@ -157,7 +157,6 @@ namespace mongo {
             if (!_buildInBackground) {
                 // Bulk build process requires foreground building as it assumes nothing is changing
                 // under it.
-                // TODO SERVER-14860 make background not just be a slower foreground.
                 index.bulk.reset(index.real->initiateBulk(_txn));
             }
 
@@ -181,13 +180,27 @@ namespace mongo {
 
         // this is so that operations examining the list of indexes know there are more keys to look
         // at when doing things like in place updates, etc...
-        _collection->infoCache()->addedIndex();
+        _collection->infoCache()->addedIndex(_txn);
 
         if (_buildInBackground)
             _backgroundOperation.reset(new BackgroundOperation(ns));
 
         wunit.commit();
         return Status::OK();
+    }
+
+    IndexDescriptor* MultiIndexBlock::registerIndexBuild() {
+        // Register background index build so that it can be found and killed when necessary
+        invariant(_collection);
+        invariant(_indexes.size() == 1);
+        invariant(_buildInBackground);
+        IndexDescriptor* descriptor = _indexes[0].block->getEntry()->descriptor();
+        _collection->getIndexCatalog()->registerIndexBuild(descriptor, _txn->getCurOp()->opNum());
+        return descriptor;
+    }
+
+    void MultiIndexBlock::unregisterIndexBuild(IndexDescriptor* descriptor) {
+        _collection->getIndexCatalog()->unregisterIndexBuild(descriptor);
     }
 
     Status MultiIndexBlock::insertAllDocumentsInCollection(std::set<DiskLoc>* dupsOut) {
@@ -199,14 +212,23 @@ namespace mongo {
         Timer t;
 
         unsigned long long n = 0;
+
         scoped_ptr<PlanExecutor> exec(InternalPlanner::collectionScan(_txn,
                                                                       _collection->ns().ns(),
                                                                       _collection));
+        if (_buildInBackground) {
+            invariant(_allowInterruption);
+            exec->setYieldPolicy(PlanExecutor::YIELD_AUTO);
+        }
 
         BSONObj objToIndex;
         DiskLoc loc;
-        while (PlanExecutor::ADVANCED == exec->getNext(&objToIndex, &loc)) {
+        PlanExecutor::ExecState state;
+        while (PlanExecutor::ADVANCED == (state = exec->getNext(&objToIndex, &loc))) {
             {
+                if (_allowInterruption)
+                    _txn->checkForInterrupt();
+
                 bool shouldCommitWUnit = true;
                 WriteUnitOfWork wunit(_txn);
                 Status ret = insert(objToIndex, loc);
@@ -229,10 +251,12 @@ namespace mongo {
             n++;
             progress->hit();
 
-            if (_allowInterruption)
-                _txn->checkForInterrupt();
-
             progress->setTotalWhileRunning( _collection->numRecords(_txn) );
+        }
+
+        if (state != PlanExecutor::IS_EOF) {
+            uasserted(28550, 
+                      "Unable to complete index build as the collection is no longer readable");
         }
 
         progress->finished();
@@ -293,7 +317,7 @@ namespace mongo {
         }
 
         // this one is so operations examining the list of indexes know that the index is finished
-        _collection->infoCache()->addedIndex();
+        _collection->infoCache()->addedIndex(_txn);
 
         _txn->recoveryUnit()->registerChange(new SetNeedToCleanupOnRollback(this));
         _needToCleanup = false;

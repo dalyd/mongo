@@ -41,6 +41,7 @@
 #include "mongo/db/storage/mmap_v1/record.h"
 #include "mongo/db/storage/mmap_v1/extent.h"
 #include "mongo/db/storage/mmap_v1/extent_manager.h"
+#include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/util/file.h"
 #include "mongo/util/log.h"
@@ -196,7 +197,7 @@ namespace mongo {
         return size;
     }
 
-    Record* MmapV1ExtentManager::recordForV1( const DiskLoc& loc ) const {
+    Record* MmapV1ExtentManager::_recordForV1( const DiskLoc& loc ) const {
         loc.assertOk();
         const DataFile* df = _getOpenFile( loc.a() );
 
@@ -206,6 +207,17 @@ namespace mongo {
         }
 
         return reinterpret_cast<Record*>( df->p() + ofs );
+    }
+
+    Record* MmapV1ExtentManager::recordForV1( const DiskLoc& loc ) const {
+        Record* record = _recordForV1( loc );
+        _recordAccessTracker.markAccessed( record );
+        return record;
+    }
+
+    bool MmapV1ExtentManager::likelyInPhysicalMem( const DiskLoc& loc ) const {
+        Record* record = _recordForV1( loc );
+        return _recordAccessTracker.checkAccessedAndMark( record );
     }
 
     DiskLoc MmapV1ExtentManager::extentLocForV1( const DiskLoc& loc ) const {
@@ -223,6 +235,9 @@ namespace mongo {
         Extent* e = reinterpret_cast<Extent*>( _getOpenFile( loc.a() )->p() + loc.getOfs() );
         if ( doSanityCheck )
             e->assertOk();
+
+        _recordAccessTracker.markAccessed( e );
+
         return e;
     }
 
@@ -230,7 +245,7 @@ namespace mongo {
         if ( !enforceQuota )
             return;
 
-        if ( fileNo < storageGlobalParams.quotaFiles )
+        if ( fileNo < mmapv1GlobalOptions.quotaFiles )
             return;
 
         // exceeded!
