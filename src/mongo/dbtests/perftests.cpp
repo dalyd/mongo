@@ -66,6 +66,7 @@
 #include "mongo/util/version.h"
 #include "mongo/util/version_reporting.h"
 #include "mongo/db/concurrency/lock_state.h"
+#include "mongo/db/clientcursor.h"
 
 #if (__cplusplus >= 201103L)
 #include <mutex>
@@ -98,6 +99,7 @@ namespace PerfTests {
         }
 
         DBClientBase* client() { return &_client; }
+        OperationContextImpl* txn() { return &_txn; }
 
     private:
         LastError* _prevError;
@@ -182,7 +184,7 @@ namespace PerfTests {
         // anything you want to do before being timed
         virtual void prep() { }
         // anything you want to do before threaded test
-        virtual void prep2() {}
+        virtual void prep2(DBClientBase*, OperationContextImpl* txn) {}
 
         virtual void timed() = 0;
 
@@ -355,7 +357,7 @@ namespace PerfTests {
 
             if( testThreaded() ) {
                 const int nThreads = 8;
-                //cout << "testThreaded nThreads:" << nThreads << endl;
+                cout << "testThreaded nThreads:" << nThreads << endl;
                 mongo::Timer t;
                 const unsigned long long result = launchThreads(nThreads);
                 say(result/nThreads, t.micros(), test2name+"-threaded");
@@ -374,7 +376,9 @@ namespace PerfTests {
             DBDirectClient c(&txn);
 
             const unsigned int Batch = batchSize();
-            prep2();
+            cout << "Before prep2" << endl;
+            prep2(&c, &txn);
+            cout << "After prep2" << endl;
             while( 1 ) {
                 unsigned int i = 0;
                 for( i = 0; i < Batch; i++ )
@@ -394,11 +398,13 @@ namespace PerfTests {
                 stop = true;
                 return 0;
             }
+            cout << "In launchThreads " << remaining << endl;
             unsigned long long counter = 0;
             boost::thread athread(stdx::bind(&B::thread, this, &counter));
             unsigned long long child = launchThreads(remaining - 1);
             athread.join();
             unsigned long long accum = child + counter;
+            cout << "In launchThreads. Accumulated " << remaining << endl;
             return accum;
         }
     };
@@ -642,6 +648,46 @@ namespace PerfTests {
     };
 
 
+    class cursor_cache_test : public B {
+    public : 
+        
+        virtual ~cursor_cache_test()
+        {
+            if (_ctx != NULL)
+                delete _ctx;
+        }
+        //        boost::thread_specific_ptr<Client::WriteContext> ctx;
+        boost::thread_specific_ptr<AutoGetCollectionForRead> autocollection;
+
+        Client::WriteContext *_ctx;
+        virtual string name() { return "Cursor Cache";}
+        virtual bool showDurStats() { return false; }
+        ClientCursor *cursor;
+
+        virtual bool testThreaded() { return true; }
+
+        virtual void prep () {
+            _ctx = new Client::WriteContext(txn(), ns());
+            client()->createCollection( ns() );
+        }
+        void timed () {
+            cursor = new ClientCursor(_ctx->getCollection());
+            delete cursor;
+        }
+
+        virtual void prep2(DBClientBase* client, OperationContextImpl* txn) {
+            //ctx.reset(new Client::WriteContext(txn(), ns()));
+            autocollection.reset(new AutoGetCollectionForRead(txn, ns()));
+        }
+
+        void timed2(DBClientBase*) {
+            cursor = new ClientCursor(autocollection->getCollection());
+            delete cursor;
+        }
+
+
+    };
+
     class locker_test : public B {
     public:
         boost::thread_specific_ptr<ResourceId> resId;
@@ -663,7 +709,7 @@ namespace PerfTests {
             locker.reset(new LockerImpl<true>(1));
         }
         
-        virtual void prep2() {
+        virtual void prep2(DBClientBase*, OperationContextImpl* txn) {
             resId.reset(new ResourceId(RESOURCE_COLLECTION, std::string("TestDB.collection")));
 	    id.reset(new int);
 	    lock.lock();
@@ -712,7 +758,7 @@ namespace PerfTests {
             mode << lockMode;
             return (string("locker_uncontested") + mode.str());}
 
-        virtual void prep2() {
+        virtual void prep2(DBClientBase*, OperationContextImpl* txn) {
             std::ostringstream stream;
             stream << boost::this_thread::get_id();
 	    id.reset(new int);
@@ -1472,6 +1518,7 @@ namespace PerfTests {
 #if defined(__USE_XOPEN2K)
                 add< Yield >();
 #endif
+                add< cursor_cache_test >();
                 add< rlock >();
                 add< wlock >();
                 add< glockerIX > ();
