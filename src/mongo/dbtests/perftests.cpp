@@ -196,6 +196,7 @@ namespace PerfTests {
         virtual string name2() { return name(); }
 
         virtual void post() { }
+        virtual void post2() { }
 
         virtual string name() = 0;
 
@@ -384,6 +385,7 @@ namespace PerfTests {
                 if( stop ) 
                     break;
             }
+            post2();
             cc().shutdown();
         }
 
@@ -648,14 +650,9 @@ namespace PerfTests {
         
         virtual ~cursor_cache_test()
         {
-            // if (_ctx != NULL)
-            //     delete _ctx;
-            
         }
-        //        boost::thread_specific_ptr<Client::WriteContext> ctx;
         boost::thread_specific_ptr<AutoGetCollectionForRead> autocollection;
 
-        //Client::WriteContext *_ctx;
         virtual string name() { return "Cursor Cache";}
         virtual bool showDurStats() { return false; }
         ClientCursor *cursor;
@@ -663,26 +660,31 @@ namespace PerfTests {
         virtual bool testThreaded() { return true; }
 
         virtual void prep () {
-            //            _ctx = new Client::WriteContext(txn(), ns());
             client()->createCollection( ns() );
             autocollection.reset(new AutoGetCollectionForRead(txn(), ns()));
         }
         void timed () {
             cursor = new ClientCursor(autocollection->getCollection());
-            //cursor = new ClientCursor(_ctx->getCollection());
             delete cursor;
         }
 
-        // virtual void prep2(DBClientBase* client, OperationContextImpl* txn) {
-        //     //ctx.reset(new Client::WriteContext(txn(), ns()));
-        //     autocollection.reset(new AutoGetCollectionForRead(txn, ns()));
-        // }
+        void post () {
+            autocollection.reset(NULL);
+        }
 
-        // void timed2(DBClientBase*) {
-        //     cursor = new ClientCursor(autocollection->getCollection());
-        //     delete cursor;
-        // }
+        virtual void prep2(DBClientBase* client, OperationContextImpl* _txn) {
+            autocollection.reset(new AutoGetCollectionForRead(_txn, ns()));
+        }
 
+        void timed2(DBClientBase*) {
+            cursor = new ClientCursor(autocollection->getCollection());
+            delete cursor;
+        }
+
+        void post2() {
+            autocollection.reset(NULL);
+        }
+            
 
     };
 
