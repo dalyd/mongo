@@ -357,7 +357,6 @@ namespace PerfTests {
 
             if( testThreaded() ) {
                 const int nThreads = 8;
-                cout << "testThreaded nThreads:" << nThreads << endl;
                 mongo::Timer t;
                 const unsigned long long result = launchThreads(nThreads);
                 say(result/nThreads, t.micros(), test2name+"-threaded");
@@ -376,9 +375,7 @@ namespace PerfTests {
             DBDirectClient c(&txn);
 
             const unsigned int Batch = batchSize();
-            cout << "Before prep2" << endl;
             prep2(&c, &txn);
-            cout << "After prep2" << endl;
             while( 1 ) {
                 unsigned int i = 0;
                 for( i = 0; i < Batch; i++ )
@@ -398,13 +395,11 @@ namespace PerfTests {
                 stop = true;
                 return 0;
             }
-            cout << "In launchThreads " << remaining << endl;
             unsigned long long counter = 0;
             boost::thread athread(stdx::bind(&B::thread, this, &counter));
             unsigned long long child = launchThreads(remaining - 1);
             athread.join();
             unsigned long long accum = child + counter;
-            cout << "In launchThreads. Accumulated " << remaining << endl;
             return accum;
         }
     };
