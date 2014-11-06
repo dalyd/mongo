@@ -81,7 +81,7 @@ namespace repl {
                                                     &applyBatchStats );
     void initializePrefetchThread() {
         if (!ClientBasic::getCurrent()) {
-            Client::initThread("repl prefetch worker");
+            Client::initThreadIfNotAlready();
             replLocalAuth();
         }
     }
@@ -199,8 +199,8 @@ namespace repl {
         Sync(""), 
         _networkQueue(q), 
         _applyFunc(func),
-        _writerPool(replWriterThreadCount),
-        _prefetcherPool(replPrefetcherThreadCount)
+        _writerPool(replWriterThreadCount, "repl writer worker "),
+        _prefetcherPool(replPrefetcherThreadCount, "repl prefetch worker ")
     {}
 
     SyncTail::~SyncTail() {}
@@ -473,7 +473,11 @@ namespace {
             return;
         }
 
-        replCoord->setFollowerMode(MemberState::RS_SECONDARY);
+        bool worked = replCoord->setFollowerMode(MemberState::RS_SECONDARY);
+        if (!worked) {
+            warning() << "Failed to transition into " << MemberState(MemberState::RS_SECONDARY)
+                      << ". Current state: " << replCoord->getCurrentMemberState();
+        }
     }
 }
 
@@ -731,9 +735,7 @@ namespace {
     static void initializeWriterThread() {
         // Only do this once per thread
         if (!ClientBasic::getCurrent()) {
-            string threadName = str::stream() << "repl writer worker "
-                                              << replWriterWorkerId.addAndFetch(1);
-            Client::initThread( threadName.c_str() );
+            Client::initThreadIfNotAlready();
             replLocalAuth();
         }
     }

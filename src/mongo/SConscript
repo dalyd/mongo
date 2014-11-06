@@ -13,6 +13,7 @@ Import("usev8")
 Import("v8suffix")
 Import("enforce_glibc")
 Import("darwin windows solaris linux nix")
+Import("wiredtiger")
 
 # Boost we need everywhere. 's2' is spammed in all over the place by
 # db/geo unfortunately. pcre is also used many places.
@@ -40,6 +41,7 @@ env.SConscript(['base/SConscript',
                 'db/storage/kv/SConscript',
                 'db/storage/mmap_v1/SConscript',
                 'db/storage/rocks/SConscript',
+                'db/storage/wiredtiger/SConscript',
                 'db/SConscript',
                 'installer/msi/SConscript',
                 'logger/SConscript',
@@ -955,6 +957,10 @@ serveronlyLibdeps = ["coreshard",
 if has_option("rocksdb" ):
     serveronlyLibdeps.append( 'db/storage/rocks/storage_rocks' )
 
+if wiredtiger:
+    serveronlyLibdeps.append( 'db/storage/wiredtiger/storage_wiredtiger' )
+    serveronlyLibdeps.append( '$BUILD_DIR/third_party/shim_wiredtiger')
+
 serveronlyEnv.Library("serveronly", serverOnlyFiles,
                       LIBDEPS=serveronlyLibdeps )
 
@@ -1121,15 +1127,6 @@ test = env.Install(
 if len(env.subst('$PROGSUFFIX')):
     env.Alias( "dbtest", "#/${PROGPREFIX}dbtest${PROGSUFFIX}" )
 
-env.Install( '#/', env.Program( "perftest", [ "dbtests/perf/perftest.cpp" ],
-                                 LIBDEPS = [
-                                     "serveronly",
-                                     "coreserver",
-                                     "coredb",
-                                     "testframework",
-                                     "signal_handlers_synchronous",
-                                 ] ) )
-
 env.Install('$BUILD_ROOT/', env.Program('file_allocator_bench',
             'util/file_allocator_bench.cpp',
             LIBDEPS=[
@@ -1290,7 +1287,6 @@ for t in rewrittenTools:
 installBinary(env, "mongoperf")
 env.Alias("tools", '#/' + add_exe("mongoperf"))
 
-env.Alias("tools", "#/" + add_exe("perftest"))
 env.Alias("tools", "#/" + add_exe("mongobridge"))
 
 if mongosniff_built:

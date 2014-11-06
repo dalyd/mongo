@@ -218,18 +218,10 @@ namespace {
         BackgroundSync::get()->clearSyncTarget();
     }
 
-    OperationContext* ReplicationCoordinatorExternalStateImpl::createOperationContext() {
-        stdx::function<std::string ()> f;
-        f = stdx::bind(&ReplicationCoordinatorExternalStateImpl::getNextOpContextThreadName,this);
-        Client::initThreadIfNotAlready(f);
+    OperationContext* ReplicationCoordinatorExternalStateImpl::createOperationContext(
+            const std::string& threadName) {
+        Client::initThreadIfNotAlready(threadName.c_str());
         return new OperationContextImpl;
-    }
-
-    std::string ReplicationCoordinatorExternalStateImpl::getNextOpContextThreadName() {
-        boost::unique_lock<boost::mutex> lk(_nextThreadIdMutex);
-        std::ostringstream sb;
-        sb << "replCallbackWithGlobalLock " << _nextThreadId++;
-        return sb.str();
     }
 
     void ReplicationCoordinatorExternalStateImpl::dropAllTempCollections(OperationContext* txn) {

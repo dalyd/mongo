@@ -338,12 +338,26 @@ namespace {
     NetworkInterfaceImpl::NetworkInterfaceImpl() :
         _isExecutorRunnable(false),
         _inShutdown(false),
-        _nextThreadId(0) {
+        _numActiveNetworkRequests(0) {
         ConnectionPool::Options options;
         _connPool.reset(new ConnectionPool(options));
     }
 
     NetworkInterfaceImpl::~NetworkInterfaceImpl() { }
+
+    std::string NetworkInterfaceImpl::getDiagnosticString() {
+        boost::lock_guard<boost::mutex> lk(_mutex);
+        str::stream output;
+        output << "NetworkImpl";
+        output << " threads:" << _threads.size();
+        output << " inShutdown:" << _inShutdown;
+        output << " active:" << _numActiveNetworkRequests;
+        output << " pending:" << _pending.size();
+        output << " execRunable:" << _isExecutorRunnable;
+        return output;
+
+    }
+
 
     void NetworkInterfaceImpl::startup() {
         boost::lock_guard<boost::mutex> lk(_mutex);
@@ -352,11 +366,14 @@ namespace {
             return;
         }
         for (size_t i = 0; i < kNumThreads; ++i) {
+            const std::string threadName(str::stream() << "ReplExecNetThread-" << i);
             _threads.push_back(
                     boost::shared_ptr<boost::thread>(
                             new boost::thread(
                                     stdx::bind(&NetworkInterfaceImpl::_consumeNetworkRequests,
-                                               this))));
+                                               this,
+                                               threadName
+                                              ))));
         }
     }
 
@@ -403,7 +420,8 @@ namespace {
         _isExecutorRunnable = false;
     }
 
-    void NetworkInterfaceImpl::_consumeNetworkRequests() {
+    void NetworkInterfaceImpl::_consumeNetworkRequests(const std::string& threadName) {
+        setThreadName(threadName);
         boost::unique_lock<boost::mutex> lk(_mutex);
         while (!_inShutdown) {
             if (_pending.empty()) {
@@ -412,12 +430,14 @@ namespace {
             }
             CommandData todo = _pending.front();
             _pending.pop_front();
+            ++_numActiveNetworkRequests;
             lk.unlock();
             ResponseStatus result = _runCommand(todo.request);
             LOG(2) << "Network status of sending " << todo.request.cmdObj.firstElementFieldName() <<
                 " to " << todo.request.target << " was " << result.getStatus();
             todo.onFinish(result);
             lk.lock();
+            --_numActiveNetworkRequests;
             _signalWorkAvailable_inlock();
         }
     }
@@ -474,7 +494,7 @@ namespace {
                     return StatusWith<int>(ErrorCodes::ExceededTimeLimit,
                                                str::stream() << "Went to run command,"
                                                " but it was too late. Expiration was set to "
-                                                             << expDate);
+                                                             << dateToISOStringUTC(expDate));
                 }
             }
             return StatusWith<int>(timeout);
@@ -513,20 +533,10 @@ namespace {
 
     void NetworkInterfaceImpl::runCallbackWithGlobalExclusiveLock(
             const stdx::function<void (OperationContext*)>& callback) {
-
-        stdx::function<std::string ()> f;
-        f = stdx::bind(&NetworkInterfaceImpl::getNextCallbackWithGlobalLockThreadName, this);
-        Client::initThreadIfNotAlready(f);
+        Client::initThreadIfNotAlready();
         OperationContextImpl txn;
         Lock::GlobalWrite lk(txn.lockState());
         callback(&txn);
-    }
-
-    std::string NetworkInterfaceImpl::getNextCallbackWithGlobalLockThreadName() {
-        boost::unique_lock<boost::mutex> lk(_nextThreadIdMutex);
-        std::ostringstream sb;
-        sb << "replCallbackWithGlobalLock " << _nextThreadId++;
-        return sb.str();
     }
 
 }  // namespace repl
