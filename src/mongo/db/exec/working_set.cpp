@@ -29,6 +29,7 @@
 #include "mongo/db/exec/working_set.h"
 
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/storage/record_fetcher.h"
 
 namespace mongo {
 
@@ -145,6 +146,18 @@ namespace mongo {
         _computed[data->type()].reset(data);
     }
 
+    void WorkingSetMember::setFetcher(RecordFetcher* fetcher) {
+        _fetcher.reset(fetcher);
+    }
+
+    RecordFetcher* WorkingSetMember::releaseFetcher() {
+        return _fetcher.release();
+    }
+
+    bool WorkingSetMember::hasFetcher() const {
+        return NULL != _fetcher.get();
+    }
+
     bool WorkingSetMember::getFieldDotted(const string& field, BSONElement* out) const {
         // If our state is such that we have an object, use it.
         if (hasObj()) {
@@ -176,7 +189,7 @@ namespace mongo {
         size_t memUsage = 0;
 
         if (hasLoc()) {
-            memUsage += sizeof(DiskLoc);
+            memUsage += sizeof(RecordId);
         }
 
         // XXX: Unowned objects count towards current size.

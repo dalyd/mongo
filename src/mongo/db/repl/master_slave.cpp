@@ -46,6 +46,7 @@
 #include <boost/thread/thread.hpp>
 
 #include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/database_catalog_entry.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/cloner.h"
@@ -56,10 +57,11 @@
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_coordinator_global.h"
-#include "mongo/db/repl/rs.h" // replLocalAuth()
+#include "mongo/db/repl/sync.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/operation_context_impl.h"
 #include "mongo/db/storage_options.h"
+#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
 
@@ -168,6 +170,7 @@ namespace repl {
         bool exists = Helpers::getSingleton(txn, "local.me", _me);
 
         if (!exists || !_me.hasField("host") || _me["host"].String() != myname) {
+            ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock dblk(txn->lockState(), "local", MODE_X);
             WriteUnitOfWork wunit(txn);
             // clean out local.me
@@ -202,13 +205,13 @@ namespace repl {
             Client::Context ctx(txn, "local.sources");
 
             const NamespaceString requestNs("local.sources");
-            UpdateRequest request(txn, requestNs);
+            UpdateRequest request(requestNs);
 
             request.setQuery(pattern);
             request.setUpdates(o);
             request.setUpsert();
 
-            UpdateResult res = update(ctx.db(), request, &debug);
+            UpdateResult res = update(txn, ctx.db(), request, &debug);
 
             verify( ! res.modifiers );
             verify( res.numMatched == 1 );
@@ -378,7 +381,10 @@ namespace repl {
                 msgassertedNoTrace( 14051 , "unable to connect to resync");
             }
             /* todo use getDatabaseNames() method here */
-            bool ok = oplogReader.conn()->runCommand( "admin", BSON( "listDatabases" << 1 ), info );
+            bool ok = oplogReader.conn()->runCommand("admin",
+                                                     BSON("listDatabases" << 1),
+                                                     info,
+                                                     QueryOption_SlaveOk);
             massert( 10385 ,  "Unable to get database list", ok );
         }
 
@@ -815,6 +821,7 @@ namespace repl {
                 }
                 // obviously global isn't ideal, but non-repl set is old so 
                 // keeping it simple
+                ScopedTransaction transaction(txn, MODE_X);
                 Lock::GlobalWrite lk(txn->lockState());
                 save(txn);
             }
@@ -866,6 +873,7 @@ namespace repl {
                 log() << "repl:   " << ns << " oplog is empty" << endl;
             }
             {
+                ScopedTransaction transaction(txn, MODE_X);
                 Lock::GlobalWrite lk(txn->lockState());
                 save(txn);
             }
@@ -938,6 +946,7 @@ namespace repl {
                 const bool moreInitialSyncsPending = !addDbNextPass.empty() && n;
 
                 if ( moreInitialSyncsPending || !oplogReader.more() ) {
+                    ScopedTransaction transaction(txn, MODE_X);
                     Lock::GlobalWrite lk(txn->lockState());
                     
                     if (tailing) {
@@ -954,6 +963,7 @@ namespace repl {
 
                 OCCASIONALLY if( n > 0 && ( n > 100000 || time(0) - saveLast > 60 ) ) {
                     // periodically note our progress, in case we are doing a lot of work and crash
+                    ScopedTransaction transaction(txn, MODE_X);
                     Lock::GlobalWrite lk(txn->lockState());
                     syncedTo = nextOpTime;
                     // can't update local log ts since there are pending operations from our peer
@@ -995,6 +1005,7 @@ namespace repl {
                         verify( justOne );
                         oplogReader.putBack( op );
                         _sleepAdviceTime = nextOpTime.getSecs() + replSettings.slavedelay + 1;
+                        ScopedTransaction transaction(txn, MODE_X);
                         Lock::GlobalWrite lk(txn->lockState());
                         if ( n > 0 ) {
                             syncedTo = last;
@@ -1077,6 +1088,7 @@ namespace repl {
     int _replMain(OperationContext* txn, ReplSource::SourceVector& sources, int& nApplied) {
         {
             ReplInfo r("replMain load sources");
+            ScopedTransaction transaction(txn, MODE_X);
             Lock::GlobalWrite lk(txn->lockState());
             ReplSource::loadAll(txn, sources);
 
@@ -1148,6 +1160,7 @@ namespace repl {
         while ( 1 ) {
             int s = 0;
             {
+                ScopedTransaction transaction(txn, MODE_X);
                 Lock::GlobalWrite lk(txn->lockState());
                 if ( replAllDead ) {
                     // throttledForceResyncDead can throw
@@ -1179,6 +1192,7 @@ namespace repl {
             }
 
             {
+                ScopedTransaction transaction(txn, MODE_X);
                 Lock::GlobalWrite lk(txn->lockState());
                 verify( syncing == 1 );
                 syncing--;
@@ -1218,7 +1232,7 @@ namespace repl {
                 if ( lk.got() ) {
                     toSleep = 10;
 
-                    replLocalAuth();
+                    txn.getClient()->getAuthorizationSession()->grantInternalAuthorization();
 
                     try {
                         logKeepalive(&txn);
@@ -1240,11 +1254,7 @@ namespace repl {
         Client::initThread("replslave");
 
         OperationContextImpl txn;
-
-        {
-            Lock::GlobalWrite lk(txn.lockState());
-            replLocalAuth();
-        }
+        txn.getClient()->getAuthorizationSession()->grantInternalAuthorization();
 
         while ( 1 ) {
             try {
@@ -1268,8 +1278,7 @@ namespace repl {
         }
     }
 
-    void startMasterSlave() {
-        OperationContextImpl txn;
+    void startMasterSlave(OperationContext* txn) {
 
         oldRepl();
 
@@ -1277,13 +1286,10 @@ namespace repl {
         if( !replSettings.slave && !replSettings.master )
             return;
 
-        {
-            Lock::GlobalWrite lk(txn.lockState());
-            replLocalAuth();
-        }
+        txn->getClient()->getAuthorizationSession()->grantInternalAuthorization();
 
         {
-            ReplSource temp(&txn); // Ensures local.me is populated
+            ReplSource temp(txn); // Ensures local.me is populated
         }
 
         if ( replSettings.slave ) {
@@ -1294,7 +1300,7 @@ namespace repl {
 
         if ( replSettings.master ) {
             LOG(1) << "master=true" << endl;
-            createOplog(&txn);
+            createOplog(txn);
             boost::thread t(replMasterThread);
         }
 
@@ -1313,6 +1319,7 @@ namespace repl {
         }
 
         OperationContextImpl txn; // XXX
+        ScopedTransaction transaction(&txn, MODE_S);
         Lock::GlobalRead lk(txn.lockState());
 
         for( unsigned i = a; i <= b; i++ ) {

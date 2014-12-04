@@ -46,8 +46,9 @@ namespace repl {
         ReplicationCoordinatorExternalStateImpl();
         virtual ~ReplicationCoordinatorExternalStateImpl();
         virtual void startThreads();
-        virtual void startMasterSlave();
+        virtual void startMasterSlave(OperationContext* txn);
         virtual void shutdown();
+        virtual void initiateOplog(OperationContext* txn);
         virtual void forwardSlaveHandshake();
         virtual void forwardSlaveProgress();
         virtual OID ensureMe(OperationContext* txn);
@@ -57,16 +58,20 @@ namespace repl {
         virtual StatusWith<OpTime> loadLastOpTime(OperationContext* txn);
         virtual HostAndPort getClientHostAndPort(const OperationContext* txn);
         virtual void closeConnections();
+        virtual void killAllUserOperations(OperationContext* txn);
         virtual void clearShardingState();
         virtual void signalApplierToChooseNewSyncSource();
-        virtual ReplicationCoordinatorExternalState::GlobalSharedLockAcquirer*
-                getGlobalSharedLockAcquirer();
-        virtual OperationContext* createOperationContext();
+        virtual OperationContext* createOperationContext(const std::string& threadName);
         virtual void dropAllTempCollections(OperationContext* txn);
 
         std::string getNextOpContextThreadName();
 
     private:
+        // Guards starting threads and setting _startedThreads
+        boost::mutex _threadMutex;
+
+        // True when the threads have been started
+        bool _startedThreads;
 
         // The SyncSourceFeedback class is responsible for sending replSetUpdatePosition commands
         // for forwarding replication progress information upstream when there is chained

@@ -45,6 +45,8 @@
 #include "mongo/db/server_options_helpers.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
 #include "mongo/util/log.h"
+#include "mongo/logger/console_appender.h"
+#include "mongo/logger/message_event_utf8_encoder.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/options_parser/startup_options.h"
@@ -180,10 +182,9 @@ namespace mongo {
                 + storageGlobalParams.kDefaultDbPath);
 
 #endif
-        storage_options.addOptionChaining("storage.mmapv1.directoryPerDB", "directoryperdb",
-                moe::Switch,
-                "each database will be stored in a separate directory",
-                "storage.directoryPerDB");
+        storage_options.addOptionChaining("storage.directoryPerDB", "directoryperdb",
+                                          moe::Switch,
+                                          "each database will be stored in a separate directory");
 
         general_options.addOptionChaining("noIndexBuildRetry", "noIndexBuildRetry", moe::Switch,
                 "don't retry any index builds that were interrupted by shutdown")
@@ -480,6 +481,15 @@ namespace mongo {
         }
     } // namespace
 
+    void setPlainConsoleLogger() {
+        logger::LogManager* manager = logger::globalLogManager();
+        manager->getGlobalDomain()->clearAppenders();
+        manager->getGlobalDomain()->attachAppender(
+                    logger::MessageLogDomain::AppenderAutoPtr(
+                            new logger::ConsoleAppender<logger::MessageEventEphemeral>(
+                                    new logger::MessageEventUnadornedEncoder)));
+    }
+
     bool handlePreValidationMongodOptions(const moe::Environment& params,
                                             const std::vector<std::string>& args) {
         if (params.count("help") &&
@@ -489,13 +499,15 @@ namespace mongo {
         }
         if (params.count("version") &&
             params["version"].as<bool>() == true) {
-            cout << mongodVersion() << endl;
+            setPlainConsoleLogger();
+            log() << mongodVersion() << endl;
             printGitVersion();
             printOpenSSLVersion();
             return false;
         }
         if (params.count("sysinfo") &&
             params["sysinfo"].as<bool>() == true) {
+            setPlainConsoleLogger();
             sysRuntimeInfo();
             return false;
         }
@@ -675,11 +687,11 @@ namespace mongo {
             if (!ret.isOK()) {
                 return ret;
             }
-            ret = params->set("storage.mmapv1.journal.debugFlags", moe::Value(durOptions));
+            ret = params->remove("durOptions");
             if (!ret.isOK()) {
                 return ret;
             }
-            ret = params->remove("durOptions");
+            ret = params->set("storage.mmapv1.journal.debugFlags", moe::Value(durOptions));
             if (!ret.isOK()) {
                 return ret;
             }
@@ -931,8 +943,8 @@ namespace mongo {
             mmapv1GlobalOptions.syncdelay = params["storage.mmapv1.syncPeriodSecs"].as<double>();
         }
 
-        if (params.count("storage.mmapv1.directoryPerDB")) {
-            mmapv1GlobalOptions.directoryperdb = params["storage.mmapv1.directoryPerDB"].as<bool>();
+        if (params.count("storage.directoryPerDB")) {
+            storageGlobalParams.directoryperdb = params["storage.directoryPerDB"].as<bool>();
         }
         if (params.count("cpu")) {
             serverGlobalParams.cpu = params["cpu"].as<bool>();

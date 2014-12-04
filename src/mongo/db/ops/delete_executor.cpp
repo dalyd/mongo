@@ -26,7 +26,7 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kWrites
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kWrite
 
 #include "mongo/platform/basic.h"
 
@@ -46,7 +46,8 @@
 
 namespace mongo {
 
-    DeleteExecutor::DeleteExecutor(const DeleteRequest* request) :
+    DeleteExecutor::DeleteExecutor(OperationContext* txn, const DeleteRequest* request) :
+        _txn(txn),
         _request(request),
         _canonicalQuery(),
         _isQueryParsed(false) {
@@ -66,8 +67,7 @@ namespace mongo {
         }
 
         CanonicalQuery* cqRaw;
-        const WhereCallbackReal whereCallback(
-                                    _request->getOpCtx(), _request->getNamespaceString().db());
+        const WhereCallbackReal whereCallback(_txn, _request->getNamespaceString().db());
 
         Status status = CanonicalQuery::canonicalize(_request->getNamespaceString().ns(),
                                                      _request->getQuery(),
@@ -110,10 +110,14 @@ namespace mongo {
             }
         }
 
-        // Note that 'collection' may by NULL in the case that the collection we are trying to
-        // delete from does not exist. NULL 'collection' is handled by getExecutorDelete(); we
-        // expect to get back a plan executor whose plan is a DeleteStage on top of an EOFStage.
-        Collection* collection = db->getCollection(_request->getOpCtx(), ns.ns());
+        // Note that 'collection' may by NULL in the case that the collection or database we are
+        // trying to delete from does not exist. NULL 'collection' is handled by
+        // getExecutorDelete(); we expect to get back a plan executor whose plan is a DeleteStage
+        // on top of an EOFStage.
+        Collection* collection = NULL;
+        if (db) {
+            collection = db->getCollection(_txn, ns.ns());
+        }
 
         if (collection && collection->isCapped()) {
             return Status(ErrorCodes::IllegalOperation,
@@ -141,7 +145,7 @@ namespace mongo {
         Status getExecStatus = Status::OK();
         if (_canonicalQuery.get()) {
             // This is the non-idhack branch.
-            getExecStatus = getExecutorDelete(_request->getOpCtx(),
+            getExecStatus = getExecutorDelete(_txn,
                                               collection,
                                               _canonicalQuery.release(),
                                               _request->isMulti(),
@@ -153,7 +157,7 @@ namespace mongo {
         }
         else {
             // This is the idhack branch.
-            getExecStatus = getExecutorDelete(_request->getOpCtx(),
+            getExecStatus = getExecutorDelete(_txn,
                                               collection,
                                               ns.ns(),
                                               _request->getQuery(),

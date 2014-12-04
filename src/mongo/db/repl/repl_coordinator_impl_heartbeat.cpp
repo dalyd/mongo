@@ -134,7 +134,7 @@ namespace {
             networkTime = cbData.response.getValue().elapsedMillis;
         }
         else {
-            LOG(1) << "Error in heartbeat request to " << target << "; " << responseStatus;
+            log() << "Error in heartbeat request to " << target << "; " << responseStatus;
             if (!resp.isEmpty()) {
                 LOG(3) << "heartbeat response: " << resp;
             }
@@ -164,12 +164,7 @@ namespace {
             }
         }
 
-        std::for_each(_stepDownWaiters.begin(),
-                      _stepDownWaiters.end(),
-                      stdx::bind(&ReplicationExecutor::signalEvent,
-                                 &_replExecutor,
-                                 stdx::placeholders::_1));
-        _stepDownWaiters.clear();
+        _signalStepDownWaiters();
 
         _scheduleHeartbeatToTarget(
                 target,
@@ -283,6 +278,7 @@ namespace {
         // TODO Add invariant that we've got global shared or global exclusive lock, when supported
         // by lock manager.
         boost::unique_lock<boost::mutex> lk(_mutex);
+        _topCoord->stepDownIfPending();
         const PostMemberStateUpdateAction action =
             _updateCurrentMemberStateFromTopologyCoordinator_inlock();
         lk.unlock();
@@ -411,7 +407,8 @@ namespace {
                     "it is invalid: "<< myIndex.getStatus();
         }
         else {
-            boost::scoped_ptr<OperationContext> txn(_externalState->createOperationContext());
+            boost::scoped_ptr<OperationContext> txn(
+                                      _externalState->createOperationContext("WriteReplSetConfig"));
             Status status = _externalState->storeLocalConfigDocument(txn.get(), newConfig.toBSON());
 
             lk.lock();
@@ -427,6 +424,10 @@ namespace {
                 }
                 return;
             }
+
+            lk.unlock();
+
+            _externalState->startThreads();
         }
 
         const stdx::function<void (const ReplicationExecutor::CallbackData&)> reconfigFinishFn(
@@ -460,6 +461,22 @@ namespace {
         invariant(_rsConfigState == kConfigHBReconfiguring);
         invariant(!_rsConfig.isInitialized() ||
                   _rsConfig.getConfigVersion() < newConfig.getConfigVersion());
+
+        if (_getCurrentMemberState_inlock().primary() && !cbData.txn) {
+            // Not having an OperationContext in the CallbackData means we definitely aren't holding
+            // the global lock.  Since we're primary and this reconfig could cause us to stepdown,
+            // reschedule this work with the global exclusive lock so the stepdown is safe.
+            // TODO(spencer): When we *do* have an OperationContext, consult it to confirm that
+            // we are indeed holding the global lock.
+            _replExecutor.scheduleWorkWithGlobalExclusiveLock(
+                    stdx::bind(&ReplicationCoordinatorImpl::_heartbeatReconfigFinish,
+                               this,
+                               stdx::placeholders::_1,
+                               newConfig,
+                               myIndex));
+            return;
+        }
+
         if (!myIndex.isOK()) {
             switch (myIndex.getStatus().code()) {
             case ErrorCodes::NodeNotFound:

@@ -124,6 +124,7 @@ namespace {
         _forceSyncSourceIndex(-1),
         _maxSyncSourceLagSecs(maxSyncSourceLagSecs),
         _selfIndex(-1),
+        _stepDownPending(false),
         _stepDownUntil(0),
         _electionSleepUntil(0),
         _maintenanceModeCalls(0),
@@ -301,7 +302,10 @@ namespace {
         if (closestIndex == -1) {
             // Did not find any members to sync from
             std::string msg("could not find member to sync from");
-            log() << msg << rsLog;
+            // Only log when we had a valid sync source before
+            if (!_syncSource.empty()) {
+                log() << msg << rsLog;
+            }
             setMyHeartbeatMessage(now, msg);
 
             _syncSource = HostAndPort();
@@ -400,8 +404,7 @@ namespace {
         if (hbdata.getOpTime().getSecs()+10 < lastOpApplied.getSecs()) {
             warning() << "attempting to sync from " << target
                       << ", but its latest opTime is " << hbdata.getOpTime().getSecs()
-                      << " and ours is " << lastOpApplied.getSecs() << " so this may not work"
-                      << rsLog;
+                      << " and ours is " << lastOpApplied.getSecs() << " so this may not work";
             response->append("warning",
                              str::stream() << "requested member \"" << target.toString() <<
                                      "\" is more than 10 seconds behind us");
@@ -460,7 +463,7 @@ namespace {
         response->append("fresher", weAreFresher);
 
         std::string errmsg;
-        bool doVeto = _shouldVetoMember(args.id, now, lastOpApplied, &errmsg);
+        bool doVeto = _shouldVetoMember(args, now, lastOpApplied, &errmsg);
         response->append("veto", doVeto);
         if (doVeto) {
             response->append("errmsg", errmsg);
@@ -468,10 +471,18 @@ namespace {
         *result = Status::OK();
     }
 
-    bool TopologyCoordinatorImpl::_shouldVetoMember(unsigned int memberID,
-                                                    const Date_t& now,
-                                                    const OpTime& lastOpApplied,
-                                                    std::string* errmsg) const {
+    bool TopologyCoordinatorImpl::_shouldVetoMember(
+            const ReplicationCoordinator::ReplSetFreshArgs& args,
+            const Date_t& now,
+            const OpTime& lastOpApplied,
+            std::string* errmsg) const {
+
+        if (_currentConfig.getConfigVersion() < args.cfgver) {
+            // We are stale; do not veto.
+            return false;
+        }
+
+        const unsigned int memberID = args.id;
         const int hopefulIndex = _getMemberIndex(memberID);
         invariant(hopefulIndex != _selfIndex);
         const int highestPriorityIndex = _getHighestPriorityElectableIndex(now, lastOpApplied);
@@ -602,8 +613,10 @@ namespace {
             _lastVote.whoHostAndPort = hopeful->getHostAndPort();
             vote = _selfConfig().getNumVotes();
             invariant(hopeful->getId() == args.whoid);
-            log() << "replSetElect voting yea for " << hopeful->getHostAndPort().toString()
-                  << " (" << args.whoid << ')';
+            if (vote > 0) {
+                log() << "replSetElect voting yea for " << hopeful->getHostAndPort().toString()
+                      << " (" << args.whoid << ')';
+            }
         }
 
         response->append("vote", vote);
@@ -654,7 +667,11 @@ namespace {
 
         // This is a replica set
         response->noteReplSet();
-        response->setSetName(ourSetName);
+
+        // For 2.6 compatibility
+        if (_currentConfig.isInitialized()) {
+            response->setSetName(ourSetName);
+        }
         response->setState(myState.s);
         if (myState.primary()) {
             response->setElectionTime(_electionTime);
@@ -856,15 +873,15 @@ namespace {
         invariant(memberIndex != _selfIndex);
 
         MemberHeartbeatData& hbData = _hbdata[memberIndex];
+        const MemberConfig member = _currentConfig.getMemberAt(memberIndex);
         if (!hbResponse.isOK()) {
             if (isUnauthorized) {
                 LOG(3) << "setAuthIssue: heartbeat response failed due to authentication"
-                    " issue for member _id:"
-                       << _currentConfig.getMemberAt(memberIndex).getId();
+                    " issue for member _id:" << member.getId();
                 hbData.setAuthIssue(now);
             } else {
                 LOG(3) << "setDownValues: heartbeat response failed for member _id:"
-                       << _currentConfig.getMemberAt(memberIndex).getId() << ", msg:  "
+                       << member.getId() << ", msg:  "
                        << hbResponse.getStatus().reason();
 
                 hbData.setDownValues(now, hbResponse.getStatus().reason());
@@ -873,9 +890,9 @@ namespace {
         else {
             ReplSetHeartbeatResponse hbr = hbResponse.getValue();
             LOG(3) << "setUpValues: heartbeat response good for member _id:"
-                   << _currentConfig.getMemberAt(memberIndex).getId() << ", msg:  "
+                   << member.getId() << ", msg:  "
                    << hbr.getHbMsg();
-            hbData.setUpValues(now, hbr);
+            hbData.setUpValues(now, member.getHostAndPort(), hbr);
         }
         HeartbeatResponseAction nextAction = _updateHeartbeatDataImpl(
                 memberIndex,
@@ -940,6 +957,10 @@ namespace {
                     const OpTime latestOpTime = _latestKnownOpTime(lastOpApplied);
 
                     if (_iAmPrimary()) {
+                        if (_stepDownPending) {
+                            return HeartbeatResponseAction::makeNoAction();
+                        }
+                        _stepDownPending = true;
                         log() << "Stepping down self (priority "
                               << currentPrimaryMember.getPriority() << ") because "
                               << highestPriorityMember.getHostAndPort() << " has higher priority "
@@ -952,7 +973,7 @@ namespace {
                         if (_electionSleepUntil < until) {
                             _electionSleepUntil = until;
                         }
-                        return _stepDownSelf();
+                        return HeartbeatResponseAction::makeStepDownSelfAction(_selfIndex);
                     }
                     else if ((highestPriorityMemberOptime == _selfIndex) &&
                              (_electionSleepUntil <= now)) {
@@ -1013,8 +1034,12 @@ namespace {
 
                     // Step down whomever has the older election time.
                     if (remoteElectionTime > _electionTime) {
+                        if (_stepDownPending) {
+                            return HeartbeatResponseAction::makeNoAction();
+                        }
+                        _stepDownPending = true;
                         log() << "stepping down; another primary was elected more recently";
-                        return _stepDownSelfAndReplaceWith(remotePrimaryIndex);
+                        return HeartbeatResponseAction::makeStepDownSelfAction(_selfIndex);
                     }
                     else {
                         log() << "another PRIMARY detected and it should step down"
@@ -1039,8 +1064,12 @@ namespace {
         // stepdown if we can't.
         if (_iAmPrimary()) {
             if (CannotSeeMajority & _getMyUnelectableReason(now, lastOpApplied)) {
+                if (_stepDownPending) {
+                    return HeartbeatResponseAction::makeNoAction();
+                }
+                _stepDownPending = true;
                 log() << "can't see a majority of the set, relinquishing primary";
-                return _stepDownSelf();
+                return HeartbeatResponseAction::makeStepDownSelfAction(_selfIndex);
             }
 
             LOG(2) << "Choosing to remain primary";
@@ -1189,6 +1218,7 @@ namespace {
             _followerMode = newMemberState.s;
             if (_currentPrimaryIndex == _selfIndex) {
                 _currentPrimaryIndex = -1;
+                _stepDownPending = false;
             }
             break;
         case MemberState::RS_STARTUP:
@@ -1227,6 +1257,7 @@ namespace {
                 hbResponse.setHbMsg("");
                 _hbdata[primaryIndex].setUpValues(
                         _hbdata[primaryIndex].getLastHeartbeat(),
+                        _currentConfig.getMemberAt(primaryIndex).getHostAndPort(),
                         hbResponse);
             }
             _currentPrimaryIndex = primaryIndex;
@@ -1448,6 +1479,9 @@ namespace {
             }
         }
         response->setMe(selfConfig.getHostAndPort());
+        if (_iAmPrimary()) {
+            response->setElectionId(_electionId);
+        }
     }
 
     void TopologyCoordinatorImpl::prepareFreezeResponse(
@@ -1587,6 +1621,7 @@ namespace {
 
         // By this point we know we are in Role::follower
         _currentPrimaryIndex = -1; // force secondaries to re-detect who the primary is
+        _stepDownPending = false;
 
         if (_followerMode == MemberState::RS_SECONDARY &&
                 _currentConfig.getNumMembers() == 1 &&
@@ -1880,7 +1915,7 @@ namespace {
             return false;
         }
         _stepDownUntil = until;
-        _stepDownSelf();
+        _stepDownSelfAndReplaceWith(-1);
         return true;
     }
 
@@ -1913,18 +1948,42 @@ namespace {
         }
     }
 
-    HeartbeatResponseAction TopologyCoordinatorImpl::_stepDownSelf() {
-        return _stepDownSelfAndReplaceWith(-1);
+    bool TopologyCoordinatorImpl::stepDownIfPending() {
+        if (!_stepDownPending) {
+            return false;
+        }
+
+        int remotePrimaryIndex = -1;
+        for (std::vector<MemberHeartbeatData>::const_iterator it = _hbdata.begin();
+                it != _hbdata.end(); ++it) {
+            const int itIndex = indexOfIterator(_hbdata, it);
+            if (itIndex == _selfIndex) {
+                continue;
+            }
+
+            if (it->getState().primary() && it->up()) {
+                if (remotePrimaryIndex != -1) {
+                    // two other nodes think they are primary (asynchronously polled)
+                    // -- wait for things to settle down.
+                    remotePrimaryIndex = -1;
+                    log() << "replSet info two remote primaries (transiently)";
+                    break;
+                }
+                remotePrimaryIndex = itIndex;
+            }
+        }
+        _stepDownSelfAndReplaceWith(remotePrimaryIndex);
+        return true;
     }
 
-    HeartbeatResponseAction TopologyCoordinatorImpl::_stepDownSelfAndReplaceWith(int newPrimary) {
+    void TopologyCoordinatorImpl::_stepDownSelfAndReplaceWith(int newPrimary) {
         invariant(_role == Role::leader);
         invariant(_selfIndex != -1);
         invariant(_selfIndex != newPrimary);
         invariant(_selfIndex == _currentPrimaryIndex);
         _currentPrimaryIndex = newPrimary;
         _role = Role::follower;
-        return HeartbeatResponseAction::makeStepDownSelfAction(_selfIndex);
+        _stepDownPending = false;
     }
 
     void TopologyCoordinatorImpl::adjustMaintenanceCountBy(int inc) {

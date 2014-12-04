@@ -28,7 +28,7 @@
  */
 
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kNetworking
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kNetwork
 
 #include "mongo/platform/basic.h"
 
@@ -71,30 +71,40 @@ namespace mongo {
         return _ns;
     }
 
-    static void _checkCursor( DBClientCursor * cursor ) {
-        verify( cursor );
-        
-        if ( cursor->hasResultFlag( ResultFlag_ShardConfigStale ) ) {
+    /**
+     * Throws a RecvStaleConfigException wrapping the stale error document in this cursor when the
+     * ShardConfigStale flag is set or a command returns a SendStaleConfigCode error code.
+     */
+    static void throwCursorStale(DBClientCursor* cursor) {
+        verify(cursor);
+
+        if (cursor->hasResultFlag(ResultFlag_ShardConfigStale)) {
             BSONObj error;
-            cursor->peekError( &error );
-            throw RecvStaleConfigException( "_checkCursor", error );
-        }
-        
-        if ( cursor->hasResultFlag( ResultFlag_ErrSet ) ) {
-            BSONObj o = cursor->next();
-            throw UserException( o["code"].numberInt() , o["$err"].String() );
+            cursor->peekError(&error);
+            throw RecvStaleConfigException("query returned a stale config error", error);
         }
 
-        if ( NamespaceString( cursor->getns() ).isCommand() ) {
-            // For backwards compatibility with v2.0 mongods because in 2.0 commands that care about
-            // versioning (like the count command) will return with the stale config error code, but
-            // don't set the ShardConfigStale result flag on the cursor.
-            // TODO: This should probably be removed for 2.3, as we'll no longer need to support
-            // running with a 2.0 mongod.
+        if (NamespaceString(cursor->getns()).isCommand()) {
+            // Commands that care about versioning (like the count or geoNear command) sometimes
+            // return with the stale config error code, but don't set the ShardConfigStale result
+            // flag on the cursor.
+            // TODO: Standardize stale config reporting.
             BSONObj res = cursor->peekFirst();
-            if ( res.hasField( "code" ) && res["code"].Number() == SendStaleConfigCode ) {
-                throw RecvStaleConfigException( "_checkCursor", res );
+            if (res.hasField("code") && res["code"].Number() == SendStaleConfigCode) {
+                throw RecvStaleConfigException("command returned a stale config error", res);
             }
+        }
+    }
+
+    /**
+     * Throws an exception wrapping the error document in this cursor when the error flag is set.
+     */
+    static void throwCursorError(DBClientCursor* cursor) {
+        verify(cursor);
+
+        if (cursor->hasResultFlag(ResultFlag_ErrSet)) {
+            BSONObj o = cursor->next();
+            throw UserException(o["code"].numberInt(), o["$err"].str());
         }
     }
 
@@ -166,6 +176,9 @@ namespace mongo {
                         if (execStats.hasField("totalDocsExamined")) {
                             docsExamined += execStats["totalDocsExamined"].numberLong();
                         }
+                        if (execStats.hasField("executionTimeMillis")) {
+                            millis += execStats["executionTimeMillis"].numberLong();
+                        }
                     }
                     else {
                         // Here we assume that the shard gave us back explain 1.0 style output.
@@ -178,9 +191,25 @@ namespace mongo {
                         if (temp.hasField("nscannedObjects")) {
                             docsExamined += temp["nscannedObjects"].numberLong();
                         }
+                        if (temp.hasField("millis")) {
+                            millis += temp["millis"].numberLong();
+                        }
+                        if (String == temp["cursor"].type()) {
+                            if (cursorType.empty()) {
+                                cursorType = temp["cursor"].String();
+                            }
+                            else if (cursorType != temp["cursor"].String()) {
+                                cursorType = "multiple";
+                            }
+                        }
+                        if (Object == temp["indexBounds"].type()) {
+                            indexBounds = temp["indexBounds"].Obj();
+                        }
+                        if (Object == temp["oldPlan"].type()) {
+                            oldPlan = temp["oldPlan"].Obj();
+                        }
                     }
 
-                    millis += temp["executionStats"]["executionTimeMillis"].numberLong();
                     numExplains++;
                 }
                 y.done();
@@ -188,11 +217,13 @@ namespace mongo {
             x.done();
         }
 
-        b.append( "cursor" , cursorType );
+        if ( !cursorType.empty() ) {
+            b.append( "cursor" , cursorType );
+        }
 
-        b.appendNumber( "nReturned" , nReturned );
-        b.appendNumber( "totalKeysExamined" , keysExamined );
-        b.appendNumber( "totalDocsExamined" , docsExamined );
+        b.appendNumber( "n" , nReturned );
+        b.appendNumber( "nscanned" , keysExamined );
+        b.appendNumber( "nscannedObjects" , docsExamined );
 
         b.appendNumber( "millisShardTotal" , millis );
         b.append( "millisShardAvg" , 
@@ -614,13 +645,15 @@ namespace mongo {
         else if( primary ) todo.insert( *primary );
 
         // Close all cursors on extra shards first, as these will be invalid
-        for( map< Shard, PCMData >::iterator i = _cursorMap.begin(), end = _cursorMap.end(); i != end; ++i ){
+        for (map<Shard, PCMData>::iterator i = _cursorMap.begin(), end = _cursorMap.end(); i != end;
+            ++i) {
+            if (todo.find(i->first) == todo.end()) {
 
-            LOG( pc ) << "closing cursor on shard " << i->first
-                << " as the connection is no longer required by " << vinfo << endl;
+                LOG( pc ) << "closing cursor on shard " << i->first
+                          << " as the connection is no longer required by " << vinfo << endl;
 
-            // Force total cleanup of these connections
-            if( todo.find( i->first ) == todo.end() ) i->second.cleanup();
+                i->second.cleanup(true);
+            }
         }
 
         verify( todo.size() );
@@ -672,7 +705,7 @@ namespace mongo {
                     }
                     else {
                         // Force total cleanup of connection if no longer compatible
-                        mdata.cleanup();
+                        mdata.cleanup( true );
                     }
                 }
                 else {
@@ -805,7 +838,7 @@ namespace mongo {
                 e._shard = shard.getName();
                 mdata.errored = true;
                 if( returnPartial ){
-                    mdata.cleanup();
+                    mdata.cleanup( true );
                     continue;
                 }
                 throw;
@@ -815,7 +848,7 @@ namespace mongo {
                 e._shard = shard.getName();
                 mdata.errored = true;
                 if( returnPartial && e.getCode() == 15925 /* From above! */ ){
-                    mdata.cleanup();
+                    mdata.cleanup( true );
                     continue;
                 }
                 throw;
@@ -914,8 +947,9 @@ namespace mongo {
                     mdata.completed = true;
 
                     // Make sure we didn't get an error we should rethrow
-                    // TODO : Rename/refactor this to something better
-                    _checkCursor( state->cursor.get() );
+                    // TODO : Refactor this to something better
+                    throwCursorStale( state->cursor.get() );
+                    throwCursorError( state->cursor.get() );
 
                     // Finalize state
                     state->cursor->attach( state->conn.get() ); // Closes connection for us
@@ -935,14 +969,14 @@ namespace mongo {
                 staleNSExceptions[ staleNS ] = e;
 
                 // Fully clear this cursor, as it needs to be re-established
-                mdata.cleanup();
+                mdata.cleanup( true );
                 continue;
             }
             catch( SocketException& e ){
                 warning() << "socket exception when finishing on " << shard << ", current connection state is " << mdata.toBSON() << causedBy( e ) << endl;
                 mdata.errored = true;
                 if( returnPartial ){
-                    mdata.cleanup();
+                    mdata.cleanup( true );
                     continue;
                 }
                 throw;
@@ -958,7 +992,7 @@ namespace mongo {
 
                     mdata.errored = true;
                     if (returnPartial) {
-                        mdata.cleanup();
+                        mdata.cleanup( true );
                         continue;
                     }
                     throw;
@@ -1318,7 +1352,9 @@ namespace mongo {
 
                 try {
                     _cursors[i].get()->attach( conns[i].get() ); // this calls done on conn
-                    _checkCursor( _cursors[i].get() );
+                    // Rethrow stale config or other errors
+                    throwCursorStale( _cursors[i].get() );
+                    throwCursorError( _cursors[i].get() );
 
                     finishedQueries++;
                 }
@@ -1570,6 +1606,9 @@ namespace mongo {
 
                 uassert(14812,  str::stream() << "Error running command on server: " << _server, finished);
                 massert(14813, "Command returned nothing", _cursor->more());
+
+                // Rethrow stale config errors stored in this cursor for correct handling
+                throwCursorStale(_cursor.get());
 
                 _res = _cursor->nextSafe();
                 _ok = _res["ok"].trueValue();

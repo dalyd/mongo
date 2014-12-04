@@ -30,12 +30,18 @@
 
 #include <boost/static_assert.hpp>
 #include <string>
+#include <limits>
 
 #include "mongo/base/string_data.h"
 #include "mongo/platform/cstdint.h"
 #include "mongo/platform/hash_namespace.h"
 
 namespace mongo {
+
+    class Locker;
+
+    struct LockHead;
+    struct PartitionedLockHead;
 
     /**
      * Lock modes.
@@ -137,48 +143,43 @@ namespace mongo {
         // Generic resources
         RESOURCE_DATABASE,
         RESOURCE_COLLECTION,
-        RESOURCE_DOCUMENT,
-        RESOURCE_MMAPv1_EXTENT_MANAGER, // Only for MMAPv1 engine, keyed on database name
+        RESOURCE_METADATA,
 
         // Counts the rest. Always insert new resource types above this entry.
         ResourceTypesCount
     };
-
-    // We only use 3 bits for the resource type in the ResourceId hash
-    BOOST_STATIC_ASSERT(ResourceTypesCount <= 8);
 
     /**
      * Returns a human-readable name for the specified resource type.
      */
     const char* resourceTypeName(ResourceType resourceType);
 
-
     /**
      * Uniquely identifies a lockable resource.
      */
     class ResourceId {
+        // We only use 3 bits for the resource type in the ResourceId hash
+        enum {resourceTypeBits = 3};
+        BOOST_STATIC_ASSERT(ResourceTypesCount <= (1 << resourceTypeBits));
+
     public:
         ResourceId() : _fullHash(0) { }
         ResourceId(ResourceType type, const StringData& ns);
         ResourceId(ResourceType type, const std::string& ns);
         ResourceId(ResourceType type, uint64_t hashId);
 
-        bool isValid() const { return _type != RESOURCE_INVALID; }
+        bool isValid() const { return getType() != RESOURCE_INVALID; }
 
         operator uint64_t() const {
             return _fullHash;
         }
 
-        bool operator== (const ResourceId& other) const {
-            return _fullHash == other._fullHash;
-        }
-
         ResourceType getType() const {
-            return static_cast<ResourceType>(_type);
+            return static_cast<ResourceType>(_fullHash >> (64 - resourceTypeBits));
         }
 
         uint64_t getHashId() const {
-            return _hashId;
+            return _fullHash & (std::numeric_limits<uint64_t>::max() >> resourceTypeBits);
         }
 
         std::string toString() const;
@@ -186,33 +187,160 @@ namespace mongo {
     private:
 
         /**
-         * 64-bit hash of the resource
+         * The top 'resourceTypeBits' bits of '_fullHash' represent the resource type,
+         * while the remaining bits contain the bottom bits of the hashId. This avoids false
+         * conflicts between resources of different types, which is necessary to prevent deadlocks.
          */
-        union {
-            struct {
-                uint64_t     _type   : 3;
-                uint64_t     _hashId : 61;
-            };
+        uint64_t _fullHash;
 
-            uint64_t _fullHash;
-        };
+        static uint64_t fullHash(ResourceType type, uint64_t hashId);
 
 #ifdef _DEBUG
-        // Keep the complete namespace name for debugging purposes (TODO: this will be removed once
-        // we are confident in the robustness of the lock manager).
+        // Keep the complete namespace name for debugging purposes (TODO: this will be
+        // removed once we are confident in the robustness of the lock manager).
         std::string _nsCopy;
 #endif
     };
 
 #ifndef _DEBUG
-    // Treat the resource ids as 64-bit integers in release mode in order to ensure we do not
-    // spend too much time doing comparisons for hashing.
+    // Treat the resource ids as 64-bit integers in release mode in order to ensure we do
+    // not spend too much time doing comparisons for hashing.
     BOOST_STATIC_ASSERT(sizeof(ResourceId) == sizeof(uint64_t));
 #endif
 
 
     // Type to uniquely identify a given locker object
     typedef uint64_t LockerId;
+
+
+    /**
+     * Interface on which granted lock requests will be notified. See the contract for the notify
+     * method for more information and also the LockManager::lock call.
+     *
+     * The default implementation of this method would simply block on an event until notify has
+     * been invoked (see CondVarLockGrantNotification).
+     *
+     * Test implementations could just count the number of notifications and their outcome so that
+     * they can validate locks are granted as desired and drive the test execution.
+     */
+    class LockGrantNotification {
+    public:
+        virtual ~LockGrantNotification() {}
+
+        /**
+         * This method is invoked at most once for each lock request and indicates the outcome of
+         * the lock acquisition for the specified resource id.
+         *
+         * Cases where it won't be called are if a lock acquisition (be it in waiting or converting
+         * state) is cancelled through a call to unlock.
+         *
+         * IMPORTANT: This callback runs under a spinlock for the lock manager, so the work done
+         *            inside must be kept to a minimum and no locks or operations which may block
+         *            should be run. Also, no methods which call back into the lock manager should
+         *            be invoked from within this methods (LockManager is not reentrant).
+         *
+         * @resId ResourceId for which a lock operation was previously called.
+         * @result Outcome of the lock operation.
+         */
+        virtual void notify(ResourceId resId, LockResult result) = 0;
+    };
+
+
+    /**
+     * There is one of those entries per each request for a lock. They hang on a linked list off
+     * the LockHead or off a PartitionedLockHead and also are in a map for each Locker. This
+     * structure is not thread-safe.
+     *
+     * LockRequest are owned by the Locker class and it controls their lifetime. They should not
+     * be deleted while on the LockManager though (see the contract for the lock/unlock methods).
+     */
+    struct LockRequest {
+
+        enum Status {
+            STATUS_NEW,
+            STATUS_GRANTED,
+            STATUS_WAITING,
+            STATUS_CONVERTING,
+        };
+
+        /**
+         * Used for initialization of a LockRequest, which might have been retrieved from cache.
+         */
+        void initNew(Locker* locker, LockGrantNotification* notify);
+
+
+        //
+        // These fields are maintained by the Locker class
+        //
+
+        // This is the Locker, which created this LockRequest. Pointer is not owned, just
+        // referenced. Must outlive the LockRequest.
+        Locker* locker;
+
+        // Not owned, just referenced. If a request is in the WAITING or CONVERTING state, must
+        // live at least until LockManager::unlock is cancelled or the notification has been
+        // invoked.
+        LockGrantNotification* notify;
+
+
+        //
+        // These fields are maintained by both the LockManager and Locker class
+        //
+
+        // If the request cannot be granted right away, whether to put it at the front or at the
+        // end of the queue. By default, requests are put at the back. If a request is requested
+        // to be put at the front, this effectively bypasses fairness. Default is FALSE.
+        bool enqueueAtFront;
+
+        // When this request is granted and as long as it is on the granted queue, the particular
+        // resource's policy will be changed to "compatibleFirst". This means that even if there
+        // are pending requests on the conflict queue, if a compatible request comes in it will be
+        // granted immediately. This effectively turns off fairness.
+        bool compatibleFirst;
+
+        // When set, an attempt is made to execute this request using partitioned lockheads.
+        // This speeds up the common case where all requested locking modes are compatible with
+        // each other, at the cost of extra overhead for conflicting modes.
+        bool partitioned;
+
+        // How many times has LockManager::lock been called for this request. Locks are released
+        // when their recursive count drops to zero.
+        unsigned recursiveCount;
+
+        //
+        // These fields are owned and maintained by the LockManager class exclusively
+        //
+
+
+        // Pointer to the lock to which this request belongs, or null if this request has not yet
+        // been assigned to a lock or if it belongs to the PartitionedLockHead for locker. The
+        // LockHead should be alive as long as there are LockRequests on it, so it is safe to have
+        // this pointer hanging around.
+        LockHead* lock;
+
+        // Pointer to the partitioned lock to which this request belongs, or null if it is not
+        // partitioned. Only one of 'lock' and 'partitionedLock' is non-NULL, and a request can
+        // only transition from 'partitionedLock' to 'lock', never the other way around.
+        PartitionedLockHead* partitionedLock;
+
+        // The reason intrusive linked list is used instead of the std::list class is to allow
+        // for entries to be removed from the middle of the list in O(1) time, if they are known
+        // instead of having to search for them and we cannot persist iterators, because the list
+        // can be modified while an iterator is held.
+        LockRequest* prev;
+        LockRequest* next;
+
+        // Current status of this request.
+        Status status;
+
+        // If not granted, the mode which has been requested for this lock. If granted, the mode
+        // in which it is currently granted.
+        LockMode mode;
+
+        // This value is different from MODE_NONE only if a conversion is requested for a lock and
+        // that conversion cannot be immediately granted.
+        LockMode convertMode;
+    };
 
 } // namespace mongo
 

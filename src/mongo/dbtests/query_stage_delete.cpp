@@ -67,7 +67,7 @@ namespace QueryStageDelete {
 
         void getLocs(Collection* collection,
                      CollectionScanParams::Direction direction,
-                     vector<DiskLoc>* out) {
+                     vector<RecordId>* out) {
             WorkingSet ws;
 
             CollectionScanParams params;
@@ -110,8 +110,8 @@ namespace QueryStageDelete {
 
             Collection* coll = ctx.getCollection();
 
-            // Get the DiskLocs that would be returned by an in-order scan.
-            vector<DiskLoc> locs;
+            // Get the RecordIds that would be returned by an in-order scan.
+            vector<RecordId> locs;
             getLocs(coll, CollectionScanParams::FORWARD, &locs);
 
             // Configure the scan.
@@ -142,7 +142,7 @@ namespace QueryStageDelete {
 
             // Remove locs[targetDocIndex];
             deleteStage.saveState();
-            deleteStage.invalidate(locs[targetDocIndex], INVALIDATION_DELETION);
+            deleteStage.invalidate(&_txn, locs[targetDocIndex], INVALIDATION_DELETION);
             BSONObj targetDoc = coll->docFor(&_txn, locs[targetDocIndex]);
             ASSERT(!targetDoc.isEmpty());
             remove(targetDoc);

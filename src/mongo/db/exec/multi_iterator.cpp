@@ -30,7 +30,24 @@
 
 #include "mongo/db/exec/multi_iterator.h"
 
+#include "mongo/db/exec/working_set_common.h"
+#include "mongo/db/storage/record_fetcher.h"
+
 namespace mongo {
+
+    MultiIteratorStage::MultiIteratorStage(OperationContext* txn,
+                                           WorkingSet* ws,
+                                           Collection* collection)
+        : _txn(txn),
+          _collection(collection),
+          _ws(ws),
+          _wsidForFetch(_ws->allocate()) {
+        // We pre-allocate a WSM and use it to pass up fetch requests. This should never be used
+        // for anything other than passing up NEED_FETCH. We use the loc and unowned obj state, but
+        // the loc isn't really pointing at any obj. The obj field of the WSM should never be used.
+        WorkingSetMember* member = _ws->get(_wsidForFetch);
+        member->state = WorkingSetMember::LOC_AND_UNOWNED_OBJ;
+    }
 
     void MultiIteratorStage::addIterator(RecordIterator* it) {
         _iterators.push_back(it);
@@ -40,7 +57,24 @@ namespace mongo {
         if ( _collection == NULL )
             return PlanStage::DEAD;
 
-        DiskLoc next = _advance();
+        // The RecordId we're about to look at it might not be in memory. In this case
+        // we request a yield while we fetch the document.
+        if (!_iterators.empty()) {
+            RecordId curr = _iterators.back()->curr();
+            if (!curr.isNull()) {
+                std::auto_ptr<RecordFetcher> fetcher(_collection->documentNeedsFetch(_txn, curr));
+                if (NULL != fetcher.get()) {
+                    WorkingSetMember* member = _ws->get(_wsidForFetch);
+                    member->loc = curr;
+                    // Pass the RecordFetcher off to the WSM on which we're performing the fetch.
+                    member->setFetcher(fetcher.release());
+                    *out = _wsidForFetch;
+                    return NEED_FETCH;
+                }
+            }
+        }
+
+        RecordId next = _advance();
         if (next.isNull())
             return PlanStage::IS_EOF;
 
@@ -62,12 +96,14 @@ namespace mongo {
     }
 
     void MultiIteratorStage::saveState() {
+        _txn = NULL;
         for (size_t i = 0; i < _iterators.size(); i++) {
             _iterators[i]->saveState();
         }
     }
 
     void MultiIteratorStage::restoreState(OperationContext* opCtx) {
+        invariant(_txn == NULL);
         _txn = opCtx;
         for (size_t i = 0; i < _iterators.size(); i++) {
             if (!_iterators[i]->restoreState(opCtx)) {
@@ -76,7 +112,9 @@ namespace mongo {
         }
     }
 
-    void MultiIteratorStage::invalidate(const DiskLoc& dl, InvalidationType type) {
+    void MultiIteratorStage::invalidate(OperationContext* txn,
+                                        const RecordId& dl,
+                                        InvalidationType type) {
         switch ( type ) {
         case INVALIDATION_DELETION:
             for (size_t i = 0; i < _iterators.size(); i++) {
@@ -94,16 +132,16 @@ namespace mongo {
         return empty;
     }
 
-    DiskLoc MultiIteratorStage::_advance() {
+    RecordId MultiIteratorStage::_advance() {
         while (!_iterators.empty()) {
-            DiskLoc out = _iterators.back()->getNext();
+            RecordId out = _iterators.back()->getNext();
             if (!out.isNull())
                 return out;
 
             _iterators.popAndDeleteBack();
         }
 
-        return DiskLoc();
+        return RecordId();
     }
 
 } // namespace mongo

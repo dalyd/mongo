@@ -83,9 +83,10 @@ namespace mongo {
         }
 
         // we work from the back to the front since the back has the newest data.
-        const DiskLoc loc = _subIterators.back()->getNext();
+        const RecordId loc = _subIterators.back()->getNext();
         _subIterators.popAndDeleteBack();
 
+        // TODO: should we ever try and return NEED_FETCH here?
         if (!loc.isNull() && !_filter->matchesBSON(_collection->docFor(_txn, loc))) {
             _done = true;
             WorkingSetID id = _workingSet->allocate();
@@ -129,7 +130,7 @@ namespace mongo {
 
         if (!_filter->matchesBSON(member->obj)) {
             _done = true;
-            // DiskLoc is returned in *out.
+            // RecordId is returned in *out.
             return PlanStage::ADVANCED;
         }
         else {
@@ -140,13 +141,13 @@ namespace mongo {
 
     bool OplogStart::isEOF() { return _done; }
 
-    void OplogStart::invalidate(const DiskLoc& dl, InvalidationType type) {
+    void OplogStart::invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
         if (_needInit) { return; }
 
         if (INVALIDATION_DELETION != type) { return; }
 
         if (_cs) {
-            _cs->invalidate(dl, type);
+            _cs->invalidate(txn, dl, type);
         }
 
         for (size_t i = 0; i < _subIterators.size(); i++) {
@@ -155,6 +156,7 @@ namespace mongo {
     }
 
     void OplogStart::saveState() {
+        _txn = NULL;
         if (_cs) {
             _cs->saveState();
         }
@@ -165,6 +167,7 @@ namespace mongo {
     }
 
     void OplogStart::restoreState(OperationContext* opCtx) {
+        invariant(_txn == NULL);
         _txn = opCtx;
         if (_cs) {
             _cs->restoreState(opCtx);

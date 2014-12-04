@@ -29,7 +29,6 @@
 #include "mongo/db/concurrency/lock_mgr_test_help.h"
 #include "mongo/unittest/unittest.h"
 
-
 namespace mongo {
 
     TEST(ResourceId, Semantics) {
@@ -60,6 +59,21 @@ namespace mongo {
         ASSERT_EQUALS(resIdString, resIdStringData);
     }
 
+    TEST(ResourceId, Masking) {
+        const ResourceType maxRes = static_cast<ResourceType>(ResourceTypesCount - 1);
+        const uint64_t maxHash = (1ULL<<61) - 1; //  Only 61 bits usable for hash
+        ResourceType resources[3] = { maxRes, RESOURCE_GLOBAL, RESOURCE_METADATA };
+        uint64_t hashes[3] = {maxHash, maxHash / 3, maxHash / 3 * 2};
+
+        //  The test below verifies that types/hashes are stored/retrieved unchanged
+        for (int h = 0; h < 3; h++) {
+            for (int r = 0; r < 3; r++) {
+                ResourceId id(resources[r], hashes[h]);
+                ASSERT_EQUALS(id.getHashId(), hashes[h]);
+                ASSERT_EQUALS(id.getType(), resources[r]);
+            }
+        }
+    }
 
     //
     // LockManager
@@ -155,21 +169,18 @@ namespace mongo {
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
         MMAPV1LockerImpl locker(1);
-        TrackingLockGrantNotification notify;
-
-        LockRequest request;
-        request.initNew(&locker, &notify);
+        LockRequestCombo request(&locker);
 
         ASSERT(LOCK_OK == lockMgr.lock(resId, &request, MODE_S));
         ASSERT(request.mode == MODE_S);
         ASSERT(request.recursiveCount == 1);
-        ASSERT(notify.numNotifies == 0);
+        ASSERT(request.numNotifies == 0);
 
         // Acquire again, in the same mode
-        ASSERT(LOCK_OK == lockMgr.lock(resId, &request, MODE_S));
+        ASSERT(LOCK_OK == lockMgr.convert(resId, &request, MODE_S));
         ASSERT(request.mode == MODE_S);
         ASSERT(request.recursiveCount == 2);
-        ASSERT(notify.numNotifies == 0);
+        ASSERT(request.numNotifies == 0);
 
         // Release first acquire
         lockMgr.unlock(&request);
@@ -186,28 +197,25 @@ namespace mongo {
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
         MMAPV1LockerImpl locker(1);
-        TrackingLockGrantNotification notify;
-
-        LockRequest request;
-        request.initNew(&locker, &notify);
+        LockRequestCombo request(&locker);
 
         ASSERT(LOCK_OK == lockMgr.lock(resId, &request, MODE_IS));
         ASSERT(request.mode == MODE_IS);
         ASSERT(request.recursiveCount == 1);
-        ASSERT(notify.numNotifies == 0);
+        ASSERT(request.numNotifies == 0);
 
         // Acquire again, in *compatible*, but stricter mode
-        ASSERT(LOCK_OK == lockMgr.lock(resId, &request, MODE_S));
+        ASSERT(LOCK_OK == lockMgr.convert(resId, &request, MODE_S));
         ASSERT(request.mode == MODE_S);
         ASSERT(request.recursiveCount == 2);
-        ASSERT(notify.numNotifies == 0);
+        ASSERT(request.numNotifies == 0);
 
-        // Release first acquire
+        // Release the first acquire
         lockMgr.unlock(&request);
         ASSERT(request.mode == MODE_S);
         ASSERT(request.recursiveCount == 1);
 
-        // Release second acquire
+        // Release the second acquire
         lockMgr.unlock(&request);
         ASSERT(request.recursiveCount == 0);
     }
@@ -217,21 +225,18 @@ namespace mongo {
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
         MMAPV1LockerImpl locker(1);
-        TrackingLockGrantNotification notify;
-
-        LockRequest request;
-        request.initNew(&locker, &notify);
+        LockRequestCombo request(&locker);
 
         ASSERT(LOCK_OK == lockMgr.lock(resId, &request, MODE_S));
         ASSERT(request.mode == MODE_S);
         ASSERT(request.recursiveCount == 1);
-        ASSERT(notify.numNotifies == 0);
+        ASSERT(request.numNotifies == 0);
 
         // Acquire again, in *non-compatible*, but stricter mode
-        ASSERT(LOCK_OK == lockMgr.lock(resId, &request, MODE_X));
+        ASSERT(LOCK_OK == lockMgr.convert(resId, &request, MODE_X));
         ASSERT(request.mode == MODE_X);
         ASSERT(request.recursiveCount == 2);
-        ASSERT(notify.numNotifies == 0);
+        ASSERT(request.numNotifies == 0);
 
         // Release first acquire
         lockMgr.unlock(&request);
@@ -248,21 +253,18 @@ namespace mongo {
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
         MMAPV1LockerImpl locker(1);
-        TrackingLockGrantNotification notify;
-
-        LockRequest request;
-        request.initNew(&locker, &notify);
+        LockRequestCombo request(&locker);
 
         ASSERT(LOCK_OK == lockMgr.lock(resId, &request, MODE_X));
         ASSERT(request.mode == MODE_X);
         ASSERT(request.recursiveCount == 1);
-        ASSERT(notify.numNotifies == 0);
+        ASSERT(request.numNotifies == 0);
 
         // Acquire again, in *non-compatible*, but less strict mode
-        ASSERT(LOCK_OK == lockMgr.lock(resId, &request, MODE_S));
+        ASSERT(LOCK_OK == lockMgr.convert(resId, &request, MODE_S));
         ASSERT(request.mode == MODE_X);
         ASSERT(request.recursiveCount == 2);
-        ASSERT(notify.numNotifies == 0);
+        ASSERT(request.numNotifies == 0);
 
         // Release first acquire
         lockMgr.unlock(&request);
@@ -279,44 +281,38 @@ namespace mongo {
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
         MMAPV1LockerImpl locker1(1);
-        TrackingLockGrantNotification notify1;
-
         MMAPV1LockerImpl locker2(2);
-        TrackingLockGrantNotification notify2;        
 
-        LockRequest request1;
-        request1.initNew(&locker1, &notify1);
-
-        LockRequest request2;
-        request2.initNew(&locker2, &notify2);
+        LockRequestCombo request1(&locker1);
+        LockRequestCombo request2(&locker2);
 
         // First request granted right away
         ASSERT(LOCK_OK == lockMgr.lock(resId, &request1, MODE_S));
         ASSERT(request1.recursiveCount == 1);
-        ASSERT(notify1.numNotifies == 0);
+        ASSERT(request1.numNotifies == 0);
 
         // Second request must block
         ASSERT(LOCK_WAITING == lockMgr.lock(resId, &request2, MODE_X));
         ASSERT(request2.mode == MODE_X);
         ASSERT(request2.recursiveCount == 1);
-        ASSERT(notify2.numNotifies == 0);
+        ASSERT(request2.numNotifies == 0);
 
         // Release first request
         lockMgr.unlock(&request1);
         ASSERT(request1.recursiveCount == 0);
-        ASSERT(notify1.numNotifies == 0);
+        ASSERT(request1.numNotifies == 0);
 
         ASSERT(request2.mode == MODE_X);
         ASSERT(request2.recursiveCount == 1);
-        ASSERT(notify2.numNotifies == 1);
-        ASSERT(notify2.lastResult == LOCK_OK);
+        ASSERT(request2.numNotifies == 1);
+        ASSERT(request2.lastResult == LOCK_OK);
 
         // Release second acquire
         lockMgr.unlock(&request2);
         ASSERT(request2.recursiveCount == 0);
 
-        ASSERT(notify1.numNotifies == 0);
-        ASSERT(notify2.numNotifies == 1);
+        ASSERT(request1.numNotifies == 0);
+        ASSERT(request2.numNotifies == 1);
     }
 
     TEST(LockManager, MultipleConflict) {
@@ -343,7 +339,7 @@ namespace mongo {
 
         ASSERT(notify.numNotifies == 0);
 
-        // Free them one by one and make sure they get granted
+        // Free them one by one and make sure they get granted in the correct order
         for (int i = 0; i < 6; i++) {
             lockMgr.unlock(&request[i]);
 
@@ -424,36 +420,30 @@ namespace mongo {
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
         MMAPV1LockerImpl locker1(1);
-        TrackingLockGrantNotification notify1;
-
         MMAPV1LockerImpl locker2(2);
-        TrackingLockGrantNotification notify2;
 
-        LockRequest request1;
-        request1.initNew(&locker1, &notify1);
-
-        LockRequest request2;
-        request2.initNew(&locker2, &notify2);
+        LockRequestCombo request1(&locker1);
+        LockRequestCombo request2(&locker2);
 
         // First request granted right away
         ASSERT(LOCK_OK == lockMgr.lock(resId, &request1, MODE_S));
-        ASSERT(notify1.numNotifies == 0);
+        ASSERT(request1.numNotifies == 0);
 
         // Second request is granted right away
         ASSERT(LOCK_OK == lockMgr.lock(resId, &request2, MODE_S));
-        ASSERT(notify2.numNotifies == 0);
+        ASSERT(request2.numNotifies == 0);
 
         // Convert second request to conflicting
-        ASSERT(LOCK_WAITING == lockMgr.lock(resId, &request2, MODE_X));
+        ASSERT(LOCK_WAITING == lockMgr.convert(resId, &request2, MODE_X));
         ASSERT(request2.mode == MODE_S);
         ASSERT(request2.convertMode == MODE_X);
-        ASSERT(notify2.numNotifies == 0);
+        ASSERT(request2.numNotifies == 0);
 
         // Cancel the conflicting upgrade
         lockMgr.unlock(&request2);
         ASSERT(request2.mode == MODE_S);
         ASSERT(request2.convertMode == MODE_NONE);
-        ASSERT(notify2.numNotifies == 0);
+        ASSERT(request2.numNotifies == 0);
 
         // Free the remaining locks so the LockManager destructor does not complain
         lockMgr.unlock(&request1);
@@ -465,33 +455,27 @@ namespace mongo {
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
         MMAPV1LockerImpl locker1(1);
-        TrackingLockGrantNotification notify1;
-
         MMAPV1LockerImpl locker2(2);
-        TrackingLockGrantNotification notify2;
 
-        LockRequest request1;
-        request1.initNew(&locker1, &notify1);
+        LockRequestCombo request1(&locker1);
+        LockRequestCombo request2(&locker2);
 
-        LockRequest request2;
-        request2.initNew(&locker2, &notify2);
-
-        // First request granted right away
+        // The S requests are granted right away
         ASSERT(LOCK_OK == lockMgr.lock(resId, &request1, MODE_S));
-        ASSERT(notify1.numNotifies == 0);
+        ASSERT(request1.numNotifies == 0);
 
         ASSERT(LOCK_OK == lockMgr.lock(resId, &request2, MODE_S));
-        ASSERT(notify2.numNotifies == 0);
+        ASSERT(request2.numNotifies == 0);
 
         // Convert first request to conflicting
-        ASSERT(LOCK_WAITING == lockMgr.lock(resId, &request1, MODE_X));
-        ASSERT(notify1.numNotifies == 0);
+        ASSERT(LOCK_WAITING == lockMgr.convert(resId, &request1, MODE_X));
+        ASSERT(request1.numNotifies == 0);
 
         // Free the second lock and make sure the first is granted
         lockMgr.unlock(&request2);
         ASSERT(request1.mode == MODE_X);
-        ASSERT(notify1.numNotifies == 1);
-        ASSERT(notify2.numNotifies == 0);
+        ASSERT(request1.numNotifies == 1);
+        ASSERT(request2.numNotifies == 0);
 
         // Frees the first reference, mode remains X
         lockMgr.unlock(&request1);
@@ -515,7 +499,7 @@ namespace mongo {
         }
 
         // Upgrade the one in the middle (not the first one)
-        ASSERT(LOCK_WAITING == lockMgr.lock(resId, &request[1], MODE_X));
+        ASSERT(LOCK_WAITING == lockMgr.convert(resId, &request[1], MODE_X));
 
         ASSERT(notify.numNotifies == 0);
 
@@ -533,25 +517,20 @@ namespace mongo {
         lockMgr.unlock(&request[1]);
     }
 
-    TEST(LockManager, Upgrade) {
+    TEST(LockManager, ConvertUpgrade) {
         LockManager lockMgr;
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
         MMAPV1LockerImpl locker1(1);
-        TrackingLockGrantNotification notify1;
-        LockRequest request1;
-        request1.initNew(&locker1, &notify1);
-        ASSERT(LOCK_OK == lockMgr.lock(resId, &request1, MODE_IS));
+        LockRequestCombo request1(&locker1);
+        ASSERT(LOCK_OK == lockMgr.lock(resId, &request1, MODE_S));
 
         MMAPV1LockerImpl locker2(2);
-        TrackingLockGrantNotification notify2;
-        LockRequest request2;
-        request2.initNew(&locker2, &notify2);
+        LockRequestCombo request2(&locker2);
         ASSERT(LOCK_OK == lockMgr.lock(resId, &request2, MODE_S));
-        ASSERT(request2.recursiveCount == 1);
 
-        // Upgrade the IS lock to X
-        ASSERT(LOCK_WAITING == lockMgr.lock(resId, &request1, MODE_IX));
+        // Upgrade the S lock to X
+        ASSERT(LOCK_WAITING == lockMgr.convert(resId, &request1, MODE_X));
 
         ASSERT(!lockMgr.unlock(&request1));
         ASSERT(lockMgr.unlock(&request1));
@@ -564,34 +543,29 @@ namespace mongo {
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
         MMAPV1LockerImpl locker1(1);
-        TrackingLockGrantNotification notify1;
-        LockRequest request1;
-        request1.initNew(&locker1, &notify1);
+        LockRequestCombo request1(&locker1);
         ASSERT(LOCK_OK == lockMgr.lock(resId, &request1, MODE_X));
 
         MMAPV1LockerImpl locker2(2);
-        TrackingLockGrantNotification notify2;
-        LockRequest request2;
-        request2.initNew(&locker2, &notify2);
+        LockRequestCombo request2(&locker2);
         ASSERT(LOCK_WAITING == lockMgr.lock(resId, &request2, MODE_S));
-        ASSERT(request2.recursiveCount == 1);
 
+        // Downgrade the X request to S
         lockMgr.downgrade(&request1, MODE_S);
-        ASSERT(notify2.numNotifies == 1);
+
+        ASSERT(request2.numNotifies == 1);
+        ASSERT(request2.lastResult == LOCK_OK);
         ASSERT(request2.recursiveCount == 1);
 
-        lockMgr.unlock(&request1);
-        ASSERT(request1.recursiveCount == 0);
-
-        lockMgr.unlock(&request2);
-        ASSERT(request2.recursiveCount == 0);
+        ASSERT(lockMgr.unlock(&request1));
+        ASSERT(lockMgr.unlock(&request2));
     }
 
 
 
+    // Lock conflict matrix tests
     static void checkConflict(LockMode existingMode, LockMode newMode, bool hasConflict) {
         LockManager lockMgr;
-
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
         MMAPV1LockerImpl lockerExisting(1);
@@ -638,6 +612,211 @@ namespace mongo {
         checkConflict(MODE_X, MODE_IX, true);
         checkConflict(MODE_X, MODE_S, true);
         checkConflict(MODE_X, MODE_X, true);
+    }
+
+    TEST(LockManager, EnqueueAtFront) {
+        LockManager lockMgr;
+        const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
+
+        MMAPV1LockerImpl lockerX(1);
+        LockRequestCombo requestX(&lockerX);
+
+        ASSERT(LOCK_OK == lockMgr.lock(resId, &requestX, MODE_X));
+
+        // The subsequent request will block
+        MMAPV1LockerImpl lockerLow(2);
+        LockRequestCombo requestLow(&lockerLow);
+
+        ASSERT(LOCK_WAITING == lockMgr.lock(resId, &requestLow, MODE_X));
+
+        // This is a "queue jumping request", which will go before locker 2 above
+        MMAPV1LockerImpl lockerHi(2);
+        LockRequestCombo requestHi(&lockerHi);
+        requestHi.enqueueAtFront = true;
+
+        ASSERT(LOCK_WAITING == lockMgr.lock(resId, &requestHi, MODE_X));
+
+        // Once the X request is gone, lockerHi should be granted, because it's queue jumping
+        ASSERT(lockMgr.unlock(&requestX));
+
+        ASSERT(requestHi.lastResId == resId);
+        ASSERT(requestHi.lastResult == LOCK_OK);
+
+        // Finally lockerLow should be granted
+        ASSERT(lockMgr.unlock(&requestHi));
+
+        ASSERT(requestLow.lastResId == resId);
+        ASSERT(requestLow.lastResult == LOCK_OK);
+
+        // This avoids the lock manager asserting on leaked locks
+        ASSERT(lockMgr.unlock(&requestLow));
+    }
+
+    TEST(LockManager, CompatibleFirstImmediateGrant) {
+        LockManager lockMgr;
+        const ResourceId resId(RESOURCE_GLOBAL, 0);
+
+        MMAPV1LockerImpl locker1(1);
+        LockRequestCombo request1(&locker1);
+
+        MMAPV1LockerImpl locker2(2);
+        LockRequestCombo request2(&locker2);
+        request2.compatibleFirst = true;
+
+        MMAPV1LockerImpl locker3(3);
+        LockRequestCombo request3(&locker3);
+
+        // Lock all in IS mode
+        ASSERT(LOCK_OK == lockMgr.lock(resId, &request1, MODE_IS));
+        ASSERT(LOCK_OK == lockMgr.lock(resId, &request2, MODE_IS));
+        ASSERT(LOCK_OK == lockMgr.lock(resId, &request3, MODE_IS));
+
+        // Now an exclusive mode comes, which would block
+        MMAPV1LockerImpl lockerX(4);
+        LockRequestCombo requestX(&lockerX);
+
+        ASSERT(LOCK_WAITING == lockMgr.lock(resId, &requestX, MODE_X));
+
+        // If an S comes, it should be granted, because of request2
+        {
+            MMAPV1LockerImpl lockerS(5);
+            LockRequestCombo requestS(&lockerS);
+            ASSERT(LOCK_OK == lockMgr.lock(resId, &requestS, MODE_S));
+            ASSERT(lockMgr.unlock(&requestS));
+        }
+
+        // If request1 goes away, the policy should still be compatible-first, because of request2
+        ASSERT(lockMgr.unlock(&request1));
+
+        // If S comes again, it should be granted, because of request2 still there
+        {
+            MMAPV1LockerImpl lockerS(6);
+            LockRequestCombo requestS(&lockerS);
+            ASSERT(LOCK_OK == lockMgr.lock(resId, &requestS, MODE_S));
+            ASSERT(lockMgr.unlock(&requestS));
+        }
+
+        // With request2 gone the policy should go back to FIFO, even though request3 is active
+        ASSERT(lockMgr.unlock(&request2));
+
+        {
+            MMAPV1LockerImpl lockerS(7);
+            LockRequestCombo requestS(&lockerS);
+            ASSERT(LOCK_WAITING == lockMgr.lock(resId, &requestS, MODE_S));
+            ASSERT(lockMgr.unlock(&requestS));
+        }
+
+        // Unlock request3 to keep the lock mgr not assert for leaked locks
+        ASSERT(lockMgr.unlock(&request3));
+        ASSERT(lockMgr.unlock(&requestX));
+    }
+
+    TEST(LockManager, CompatibleFirstDelayedGrant) {
+        LockManager lockMgr;
+        const ResourceId resId(RESOURCE_GLOBAL, 0);
+
+        MMAPV1LockerImpl lockerXInitial(1);
+        LockRequestCombo requestXInitial(&lockerXInitial);
+        ASSERT(LOCK_OK == lockMgr.lock(resId, &requestXInitial, MODE_X));
+
+        MMAPV1LockerImpl locker1(2);
+        LockRequestCombo request1(&locker1);
+
+        MMAPV1LockerImpl locker2(3);
+        LockRequestCombo request2(&locker2);
+        request2.compatibleFirst = true;
+
+        MMAPV1LockerImpl locker3(4);
+        LockRequestCombo request3(&locker3);
+
+        // Lock all in IS mode (should block behind the global lock)
+        ASSERT(LOCK_WAITING == lockMgr.lock(resId, &request1, MODE_IS));
+        ASSERT(LOCK_WAITING == lockMgr.lock(resId, &request2, MODE_IS));
+        ASSERT(LOCK_WAITING == lockMgr.lock(resId, &request3, MODE_IS));
+
+        // Now an exclusive mode comes, which would block behind the IS modes
+        MMAPV1LockerImpl lockerX(5);
+        LockRequestCombo requestX(&lockerX);
+        ASSERT(LOCK_WAITING == lockMgr.lock(resId, &requestX, MODE_X));
+
+        // Free the first X lock so all IS modes are granted
+        ASSERT(lockMgr.unlock(&requestXInitial));
+        ASSERT(request1.lastResult == LOCK_OK);
+        ASSERT(request2.lastResult == LOCK_OK);
+        ASSERT(request3.lastResult == LOCK_OK);
+
+        // If an S comes, it should be granted, because of request2
+        {
+            MMAPV1LockerImpl lockerS(6);
+            LockRequestCombo requestS(&lockerS);
+            ASSERT(LOCK_OK == lockMgr.lock(resId, &requestS, MODE_S));
+            ASSERT(lockMgr.unlock(&requestS));
+        }
+
+        // If request1 goes away, the policy should still be compatible-first, because of request2
+        ASSERT(lockMgr.unlock(&request1));
+
+        // If S comes again, it should be granted, because of request2 still there
+        {
+            MMAPV1LockerImpl lockerS(7);
+            LockRequestCombo requestS(&lockerS);
+            ASSERT(LOCK_OK == lockMgr.lock(resId, &requestS, MODE_S));
+            ASSERT(lockMgr.unlock(&requestS));
+        }
+
+        // With request2 gone the policy should go back to FIFO, even though request3 is active
+        ASSERT(lockMgr.unlock(&request2));
+
+        {
+            MMAPV1LockerImpl lockerS(8);
+            LockRequestCombo requestS(&lockerS);
+            ASSERT(LOCK_WAITING == lockMgr.lock(resId, &requestS, MODE_S));
+            ASSERT(lockMgr.unlock(&requestS));
+        }
+
+        // Unlock request3 to keep the lock mgr not assert for leaked locks
+        ASSERT(lockMgr.unlock(&request3));
+        ASSERT(lockMgr.unlock(&requestX));
+    }
+
+    TEST(LockManager, CompatibleFirstCancelWaiting) {
+        LockManager lockMgr;
+        const ResourceId resId(RESOURCE_GLOBAL, 0);
+
+        MMAPV1LockerImpl lockerSInitial(1);
+        LockRequestCombo requestSInitial(&lockerSInitial);
+        ASSERT(LOCK_OK == lockMgr.lock(resId, &requestSInitial, MODE_S));
+
+        MMAPV1LockerImpl lockerX(2);
+        LockRequestCombo requestX(&lockerX);
+        ASSERT(LOCK_WAITING == lockMgr.lock(resId, &requestX, MODE_X));
+
+        MMAPV1LockerImpl lockerPending(3);
+        LockRequestCombo requestPending(&lockerPending);
+        requestPending.compatibleFirst = true;
+        ASSERT(LOCK_WAITING == lockMgr.lock(resId, &requestPending, MODE_S));
+
+        // S1 is not granted yet, so the policy should still be FIFO
+        {
+            MMAPV1LockerImpl lockerS(4);
+            LockRequestCombo requestS(&lockerS);
+            ASSERT(LOCK_WAITING == lockMgr.lock(resId, &requestS, MODE_S));
+            ASSERT(lockMgr.unlock(&requestS));
+        }
+
+        // Unlock S1, the policy should still be FIFO
+        ASSERT(lockMgr.unlock(&requestPending));
+
+        {
+            MMAPV1LockerImpl lockerS(5);
+            LockRequestCombo requestS(&lockerS);
+            ASSERT(LOCK_WAITING == lockMgr.lock(resId, &requestS, MODE_S));
+            ASSERT(lockMgr.unlock(&requestS));
+        }
+
+        // Unlock remaining locks to keep the leak detection logic happy
+        ASSERT(lockMgr.unlock(&requestSInitial));
+        ASSERT(lockMgr.unlock(&requestX));
     }
 
 } // namespace mongo

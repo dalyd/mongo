@@ -17,6 +17,16 @@ env.Library(
     )
 
 env.Library(
+    target='oplog_hack',
+    source=[
+        'oplog_hack.cpp',
+        ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/bson',
+        ]
+    )
+
+env.Library(
     target='sorted_data_interface_test_harness',
     source=[
         'sorted_data_interface_test_bulkbuilder.cpp',
@@ -60,3 +70,21 @@ env.Library(
         ],
     LIBDEPS=[]
     )
+
+env.Library(
+    target='storage_engine_metadata',
+    source=[
+        'storage_engine_metadata.cpp',
+        ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/bson',
+        ]
+    )
+
+env.CppUnitTest(
+    target= 'storage_engine_metadata_test',
+    source = 'storage_engine_metadata_test.cpp',
+    LIBDEPS=[
+        'storage_engine_metadata',
+    ],
+)

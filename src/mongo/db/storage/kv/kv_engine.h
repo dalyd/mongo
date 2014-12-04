@@ -30,6 +30,9 @@
 
 #pragma once
 
+#include <string>
+#include <vector>
+
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/catalog/collection_options.h"
@@ -44,8 +47,6 @@ namespace mongo {
 
     class KVEngine {
     public:
-
-        virtual ~KVEngine() {}
 
         virtual RecoveryUnit* newRecoveryUnit() = 0;
 
@@ -77,22 +78,19 @@ namespace mongo {
                                           const StringData& ns,
                                           const StringData& ident,
                                           const CollectionOptions& options ) = 0;
-        virtual Status dropRecordStore( OperationContext* opCtx,
-                                        const StringData& ident ) = 0;
-
 
         virtual Status createSortedDataInterface( OperationContext* opCtx,
                                                   const StringData& ident,
                                                   const IndexDescriptor* desc ) = 0;
-
-        virtual Status dropSortedDataInterface( OperationContext* opCtx,
-                                                const StringData& ident ) = 0;
 
         virtual int64_t getIdentSize( OperationContext* opCtx,
                                       const StringData& ident ) = 0;
 
         virtual Status repairIdent( OperationContext* opCtx,
                                     const StringData& ident ) = 0;
+
+        virtual Status dropIdent( OperationContext* opCtx,
+                                  const StringData& ident ) = 0;
 
         // optional
         virtual int flushAllFiles( bool sync ) { return 0; }
@@ -112,6 +110,23 @@ namespace mongo {
             return Status::OK();
         }
 
+        virtual std::vector<std::string> getAllIdents( OperationContext* opCtx ) const = 0;
+
+        /**
+         * This method will be called before there is a clean shutdown.  Storage engines should
+         * override this method if they have clean-up to do that is different from unclean shutdown.
+         * MongoDB will not call into the storage subsystem after calling this function.
+         *
+         * There is intentionally no uncleanShutdown().
+         */
+        virtual void cleanShutdown() = 0;
+
+        /**
+         * The destructor will never be called from mongod, but may be called from tests.
+         * Engines may assume that this will only be called in the case of clean shutdown, even if
+         * cleanShutdown() hasn't been called.
+         */
+        virtual ~KVEngine() {}
     };
 
 }

@@ -33,6 +33,7 @@
 #include "mongo/db/repl/bgsync.h"
 
 #include "mongo/base/counter.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/fsync.h"
 #include "mongo/db/commands/server_status_metric.h"
@@ -41,10 +42,8 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_coordinator_global.h"
 #include "mongo/db/repl/repl_coordinator_impl.h"
-#include "mongo/db/repl/rs.h"
 #include "mongo/db/repl/rs_rollback.h"
 #include "mongo/db/repl/rs_sync.h"
-#include "mongo/db/repl/rslog.h"
 #include "mongo/db/stats/timer_stats.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
@@ -106,7 +105,6 @@ namespace {
                                        _lastFetchedHash(0),
                                        _pause(true),
                                        _appliedBuffer(true),
-                                       _assumingPrimary(false),
                                        _replCoord(getGlobalReplicationCoordinator()),
                                        _initialSyncRequestedFlag(false),
                                        _indexPrefetchConfig(PREFETCH_ALL) {
@@ -127,20 +125,20 @@ namespace {
         _condvar.notify_all();
     }
 
-    void BackgroundSync::notify() {
+    void BackgroundSync::notify(OperationContext* txn) {
         boost::lock_guard<boost::mutex> lock(_mutex);
 
         // If all ops in the buffer have been applied, unblock waitForRepl (if it's waiting)
         if (_buffer.empty()) {
             _appliedBuffer = true;
-            _replCoord->signalDrainComplete();
+            _replCoord->signalDrainComplete(txn);
             _condvar.notify_all();
         }
     }
 
     void BackgroundSync::producerThread() {
         Client::initThread("rsBackgroundSync");
-        replLocalAuth();
+        cc().getAuthorizationSession()->grantInternalAuthorization();
 
         while (!inShutdown()) {
             try {
@@ -148,11 +146,11 @@ namespace {
             }
             catch (const DBException& e) {
                 std::string msg(str::stream() << "sync producer problem: " << e.toString());
-                error() << msg << rsLog;
+                error() << msg;
                 _replCoord->setMyHeartbeatMessage(msg);
             }
             catch (const std::exception& e2) {
-                severe() << "sync producer exception: " << e2.what() << rsLog;
+                severe() << "sync producer exception: " << e2.what();
                 fassertFailed(28546);
             }
         }
@@ -311,7 +309,7 @@ namespace {
 
                     _syncSourceReader.tailCheck();
                     if( !_syncSourceReader.haveCursor() ) {
-                        LOG(1) << "replSet end syncTail pass" << rsLog;
+                        LOG(1) << "replSet end syncTail pass";
                         return;
                     }
 
@@ -338,7 +336,7 @@ namespace {
             }
 
             OCCASIONALLY {
-                LOG(2) << "bgsync buffer has " << _buffer.size() << " bytes" << rsLog;
+                LOG(2) << "bgsync buffer has " << _buffer.size() << " bytes";
             }
 
             bufferCountGauge.increment();
@@ -349,8 +347,7 @@ namespace {
                 boost::unique_lock<boost::mutex> lock(_mutex);
                 _lastFetchedHash = o["h"].numberLong();
                 _lastOpTimeFetched = o["ts"]._opTime();
-                LOG(3) << "replSet lastOpTimeFetched: "
-                       << _lastOpTimeFetched.toStringPretty() << rsLog;
+                LOG(3) << "replSet lastOpTimeFetched: " << _lastOpTimeFetched.toStringPretty();
             }
         }
     }
@@ -386,24 +383,6 @@ namespace {
         bufferSizeGauge.decrement(getSize(op));
     }
 
-    bool BackgroundSync::isStale(OpTime lastOpTimeFetched, 
-                                 OplogReader& r, 
-                                 BSONObj& remoteOldestOp) {
-        remoteOldestOp = r.findOne(rsoplog, Query());
-        OpTime remoteTs = remoteOldestOp["ts"]._opTime();
-        {
-            boost::unique_lock<boost::mutex> lock(_mutex);
-
-            if (lastOpTimeFetched >= remoteTs) {
-                return false;
-            }
-            log() << "replSet remoteOldestOp:    " << remoteTs.toStringLong() << rsLog;
-            log() << "replSet lastOpTimeFetched: " << lastOpTimeFetched.toStringLong() << rsLog;
-        }
-
-        return true;
-    }
-
     bool BackgroundSync::_rollbackIfNeeded(OperationContext* txn, OplogReader& r) {
         string hn = r.conn()->getServerAddress();
 
@@ -411,23 +390,22 @@ namespace {
             try {
                 BSONObj theirLastOp = r.getLastOp(rsoplog);
                 if (theirLastOp.isEmpty()) {
-                    log() << "replSet error empty query result from " << hn << " oplog" << rsLog;
+                    log() << "replSet error empty query result from " << hn << " oplog";
                     sleepsecs(2);
                     return true;
                 }
                 OpTime theirTS = theirLastOp["ts"]._opTime();
                 if (theirTS < _lastOpTimeFetched) {
-                    log() << "replSet we are ahead of the sync source, will try to roll back"
-                          << rsLog;
+                    log() << "replSet we are ahead of the sync source, will try to roll back";
                     syncRollback(txn, _replCoord->getMyLastOptime(), &r, _replCoord);
                     return true;
                 }
                 /* we're not ahead?  maybe our new query got fresher data.  best to come back and try again */
-                log() << "replSet syncTail condition 1" << rsLog;
+                log() << "replSet syncTail condition 1";
                 sleepsecs(1);
             }
             catch(DBException& e) {
-                log() << "replSet error querying " << hn << ' ' << e.toString() << rsLog;
+                log() << "replSet error querying " << hn << ' ' << e.toString();
                 sleepsecs(2);
             }
             return true;
@@ -437,8 +415,8 @@ namespace {
         OpTime ts = o["ts"]._opTime();
         long long hash = o["h"].numberLong();
         if( ts != _lastOpTimeFetched || hash != _lastFetchedHash ) {
-            log() << "replSet our last op time fetched: " << _lastOpTimeFetched.toStringPretty() << rsLog;
-            log() << "replset source's GTE: " << ts.toStringPretty() << rsLog;
+            log() << "replSet our last op time fetched: " << _lastOpTimeFetched.toStringPretty();
+            log() << "replset source's GTE: " << ts.toStringPretty();
             syncRollback(txn, _replCoord->getMyLastOptime(), &r, _replCoord);
             return true;
         }
@@ -480,26 +458,7 @@ namespace {
         _lastFetchedHash = _lastAppliedHash;
 
         LOG(1) << "replset bgsync fetch queue set to: " << _lastOpTimeFetched << 
-            " " << _lastFetchedHash << rsLog;
-    }
-
-    bool BackgroundSync::isAssumingPrimary_inlock() {
-        return _assumingPrimary;
-    }
-
-    void BackgroundSync::stopReplicationAndFlushBuffer() {
-        boost::unique_lock<boost::mutex> lck(_mutex);
-
-        // 1. Tell syncing to stop
-        _assumingPrimary = true;
-
-        // 2. Wait for syncing to stop and buffer to be applied
-        while (!(_pause && _appliedBuffer)) {
-            _condvar.wait(lck);
-        }
-
-        // 3. Now actually become primary
-        _assumingPrimary = false;
+            " " << _lastFetchedHash;
     }
 
     long long BackgroundSync::getLastAppliedHash() const {
@@ -521,11 +480,9 @@ namespace {
     long long BackgroundSync::_readLastAppliedHash(OperationContext* txn) {
         BSONObj oplogEntry;
         try {
-            // Uses WuoW because there is no way to demarcate a read transaction boundary.
+            ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock lk(txn->lockState(), "local", MODE_X);
-            WriteUnitOfWork uow(txn);
             bool success = Helpers::getLast(txn, rsoplog, oplogEntry);
-            uow.commit();
             if (!success) {
                 // This can happen when we are to do an initial sync.  lastHash will be set
                 // after the initial sync is complete.

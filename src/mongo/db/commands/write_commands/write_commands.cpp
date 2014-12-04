@@ -47,6 +47,7 @@
 #include "mongo/db/repl/repl_coordinator_global.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/s/d_state.h"
 
 namespace mongo {
 
@@ -132,8 +133,8 @@ namespace mongo {
         NamespaceString nss(dbName, request.getNS());
         request.setNS(nss.ns());
 
-        BSONObj defaultWriteConcern =
-                repl::getGlobalReplicationCoordinator()->getGetLastErrorDefault();
+        WriteConcernOptions defaultWriteConcern =
+            repl::getGlobalReplicationCoordinator()->getGetLastErrorDefault();
 
         WriteBatchExecutor writeBatchExecutor(txn,
                                               defaultWriteConcern,
@@ -191,7 +192,7 @@ namespace mongo {
 
         if ( BatchedCommandRequest::BatchType_Update == _writeType ) {
             // Create the update request.
-            UpdateRequest updateRequest( txn, nsString );
+            UpdateRequest updateRequest( nsString );
             updateRequest.setQuery( batchItem.getUpdate()->getQuery() );
             updateRequest.setUpdates( batchItem.getUpdate()->getUpdateExpr() );
             updateRequest.setMulti( batchItem.getUpdate()->getMulti() );
@@ -206,7 +207,7 @@ namespace mongo {
 
             // Use the request to create an UpdateExecutor, and from it extract the
             // plan tree which will be used to execute this update.
-            UpdateExecutor updateExecutor( &updateRequest, &txn->getCurOp()->debug() );
+            UpdateExecutor updateExecutor( txn, &updateRequest, &txn->getCurOp()->debug() );
             Status prepStatus = updateExecutor.prepare();
             if ( !prepStatus.isOK() ) {
                 return prepStatus;
@@ -214,11 +215,16 @@ namespace mongo {
 
             // Explains of write commands are read-only, but we take write locks so
             // that timing info is more accurate.
-            Lock::DBLock dlk(txn->lockState(), nsString.db(), MODE_IX);
-            Lock::CollectionLock colLock(txn->lockState(), nsString.ns(), MODE_IX);
-            Client::Context ctx(txn, nsString);
+            AutoGetDb autoDb( txn, nsString.db(), MODE_IX );
+            Lock::CollectionLock colLock( txn->lockState(), nsString.ns(), MODE_IX );
 
-            Status prepInLockStatus = updateExecutor.prepareInLock(ctx.db());
+            // We check the shard version explicitly here rather than using Client::Context,
+            // as Context can do implicit database creation if the db does not exist. We want
+            // explain to be a no-op that reports a trivial EOF plan against non-existent dbs
+            // or collections.
+            ensureShardVersionOKOrThrow( nsString.ns() );
+
+            Status prepInLockStatus = updateExecutor.prepareInLock( autoDb.getDb() );
             if ( !prepInLockStatus.isOK() ) {
                 return prepInLockStatus;
             }
@@ -234,7 +240,7 @@ namespace mongo {
             invariant( BatchedCommandRequest::BatchType_Delete == _writeType );
 
             // Create the delete request.
-            DeleteRequest deleteRequest( txn, nsString );
+            DeleteRequest deleteRequest( nsString );
             deleteRequest.setQuery( batchItem.getDelete()->getQuery() );
             deleteRequest.setMulti( batchItem.getDelete()->getLimit() != 1 );
             deleteRequest.setUpdateOpLog(true);
@@ -246,7 +252,7 @@ namespace mongo {
 
             // Use the request to create a DeleteExecutor, and from it extract the
             // plan tree which will be used to execute this update.
-            DeleteExecutor deleteExecutor( &deleteRequest );
+            DeleteExecutor deleteExecutor( txn, &deleteRequest );
             Status prepStatus = deleteExecutor.prepare();
             if ( !prepStatus.isOK() ) {
                 return prepStatus;
@@ -255,12 +261,15 @@ namespace mongo {
             // Explains of write commands are read-only, but we take write locks so that timing
             // info is more accurate.
             AutoGetDb autoDb(txn, nsString.db(), MODE_IX);
-            if (!autoDb.getDb()) return Status::OK();
-
             Lock::CollectionLock colLock(txn->lockState(), nsString.ns(), MODE_IX);
-            Client::Context ctx(txn, nsString);
 
-            Status prepInLockStatus = deleteExecutor.prepareInLock(ctx.db());
+            // We check the shard version explicitly here rather than using Client::Context,
+            // as Context can do implicit database creation if the db does not exist. We want
+            // explain to be a no-op that reports a trivial EOF plan against non-existent dbs
+            // or collections.
+            ensureShardVersionOKOrThrow( nsString.ns() );
+
+            Status prepInLockStatus = deleteExecutor.prepareInLock( autoDb.getDb() );
             if ( !prepInLockStatus.isOK()) {
                 return prepInLockStatus;
             }

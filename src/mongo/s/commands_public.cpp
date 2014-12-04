@@ -28,7 +28,7 @@
 *    then also delete it in the license file.
 */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommands
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -2668,6 +2668,34 @@ namespace mongo {
                 return passthrough( conf, cmdObj, result );
             }
         } cmdListIndexes;
+
+        class AvailableQueryOptions : public Command {
+        public:
+          AvailableQueryOptions(): Command("availableQueryOptions",
+                                           false ,
+                                           "availablequeryoptions") {
+          }
+
+          virtual bool slaveOk() const { return true; }
+          virtual bool isWriteCommandForConfigServer() const { return false; }
+          virtual Status checkAuthForCommand(ClientBasic* client,
+                                             const std::string& dbname,
+                                             const BSONObj& cmdObj) {
+              return Status::OK();
+          }
+
+
+          virtual bool run(OperationContext* txn,
+                           const string& dbname,
+                           BSONObj& cmdObj,
+                           int,
+                           string& errmsg,
+                           BSONObjBuilder& result,
+                           bool) {
+              result << "options" << QueryOption_AllSupportedForSharding;
+              return true;
+          }
+        } availableQueryOptionsCmd;
 
     } // namespace pub_grid_cmds
 

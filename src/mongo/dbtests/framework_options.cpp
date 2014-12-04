@@ -34,7 +34,7 @@
 
 #include "mongo/base/status.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/db/query/new_find.h"
+#include "mongo/db/query/find.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
 #include "mongo/db/storage_options.h"
 #include "mongo/dbtests/dbtests.h"
@@ -54,7 +54,7 @@ namespace mongo {
         options->addOptionChaining("dbpath", "dbpath", moe::String,
                 "db data path for this test run. NOTE: the contents of this directory will "
                 "be overwritten if it already exists")
-                                  .setDefault(moe::Value(default_test_dbpath));
+                                  .setDefault(moe::Value(dbtests::default_test_dbpath));
 
         options->addOptionChaining("debug", "debug", moe::Switch, "run tests with verbose output");
 

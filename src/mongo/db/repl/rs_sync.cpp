@@ -37,6 +37,7 @@
 #include "third_party/murmurhash3/MurmurHash3.h"
 
 #include "mongo/base/counter.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/fsync.h"
 #include "mongo/db/commands/server_status.h"
@@ -44,14 +45,11 @@
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/bgsync.h"
-#include "mongo/db/repl/member.h"
 #include "mongo/db/repl/minvalid.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/repl_coordinator_global.h"
-#include "mongo/db/repl/rs.h"
 #include "mongo/db/repl/rs_initialsync.h"
-#include "mongo/db/repl/rslog.h"
 #include "mongo/db/repl/sync_tail.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/stats/timer_stats.h"
@@ -66,11 +64,11 @@ namespace repl {
 
     void runSyncThread() {
         Client::initThread("rsSync");
-        replLocalAuth();
+        cc().getAuthorizationSession()->grantInternalAuthorization();
         ReplicationCoordinator* replCoord = getGlobalReplicationCoordinator();
 
         // Set initial indexPrefetch setting
-        std::string& prefetch = replCoord->getSettings().rsIndexPrefetch;
+        const std::string& prefetch = replCoord->getSettings().rsIndexPrefetch;
         if (!prefetch.empty()) {
             BackgroundSync::IndexPrefetchConfig prefetchConfig = BackgroundSync::PREFETCH_ALL;
             if (prefetch == "none")
@@ -92,15 +90,22 @@ namespace repl {
             // trying to sync with other replicas.
             // TODO(spencer): Use a condition variable to await loading a config
             if (replCoord->getReplicationMode() != ReplicationCoordinator::modeReplSet) {
-                log() << "replSet warning did not receive a valid config yet, sleeping 5 seconds "
-                      << rsLog;
+                log() << "replSet warning did not receive a valid config yet, sleeping 5 seconds ";
                 sleepsecs(5);
                 continue;
             }
 
             const MemberState memberState = replCoord->getCurrentMemberState();
-            if (replCoord->getCurrentMemberState().arbiter()) {
+
+            // An arbiter can never transition to any other state, and doesn't replicate, ever
+            if (memberState.arbiter()) {
                 break;
+            }
+
+            // If we are removed then we don't belong to the set anymore
+            if (memberState.removed()) {
+                sleepsecs(5);
+                continue;
             }
 
             try {

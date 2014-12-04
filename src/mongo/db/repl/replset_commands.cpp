@@ -26,19 +26,19 @@
 *    it in the license file.
 */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommands
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 
 #include "mongo/pch.h"
 
 #include "mongo/base/init.h"
 #include "mongo/base/status.h"
+#include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/global_environment_experiment.h"
-#include "mongo/db/repl/connections.h"
 #include "mongo/db/repl/handshake_args.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_coordinator_global.h"
@@ -47,10 +47,8 @@
 #include "mongo/db/repl/repl_set_heartbeat_response.h"
 #include "mongo/db/repl/repl_set_seed_list.h"
 #include "mongo/db/repl/replset_commands.h"
-#include "mongo/db/repl/rs_config.h"
-#include "mongo/db/repl/rslog.h"
+#include "mongo/db/repl/scoped_conn.h"
 #include "mongo/db/repl/update_position_args.h"
-#include "mongo/db/repl/write_concern.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
@@ -72,7 +70,7 @@ namespace repl {
                                            std::vector<Privilege>* out) {}
         CmdReplSetTest() : ReplSetCommand("replSetTest") { }
         virtual bool run(OperationContext* txn, const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
-            log() << "replSet replSetTest command received: " << cmdObj.toString() << rsLog;
+            log() << "replSet replSetTest command received: " << cmdObj.toString();
 
             if( cmdObj.hasElement("forceInitialSyncFailure") ) {
                 replSetForceInitialSyncFailure = (unsigned) cmdObj["forceInitialSyncFailure"].Number();
@@ -239,7 +237,7 @@ namespace {
             if (configObj.isEmpty()) {
                 result.append("info2", "no configuration explicitly specified -- making one");
                 log() << "replSet info initiate : no configuration specified.  "
-                    "Using a default configuration for the set" << rsLog;
+                    "Using a default configuration for the set";
 
                 ReplicationCoordinatorExternalStateImpl externalState;
                 std::string name;
@@ -266,7 +264,7 @@ namespace {
                 b.appendArray("members", members.obj());
                 configObj = b.obj();
                 log() << "replSet created this configuration for initiation : " <<
-                        configObj.toString() << rsLog;
+                        configObj.toString();
             }
 
             if (configObj.getField("version").eoo()) {
@@ -280,10 +278,6 @@ namespace {
             Status status = getGlobalReplicationCoordinator()->processReplSetInitiate(txn,
                                                                                       configObj,
                                                                                       &result);
-            if (status.isOK()) {
-                createOplog(txn);
-                logOpInitiate(txn, BSON("msg" << "initiating set"));
-            }
             return appendCommandStatus(result, status);
         }
     } cmdReplSetInitiate;
@@ -390,16 +384,52 @@ namespace {
             if (!status.isOK())
                 return appendCommandStatus(result, status);
 
-            bool force = cmdObj.hasField("force") && cmdObj["force"].trueValue();
-            int secs = (int) cmdObj.firstElement().numberInt();
-            if( secs == 0 )
-                secs = 60;
+            const bool force = cmdObj["force"].trueValue();
+
+            long long stepDownForSecs = cmdObj.firstElement().numberLong();
+            if (stepDownForSecs == 0) {
+                stepDownForSecs = 60;
+            }
+            else if (stepDownForSecs < 0) {
+                status = Status(ErrorCodes::BadValue,
+                                "stepdown period must be a positive integer");
+                return appendCommandStatus(result, status);
+            }
+
+            long long secondaryCatchUpPeriodSecs;
+            status = bsonExtractIntegerField(cmdObj,
+                                             "secondaryCatchUpPeriodSecs",
+                                             &secondaryCatchUpPeriodSecs);
+            if (status.code() == ErrorCodes::NoSuchKey) {
+                // if field is absent, default values
+                if (force) {
+                    secondaryCatchUpPeriodSecs = 0;
+                }
+                else {
+                    secondaryCatchUpPeriodSecs = 10;
+                }
+            }
+            else if (!status.isOK()) {
+                return appendCommandStatus(result, status);
+            }
+
+            if (secondaryCatchUpPeriodSecs < 0) {
+                status = Status(ErrorCodes::BadValue,
+                                "secondaryCatchUpPeriodSecs period must be a positive or absent");
+                return appendCommandStatus(result, status);
+            }
+
+            if (stepDownForSecs < secondaryCatchUpPeriodSecs) {
+                status = Status(ErrorCodes::BadValue,
+                                "stepdown period must be longer than secondaryCatchUpPeriodSecs");
+                return appendCommandStatus(result, status);
+            }
 
             status = getGlobalReplicationCoordinator()->stepDown(
                     txn,
                     force,
-                    ReplicationCoordinator::Milliseconds(1000),
-                    ReplicationCoordinator::Milliseconds(secs * 1000));
+                    ReplicationCoordinator::Milliseconds(secondaryCatchUpPeriodSecs * 1000),
+                    ReplicationCoordinator::Milliseconds(stepDownForSecs * 1000));
             return appendCommandStatus(result, status);
         }
     } cmdReplSetStepDown;
@@ -567,11 +597,12 @@ namespace {
                 sleepsecs(data["delay"].numberInt());
             }
 
+            Status status = Status(ErrorCodes::InternalError, "status not set in heartbeat code");
             /* we don't call ReplSetCommand::check() here because heartbeat
                checks many things that are pre-initialization. */
             if (!getGlobalReplicationCoordinator()->getSettings().usingReplSets()) {
-                errmsg = "not running with --replSet";
-                return false;
+                status = Status(ErrorCodes::NoReplicationEnabled, "not running with --replSet");
+                return appendCommandStatus(result, status);
             }
 
             /* we want to keep heartbeat connections open when relinquishing primary.
@@ -583,7 +614,7 @@ namespace {
             }
 
             ReplSetHeartbeatArgs args;
-            Status status = args.initialize(cmdObj);
+            status = args.initialize(cmdObj);
             if (!status.isOK()) {
                 return appendCommandStatus(result, status);
             }
@@ -663,8 +694,8 @@ namespace {
                          string& errmsg,
                          BSONObjBuilder& result,
                          bool fromRepl) {
-            DEV log() << "replSet received elect msg " << cmdObj.toString() << rsLog;
-            else LOG(2) << "replSet received elect msg " << cmdObj.toString() << rsLog;
+            DEV log() << "replSet received elect msg " << cmdObj.toString();
+            else LOG(2) << "replSet received elect msg " << cmdObj.toString();
 
             Status status = getGlobalReplicationCoordinator()->checkReplEnabledForCommand(&result);
             if (!status.isOK())

@@ -28,10 +28,10 @@
 
 #pragma once
 
-#include "mongo/db/diskloc.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/plan_stats.h"
+#include "mongo/db/record_id.h"
 
 namespace mongo {
 
@@ -44,10 +44,7 @@ namespace mongo {
      */
     class MultiIteratorStage : public PlanStage {
     public:
-        MultiIteratorStage(OperationContext* txn, WorkingSet* ws, Collection* collection)
-            : _txn(txn),
-              _collection(collection),
-              _ws(ws) { }
+        MultiIteratorStage(OperationContext* txn, WorkingSet* ws, Collection* collection);
 
         ~MultiIteratorStage() { }
 
@@ -65,7 +62,7 @@ namespace mongo {
         virtual void saveState();
         virtual void restoreState(OperationContext* opCtx);
 
-        virtual void invalidate(const DiskLoc& dl, InvalidationType type);
+        virtual void invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type);
 
         //
         // These should not be used.
@@ -84,7 +81,7 @@ namespace mongo {
         /**
          * @return if more data
          */
-        DiskLoc _advance();
+        RecordId _advance();
 
         OperationContext* _txn;
         Collection* _collection;
@@ -92,6 +89,10 @@ namespace mongo {
 
         // Not owned by us.
         WorkingSet* _ws;
+
+        // We allocate a working set member with this id on construction of the stage. It gets
+        // used for all fetch requests, changing the RecordId as appropriate.
+        const WorkingSetID _wsidForFetch;
     };
 
 } // namespace mongo

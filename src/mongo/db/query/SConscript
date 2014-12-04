@@ -36,10 +36,11 @@ env.Library(
     source=[
         "explain.cpp",
         "get_executor.cpp",
-        "new_find.cpp",
+        "find.cpp",
         "plan_executor.cpp",
         "plan_ranker.cpp",
         "plan_yield_policy.cpp",
+        "query_yield.cpp",
         "stage_builder.cpp",
     ],
     LIBDEPS=[

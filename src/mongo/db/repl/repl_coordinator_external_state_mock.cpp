@@ -54,7 +54,8 @@ namespace repl {
     ReplicationCoordinatorExternalStateMock::~ReplicationCoordinatorExternalStateMock() {}
 
     void ReplicationCoordinatorExternalStateMock::startThreads() {}
-    void ReplicationCoordinatorExternalStateMock::startMasterSlave() {}
+    void ReplicationCoordinatorExternalStateMock::startMasterSlave(OperationContext*) {}
+    void ReplicationCoordinatorExternalStateMock::initiateOplog(OperationContext* txn) {}
     void ReplicationCoordinatorExternalStateMock::shutdown() {}
     void ReplicationCoordinatorExternalStateMock::forwardSlaveHandshake() {}
     void ReplicationCoordinatorExternalStateMock::forwardSlaveProgress() {}
@@ -134,32 +135,14 @@ namespace repl {
         _connectionsClosed = true;
     }
 
+    void ReplicationCoordinatorExternalStateMock::killAllUserOperations(OperationContext* txn) {}
+
     void ReplicationCoordinatorExternalStateMock::clearShardingState() {}
 
     void ReplicationCoordinatorExternalStateMock::signalApplierToChooseNewSyncSource() {}
 
-    void ReplicationCoordinatorExternalStateMock::setCanAcquireGlobalSharedLock(bool canAcquire) {
-        _canAcquireGlobalSharedLock = canAcquire;
-    }
-
-    ReplicationCoordinatorExternalState::GlobalSharedLockAcquirer*
-            ReplicationCoordinatorExternalStateMock::getGlobalSharedLockAcquirer() {
-        return new ReplicationCoordinatorExternalStateMock::GlobalSharedLockAcquirer(
-                _canAcquireGlobalSharedLock);
-    }
-
-    ReplicationCoordinatorExternalStateMock::GlobalSharedLockAcquirer::GlobalSharedLockAcquirer(
-            bool canAcquireLock) : _canAcquireLock(canAcquireLock) {}
-
-    ReplicationCoordinatorExternalStateMock::GlobalSharedLockAcquirer::~GlobalSharedLockAcquirer() {
-    }
-
-    bool ReplicationCoordinatorExternalStateMock::GlobalSharedLockAcquirer::try_lock(
-            OperationContext* txn, const Milliseconds& timeout) {
-        return _canAcquireLock;
-    }
-
-    OperationContext* ReplicationCoordinatorExternalStateMock::createOperationContext() {
+    OperationContext* ReplicationCoordinatorExternalStateMock::createOperationContext(
+            const std::string& threadName) {
         return new OperationContextReplMock;
     }
 

@@ -84,6 +84,7 @@ namespace mongo {
         if (PlanStage::ADVANCED == childStatus) {
             // we'll skip backupPlan processing now
             _alreadyProduced = true;
+            _commonStats.advanced++;
         }
         else if (PlanStage::IS_EOF == childStatus) {
             updateCache();
@@ -92,16 +93,17 @@ namespace mongo {
              && !_alreadyProduced
              && !_usingBackupChild
              && NULL != _backupChildPlan.get()) {
+            // Switch the active child to the backup. Subsequent calls to work() will exercise
+            // the backup plan.
             _usingBackupChild = true;
-            childStatus = _backupChildPlan->work(out);
-        }
-
-        // Update stats.
-        if (PlanStage::NEED_TIME == childStatus) {
             _commonStats.needTime++;
+            return PlanStage::NEED_TIME;
         }
-        else if (PlanStage::ADVANCED == childStatus) {
-            _commonStats.advanced++;
+        else if (PlanStage::NEED_FETCH == childStatus) {
+            _commonStats.needFetch++;
+        }
+        else if (PlanStage::NEED_TIME == childStatus) {
+            _commonStats.needTime++;
         }
 
         return childStatus;
@@ -125,12 +127,14 @@ namespace mongo {
         ++_commonStats.unyields;
     }
 
-    void CachedPlanStage::invalidate(const DiskLoc& dl, InvalidationType type) {
+    void CachedPlanStage::invalidate(OperationContext* txn,
+                                     const RecordId& dl,
+                                     InvalidationType type) {
         if (! _usingBackupChild) {
-            _mainChildPlan->invalidate(dl, type);
+            _mainChildPlan->invalidate(txn, dl, type);
         }
         if (NULL != _backupChildPlan.get()) {
-            _backupChildPlan->invalidate(dl, type);
+            _backupChildPlan->invalidate(txn, dl, type);
         }
         ++_commonStats.invalidates;
     }

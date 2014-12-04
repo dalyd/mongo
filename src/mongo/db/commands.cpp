@@ -29,7 +29,7 @@
  *    then also delete it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommands
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "mongo/bson/mutable/document.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
@@ -56,9 +57,9 @@ namespace mongo {
 
     using logger::LogComponent;
 
-    map<string,Command*> * Command::_commandsByBestName;
-    map<string,Command*> * Command::_webCommands;
-    map<string,Command*> * Command::_commands;
+    Command::CommandMap* Command::_commandsByBestName;
+    Command::CommandMap* Command::_webCommands;
+    Command::CommandMap* Command::_commands;
 
     int Command::testCommandsEnabled = 0;
 
@@ -120,7 +121,7 @@ namespace mongo {
             helpStr = h.str();
         }
         ss << "\n<tr><td>";
-        bool web = _webCommands->count(name) != 0;
+        bool web = _webCommands->find(name) != _webCommands->end();
         if( web ) ss << "<a href=\"/" << name << "?text=1\">";
         ss << name;
         if( web ) ss << "</a>";
@@ -186,9 +187,9 @@ namespace mongo {
         _commandsFailedMetric("commands."+ _name.toString()+".failed", &_commandsFailed) {
         // register ourself.
         if ( _commands == 0 )
-            _commands = new map<string,Command*>;
+            _commands = new CommandMap();
         if( _commandsByBestName == 0 )
-            _commandsByBestName = new map<string,Command*>;
+            _commandsByBestName = new CommandMap();
         Command*& c = (*_commands)[name];
         if ( c )
             log() << "warning: 2 commands with name: " << _name << endl;
@@ -197,7 +198,7 @@ namespace mongo {
 
         if( web ) {
             if( _webCommands == 0 )
-                _webCommands = new map<string,Command*>;
+                _webCommands = new CommandMap();
             (*_webCommands)[name] = this;
         }
 
@@ -215,8 +216,8 @@ namespace mongo {
         return std::vector<BSONObj>();
     }
 
-    Command* Command::findCommand( const string& name ) {
-        map<string,Command*>::iterator i = _commands->find( name );
+    Command* Command::findCommand( const StringData& name ) {
+        CommandMap::const_iterator i = _commands->find( name );
         if ( i == _commands->end() )
             return 0;
         return i->second;
@@ -259,6 +260,15 @@ namespace mongo {
     }
 
     void Command::redactForLogging(mutablebson::Document* cmdObj) {}
+
+    BSONObj Command::getRedactedCopyForLogging(const BSONObj& cmdObj) {
+        namespace mmb = mutablebson;
+        mmb::Document cmdToLog(cmdObj, mmb::Document::kInPlaceDisabled);
+        redactForLogging(&cmdToLog);
+        BSONObjBuilder bob;
+        cmdToLog.writeTo(&bob);
+        return bob.obj();
+    }
 
     void Command::logIfSlow( const Timer& timer, const string& msg ) {
         int ms = timer.millis();
@@ -310,11 +320,10 @@ namespace mongo {
         if (!status.isOK()) {
             log(LogComponent::kAccessControl) << status << std::endl;
         }
-        mmb::Document cmdToLog(cmdObj, mmb::Document::kInPlaceDisabled);
-        c->redactForLogging(&cmdToLog);
         audit::logCommandAuthzCheck(client,
                                     NamespaceString(c->parseNs(dbname, cmdObj)),
-                                    cmdToLog,
+                                    cmdObj,
+                                    c,
                                     status.code());
         return status;
     }

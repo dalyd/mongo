@@ -26,7 +26,7 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kWrites
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kWrite
 
 #include "mongo/platform/basic.h"
 
@@ -89,14 +89,14 @@ namespace mongo {
                                                                           errmsg));
                 return PlanStage::FAILURE;
             }
-            DiskLoc rloc = member->loc;
+            RecordId rloc = member->loc;
             _ws->free(id);
 
             BSONObj deletedDoc;
 
             // TODO: Do we want to buffer docs and delete them in a group rather than
             // saving/restoring state repeatedly?
-            saveState();
+            _child->saveState();
 
             {
                 WriteUnitOfWork wunit(_txn);
@@ -128,7 +128,7 @@ namespace mongo {
             //  As restoreState may restore (recreate) cursors, cursors are tied to the
             //  transaction in which they are created, and a WriteUnitOfWork is a
             //  transaction, make sure to restore the state outside of the WritUnitOfWork.
-            restoreState(_txn);
+            _child->restoreState(_txn);
 
             ++_specificStats.docsDeleted;
 
@@ -147,20 +147,25 @@ namespace mongo {
             }
             return status;
         }
-        else {
-            if (PlanStage::NEED_TIME == status) {
-                ++_commonStats.needTime;
-            }
-            return status;
+        else if (PlanStage::NEED_TIME == status) {
+            ++_commonStats.needTime;
         }
+        else if (PlanStage::NEED_FETCH == status) {
+            *out = id;
+            ++_commonStats.needFetch;
+        }
+
+        return status;
     }
 
     void DeleteStage::saveState() {
+        _txn = NULL;
         ++_commonStats.yields;
         _child->saveState();
     }
 
     void DeleteStage::restoreState(OperationContext* opCtx) {
+        invariant(_txn == NULL);
         _txn = opCtx;
         ++_commonStats.unyields;
         _child->restoreState(opCtx);
@@ -172,9 +177,9 @@ namespace mongo {
                 repl::getGlobalReplicationCoordinator()->canAcceptWritesForDatabase(ns.db()));
     }
 
-    void DeleteStage::invalidate(const DiskLoc& dl, InvalidationType type) {
+    void DeleteStage::invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
         ++_commonStats.invalidates;
-        _child->invalidate(dl, type);
+        _child->invalidate(txn, dl, type);
     }
 
     vector<PlanStage*> DeleteStage::getChildren() const {

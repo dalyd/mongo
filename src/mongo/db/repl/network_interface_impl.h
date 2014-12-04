@@ -49,6 +49,7 @@ namespace repl {
     public:
         explicit NetworkInterfaceImpl();
         virtual ~NetworkInterfaceImpl();
+        virtual std::string getDiagnosticString();
         virtual void startup();
         virtual void shutdown();
         virtual void waitForWork();
@@ -83,7 +84,7 @@ namespace repl {
          * Thread body for threads that synchronously perform network requests from
          * the _pending list.
          */
-        void _consumeNetworkRequests();
+        void _consumeNetworkRequests(const std::string& threadName);
 
         /**
          * Synchronously invokes the command described by "request".
@@ -122,10 +123,8 @@ namespace repl {
         // requests.
         boost::scoped_ptr<ConnectionPool> _connPool;  // (R)
 
-        // Mutex guarding the _nextThreadId value to prevent concurrent incrementing.
-        boost::mutex _nextThreadIdMutex;
-        // Number used to uniquely name threads.
-        long long _nextThreadId;
+        // Number of active network requests
+        int _numActiveNetworkRequests;
     };
 
 }  // namespace repl

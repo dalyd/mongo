@@ -185,11 +185,6 @@ namespace mongo {
         }
     };
 
-
-    void init() {
-        serverID.init();
-    }
-
     void start( const MessageServer::Options& opts ) {
         balancer.go();
         cursorCache.startTimeoutThread();
@@ -279,8 +274,6 @@ static ExitCode runMongosServer( bool doUpgrade ) {
     }
 
     configServer.reloadSettings();
-
-    init();
 
 #if !defined(_WIN32)
     mongo::signalForkSuccess();
@@ -479,7 +472,7 @@ int main(int argc, char* argv[], char** envp) {
 
 #undef exit
 
-void mongo::exitCleanly( ExitCode code, OperationContext* txn ) {
+void mongo::exitCleanly(ExitCode code) {
     // TODO: do we need to add anything?
     mongo::dbexit( code );
 }

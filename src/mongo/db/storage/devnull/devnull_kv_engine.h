@@ -55,11 +55,6 @@ namespace mongo {
                                              const StringData& ident,
                                              const CollectionOptions& options );
 
-        virtual Status dropRecordStore( OperationContext* opCtx,
-                                        const StringData& ident ) {
-            return Status::OK();
-        }
-
         virtual Status createSortedDataInterface( OperationContext* opCtx,
                                                   const StringData& ident,
                                                   const IndexDescriptor* desc ) {
@@ -70,8 +65,8 @@ namespace mongo {
                                                              const StringData& ident,
                                                              const IndexDescriptor* desc );
 
-        virtual Status dropSortedDataInterface( OperationContext* opCtx,
-                                                const StringData& ident ) {
+        virtual Status dropIdent( OperationContext* opCtx,
+                                  const StringData& ident ) {
             return Status::OK();
         }
 
@@ -93,5 +88,13 @@ namespace mongo {
             return Status::OK();
         }
 
+        std::vector<std::string> getAllIdents( OperationContext* opCtx ) const {
+            return std::vector<std::string>();
+        }
+
+        virtual void cleanShutdown() {};
+
+    private:
+        boost::shared_ptr<void> _catalogInfo;
     };
 }

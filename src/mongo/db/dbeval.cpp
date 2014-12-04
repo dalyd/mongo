@@ -28,7 +28,7 @@
 *    it in the license file.
 */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommands
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -78,6 +78,7 @@ namespace mongo {
         }
 
         scoped_ptr<Scope> s(globalScriptEngine->newScope());
+        s->registerOperation(txn);
 
         ScriptingFunction f = s->createFunction(code);
         if ( f == 0 ) {
@@ -150,6 +151,7 @@ namespace mongo {
                 return dbEval(txn, dbname, cmdObj, result, errmsg);
             }
 
+            ScopedTransaction transaction(txn, MODE_X);
             Lock::GlobalWrite lk(txn->lockState());
             // No WriteUnitOfWork necessary, as dbEval will create its own, see "nolock" case above
             Client::Context ctx(txn,  dbname );

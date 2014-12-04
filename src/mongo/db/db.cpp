@@ -36,6 +36,7 @@
 #include <boost/filesystem/operations.hpp>
 #include <fstream>
 #include <limits>
+#include <string>
 
 #include "mongo/base/init.h"
 #include "mongo/base/initializer.h"
@@ -44,6 +45,8 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/authz_manager_external_state_d.h"
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_catalog_entry.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_key_validate.h"
@@ -62,13 +65,18 @@
 #include "mongo/db/instance.h"
 #include "mongo/db/introspect.h"
 #include "mongo/db/json.h"
+#include "mongo/db/lasterror.h"
 #include "mongo/db/log_process_details.h"
 #include "mongo/db/mongod_options.h"
 #include "mongo/db/operation_context_impl.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/range_deleter_service.h"
+#include "mongo/db/repl/network_interface_impl.h"
+#include "mongo/db/repl/repl_coordinator_external_state_impl.h"
 #include "mongo/db/repl/repl_coordinator_global.h"
+#include "mongo/db/repl/repl_coordinator_impl.h"
 #include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/repl/topology_coordinator_impl.h"
 #include "mongo/db/restapi.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/startup_warnings_mongod.h"
@@ -80,6 +88,7 @@
 #include "mongo/db/ttl.h"
 #include "mongo/platform/process_id.h"
 #include "mongo/scripting/engine.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/cmdline_utils/censor_cmdline.h"
 #include "mongo/util/concurrency/task.h"
 #include "mongo/util/concurrency/thread_name.h"
@@ -172,7 +181,7 @@ namespace mongo {
         }
 
         virtual void process( Message& m , AbstractMessagingPort* port , LastError * le) {
-            boost::scoped_ptr<OperationContext> txn(new OperationContextImpl());
+            OperationContextImpl txn;
             while ( true ) {
                 if ( inShutdown() ) {
                     log() << "got request after shutdown()" << endl;
@@ -182,7 +191,7 @@ namespace mongo {
                 lastError.startRequest( m , le );
 
                 DbResponse dbresponse;
-                assembleResponse( txn.get(), m, dbresponse, port->remote() );
+                assembleResponse(&txn, m, dbresponse, port->remote());
 
                 if ( dbresponse.response ) {
                     port->reply(m, *dbresponse.response, dbresponse.responseTo);
@@ -243,13 +252,21 @@ namespace mongo {
 
         OperationContextImpl txn;
 
+        ScopedTransaction transaction(&txn, MODE_X);
         Lock::GlobalWrite lk(txn.lockState());
-        //  No WriteUnitOfWork, as DirectClient creates its own units of work
-        DBDirectClient c(&txn);
-
-        static const char* name = "local.startup_log";
-        c.createCollection( name, 10 * 1024 * 1024, true );
-        c.insert( name, o);
+        AutoGetOrCreateDb autoDb(&txn, "local", mongo::MODE_X);
+        Database* db = autoDb.getDb();
+        const std::string ns = "local.startup_log";
+        Collection* collection = db->getCollection(&txn, ns);
+        WriteUnitOfWork wunit(&txn);
+        if (!collection) {
+            BSONObj options = BSON("capped" << true << "size" << 10 * 1024 * 1024);
+            uassertStatusOK(userCreateNS(&txn, db, ns, options, true));
+            collection = db->getCollection(&txn, ns);
+        }
+        invariant(collection);
+        uassertStatusOK(collection->insertDocument(&txn, o, false).getStatus());
+        wunit.commit();
     }
 
     static void checkForIdIndexes(OperationContext* txn, Database* db) {
@@ -294,6 +311,7 @@ namespace mongo {
      */
     static unsigned long long checkIfReplMissingFromCommandLine(OperationContext* txn) {
         // This is helpful for the query below to work as you can't open files when readlocked
+        ScopedTransaction transaction(txn, MODE_X);
         Lock::GlobalWrite lk(txn->lockState());
         if (!repl::getGlobalReplicationCoordinator()->getSettings().usingReplSets()) {
             DBDirectClient c(txn);
@@ -306,6 +324,7 @@ namespace mongo {
         LOG(1) << "enter repairDatabases (to check pdfile version #)" << endl;
 
         OperationContextImpl txn;
+        ScopedTransaction transaction(&txn, MODE_X);
         Lock::GlobalWrite lk(txn.lockState());
 
         vector<string> dbNames;
@@ -450,6 +469,26 @@ namespace mongo {
                     boost::filesystem::exists(storageGlobalParams.repairpath));
         }
 
+        // Warn if we detect configurations for multiple registered storage engines in
+        // the same configuration file/environment.
+        if (serverGlobalParams.parsedOpts.hasField("storage")) {
+            BSONElement storageElement = serverGlobalParams.parsedOpts.getField("storage");
+            invariant(storageElement.isABSONObj());
+            BSONObj storageParamsObj = storageElement.Obj();
+            BSONObjIterator i = storageParamsObj.begin();
+            while (i.more()) {
+                BSONElement e = i.next();
+                // Ignore if field name under "storage" matches current storage engine.
+                if (storageGlobalParams.engine == e.fieldName()) continue;
+                // Warn if field name matches non-active registered storage engine.
+                if (getGlobalEnvironment()->isRegisteredStorageEngine(e.fieldName())) {
+                    warning()
+                        << "Detected configuration for non-active storage engine " << e.fieldName()
+                        << " when current storage engine is " << storageGlobalParams.engine;
+                }
+            }
+        }
+
         // Due to SERVER-15389, we must setupSockets first thing at startup in order to avoid
         // obtaining too high a file descriptor for our calls to select().
         MessageServer::Options options;
@@ -505,39 +544,22 @@ namespace mongo {
             web.detach();
         }
 
-        startClientCursorMonitor();
-
-        PeriodicTask::startRunningPeriodicTasks();
-
         {
             OperationContextImpl txn;
 
-            const unsigned long long missingRepl = checkIfReplMissingFromCommandLine(&txn);
-            if (missingRepl) {
-                log() << startupWarningsLog;
-                log() << "** WARNING: mongod started without --replSet yet " << missingRepl
-                      << " documents are present in local.system.replset" << startupWarningsLog;
-                log() << "**          Restart with --replSet unless you are doing maintenance and "
-                      << " no other clients are connected." << startupWarningsLog;
-                log() << "**          The TTL collection monitor will not start because of this." 
-                      << startupWarningsLog;
-                log() << "**         ";
-                log() << " For more info see http://dochub.mongodb.org/core/ttlcollections";
-                log() << startupWarningsLog;
-            }
-            else {
-                startTTLBackgroundJob();
-            }
-
 #ifndef _WIN32
-        mongo::signalForkSuccess();
+            mongo::signalForkSuccess();
 #endif
 
-            authindex::configureSystemIndexes(&txn);
+            Status status = authindex::verifySystemIndexes(&txn);
+            if (!status.isOK()) {
+                log() << status.reason();
+                exitCleanly(EXIT_NEED_UPGRADE);
+            }
 
             // SERVER-14090: Verify that auth schema version is schemaVersion26Final.
             int foundSchemaVersion;
-            Status status = getGlobalAuthorizationManager()->getAuthorizationVersion(
+            status = getGlobalAuthorizationManager()->getAuthorizationVersion(
                     &txn, &foundSchemaVersion);
             if (!status.isOK()) {
                 log() << "Auth schema version is incompatible: "
@@ -562,7 +584,29 @@ namespace mongo {
             restartInProgressIndexesFromLastShutdown(&txn);
 
             repl::getGlobalReplicationCoordinator()->startReplication(&txn);
+
+            const unsigned long long missingRepl = checkIfReplMissingFromCommandLine(&txn);
+            if (missingRepl) {
+                log() << startupWarningsLog;
+                log() << "** WARNING: mongod started without --replSet yet " << missingRepl
+                      << " documents are present in local.system.replset" << startupWarningsLog;
+                log() << "**          Restart with --replSet unless you are doing maintenance and "
+                      << " no other clients are connected." << startupWarningsLog;
+                log() << "**          The TTL collection monitor will not start because of this." 
+                      << startupWarningsLog;
+                log() << "**         ";
+                log() << " For more info see http://dochub.mongodb.org/core/ttlcollections";
+                log() << startupWarningsLog;
+            }
+            else {
+                startTTLBackgroundJob();
+            }
+
         }
+
+        startClientCursorMonitor();
+
+        PeriodicTask::startRunningPeriodicTasks();
 
         logStartup();
 
@@ -729,6 +773,19 @@ MONGO_INITIALIZER_GENERAL(CreateAuthorizationManager,
     AuthorizationManager* authzManager =
             new AuthorizationManager(new AuthzManagerExternalStateMongod());
     setGlobalAuthorizationManager(authzManager);
+    return Status::OK();
+}
+
+MONGO_INITIALIZER_WITH_PREREQUISITES(CreateReplicationManager, ("SetGlobalEnvironment"))
+        (InitializerContext* context) {
+    repl::ReplicationCoordinatorImpl* replCoord = new repl::ReplicationCoordinatorImpl(
+            getGlobalReplSettings(),
+            new repl::ReplicationCoordinatorExternalStateImpl,
+            new repl::NetworkInterfaceImpl,
+            new repl::TopologyCoordinatorImpl(Seconds(repl::maxSyncSourceLagSecs)),
+            static_cast<int64_t>(curTimeMillis64()));
+    repl::setGlobalReplicationCoordinator(replCoord);
+    getGlobalEnvironment()->registerKillOpListener(replCoord);
     return Status::OK();
 }
 

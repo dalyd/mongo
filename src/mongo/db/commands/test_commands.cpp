@@ -28,7 +28,7 @@
 *    it in the license file.
 */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommands
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -66,6 +66,7 @@ namespace mongo {
             string ns = dbname + "." + coll;
             BSONObj obj = cmdObj[ "obj" ].embeddedObjectUserCheck();
 
+            ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock lk(txn->lockState(), dbname, MODE_X);
             WriteUnitOfWork wunit(txn);
             Client::Context ctx(txn,  ns );
@@ -78,7 +79,7 @@ namespace mongo {
                     return false;
                 }
             }
-            StatusWith<DiskLoc> res = collection->insertDocument( txn, obj, false );
+            StatusWith<RecordId> res = collection->insertDocument( txn, obj, false );
             Status status = res.getStatus();
             if (status.isOK()) {
                 wunit.commit();
@@ -117,10 +118,12 @@ namespace mongo {
             }
 
             if(cmdObj.getBoolField("w")) {
+                ScopedTransaction transaction(txn, MODE_X);
                 Lock::GlobalWrite lk(txn->lockState());
                 sleepmillis(millis);
             }
             else {
+                ScopedTransaction transaction(txn, MODE_S);
                 Lock::GlobalRead lk(txn->lockState());
                 sleepmillis(millis);
             }
@@ -153,7 +156,7 @@ namespace mongo {
             Collection* collection = ctx.getCollection();
             massert( 13417, "captrunc collection not found or empty", collection);
 
-            DiskLoc end;
+            RecordId end;
             {
                 boost::scoped_ptr<PlanExecutor> exec(InternalPlanner::collectionScan(txn,
                                                                                      nss.ns(),

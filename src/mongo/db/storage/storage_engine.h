@@ -37,6 +37,7 @@
 
 namespace mongo {
 
+    class BSONObj;
     class DatabaseCatalogEntry;
     class OperationContext;
     class RecoveryUnit;
@@ -65,6 +66,26 @@ namespace mongo {
              * Return a new instance of the StorageEngine.  Caller owns the returned pointer.
              */
             virtual StorageEngine* create(const StorageGlobalParams& params) const = 0;
+
+            /**
+             * Returns the name of the storage engine.
+             *
+             * Implementations that change the value of the returned string can cause
+             * data file incompatibilities.
+             */
+            virtual StringData getCanonicalName() const = 0;
+
+            /**
+             * Validates creation options for a collection in the StorageEngine.
+             * Returns an error if the creation options are not valid.
+             */
+            virtual Status validateCollectionStorageOptions(const BSONObj& options) const = 0;
+
+            /**
+             * Validates creation options for an index in the StorageEngine.
+             * Returns an error if the creation options are not valid.
+             */
+             virtual Status validateIndexStorageOptions(const BSONObj& options) const = 0;
         };
 
         /**
@@ -145,7 +166,7 @@ namespace mongo {
          *
          * There is intentionally no uncleanShutdown().
          */
-        virtual void cleanShutdown(OperationContext* txn) {}
+        virtual void cleanShutdown() = 0;
 
     protected:
         /**

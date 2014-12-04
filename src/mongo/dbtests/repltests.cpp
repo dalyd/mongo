@@ -31,7 +31,7 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/bson/mutable/document.h"
 #include "mongo/bson/mutable/mutable_bson_test_utils.h"
@@ -42,7 +42,7 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_coordinator_global.h"
 #include "mongo/db/repl/repl_coordinator_mock.h"
-#include "mongo/db/repl/rs.h"
+#include "mongo/db/repl/sync.h"
 #include "mongo/db/ops/update.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/operation_context_impl.h"
@@ -131,6 +131,7 @@ namespace ReplTests {
             return _client.findOne( cllNS(), BSONObj() );
         }
         int count() const {
+            ScopedTransaction transaction(&_txn, MODE_X);
             Lock::GlobalWrite lk(_txn.lockState());
             Client::Context ctx(&_txn,  ns() );
             Database* db = ctx.db();
@@ -150,6 +151,7 @@ namespace ReplTests {
             return count;
         }
         int opCount() {
+            ScopedTransaction transaction(&_txn, MODE_X);
             Lock::GlobalWrite lk(_txn.lockState());
             Client::Context ctx(&_txn,  cllNS() );
 
@@ -170,8 +172,8 @@ namespace ReplTests {
             return count;
         }
         void applyAllOperations() {
+            ScopedTransaction transaction(&_txn, MODE_X);
             Lock::GlobalWrite lk(_txn.lockState());
-            WriteUnitOfWork wunit(&_txn);
             vector< BSONObj > ops;
             {
                 Client::Context ctx(&_txn,  cllNS() );
@@ -180,7 +182,7 @@ namespace ReplTests {
 
                 RecordIterator* it = coll->getIterator(&_txn);
                 while ( !it->isEOF() ) {
-                    DiskLoc currLoc = it->getNext();
+                    RecordId currLoc = it->getNext();
                     ops.push_back(coll->docFor(&_txn, currLoc));
                 }
                 delete it;
@@ -191,37 +193,40 @@ namespace ReplTests {
                 b.append("host", "localhost");
                 b.appendTimestamp("syncedTo", 0);
                 ReplSource a(&_txn, b.obj());
+                WriteUnitOfWork wunit(&_txn);
                 for( vector< BSONObj >::iterator i = ops.begin(); i != ops.end(); ++i ) {
                     if ( 0 ) {
                         mongo::unittest::log() << "op: " << *i << endl;
                     }
                     a.applyOperation( &_txn, ctx.db(), *i );
                 }
+                wunit.commit();
             }
-            wunit.commit();
         }
         void printAll( const char *ns ) {
+            ScopedTransaction transaction(&_txn, MODE_X);
             Lock::GlobalWrite lk(_txn.lockState());
-            WriteUnitOfWork wunit(&_txn);
             Client::Context ctx(&_txn,  ns );
 
             Database* db = ctx.db();
             Collection* coll = db->getCollection( &_txn, ns );
             if ( !coll ) {
+                WriteUnitOfWork wunit(&_txn);
                 coll = db->createCollection( &_txn, ns );
+                wunit.commit();
             }
 
             RecordIterator* it = coll->getIterator(&_txn);
             ::mongo::log() << "all for " << ns << endl;
             while ( !it->isEOF() ) {
-                DiskLoc currLoc = it->getNext();
+                RecordId currLoc = it->getNext();
                 ::mongo::log() << coll->docFor(&_txn, currLoc).toString() << endl;
             }
             delete it;
-            wunit.commit();
         }
         // These deletes don't get logged.
         void deleteAll( const char *ns ) const {
+            ScopedTransaction transaction(&_txn, MODE_X);
             Lock::GlobalWrite lk(_txn.lockState());
             Client::Context ctx(&_txn,  ns );
             WriteUnitOfWork wunit(&_txn);
@@ -231,18 +236,19 @@ namespace ReplTests {
                 coll = db->createCollection( &_txn, ns );
             }
 
-            vector< DiskLoc > toDelete;
+            vector< RecordId > toDelete;
             RecordIterator* it = coll->getIterator(&_txn);
             while ( !it->isEOF() ) {
                 toDelete.push_back( it->getNext() );
             }
             delete it;
-            for( vector< DiskLoc >::iterator i = toDelete.begin(); i != toDelete.end(); ++i ) {
+            for( vector< RecordId >::iterator i = toDelete.begin(); i != toDelete.end(); ++i ) {
                 coll->deleteDocument( &_txn, *i, true );
             }
             wunit.commit();
         }
         void insert( const BSONObj &o ) const {
+            ScopedTransaction transaction(&_txn, MODE_X);
             Lock::GlobalWrite lk(_txn.lockState());
             Client::Context ctx(&_txn,  ns() );
             WriteUnitOfWork wunit(&_txn);
@@ -1246,7 +1252,7 @@ namespace ReplTests {
             void reset() const {
                 deleteAll( ns() );
                 // Add an index on 'a'.  This prevents the update from running 'in place'.
-                _client.ensureIndex( ns(), BSON( "a" << 1 ) );
+                ASSERT_OK(dbtests::createIndex( &_txn, ns(), BSON( "a" << 1 ) ));
                 insert( fromjson( "{'_id':0,z:1}" ) );
             }
         };
@@ -1388,25 +1394,6 @@ namespace ReplTests {
         }
     };
 
-    /** Check ReplSetConfig::MemberCfg equality */
-    class ReplSetMemberCfgEquality : public Base {
-    public:
-        void run() {
-            ReplSetConfig::MemberCfg m1, m2;
-            verify(m1 == m2);
-            m1.tags["x"] = "foo";
-            verify(m1 != m2);
-            m2.tags["y"] = "bar";
-            verify(m1 != m2);
-            m1.tags["y"] = "bar";
-            verify(m1 != m2);
-            m2.tags["x"] = "foo";
-            verify(m1 == m2);
-            m1.tags.clear();
-            verify(m1 != m2);
-        }
-    };
-
     class SyncTest : public Sync {
     public:
         bool returnEmpty;
@@ -1427,6 +1414,7 @@ namespace ReplTests {
             bool threw = false;
             BSONObj o = BSON("ns" << ns() << "o" << BSON("foo" << "bar") << "o2" << BSON("_id" << "in oplog" << "foo" << "bar"));
 
+            ScopedTransaction transaction(&_txn, MODE_X);
             Lock::GlobalWrite lk(_txn.lockState());
 
             // this should fail because we can't connect
@@ -1516,7 +1504,6 @@ namespace ReplTests {
             add< DeleteOpIsIdBased >();
             add< DatabaseIgnorerBasic >();
             add< DatabaseIgnorerUpdate >();
-            add< ReplSetMemberCfgEquality >();
             add< ShouldRetry >();
         }
     };

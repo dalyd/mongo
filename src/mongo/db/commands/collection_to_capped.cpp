@@ -35,11 +35,12 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/index_builder.h"
 #include "mongo/db/query/internal_plans.h"
-#include "mongo/db/query/new_find.h"
+#include "mongo/db/query/find.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/operation_context_impl.h"
 
 namespace mongo {
+namespace {
 
     Status cloneCollectionAsCapped( OperationContext* txn,
                                     Database* db,
@@ -123,6 +124,8 @@ namespace mongo {
         invariant( false ); // unreachable
     }
 
+} // namespace
+
     /* convertToCapped seems to use this */
     class CmdCloneCollectionAsCapped : public Command {
     public:
@@ -161,10 +164,12 @@ namespace mongo {
                 return false;
             }
 
-            Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
-            Client::Context ctx(txn, dbname);
+            ScopedTransaction transaction(txn, MODE_IX);
+            AutoGetDb autoDb(txn, dbname, MODE_X);
 
-            Status status = cloneCollectionAsCapped( txn, ctx.db(), from, to, size, temp, true );
+            Database* const db = autoDb.getDb();
+
+            Status status = cloneCollectionAsCapped(txn, db, from, to, size, temp, true);
             return appendCommandStatus( result, status );
         }
     } cmdCloneCollectionAsCapped;
@@ -193,7 +198,7 @@ namespace mongo {
         virtual std::vector<BSONObj> stopIndexBuilds(OperationContext* opCtx,
                                                      Database* db,
                                                      const BSONObj& cmdObj) {
-            std::string collName = cmdObj.firstElement().valuestr();
+            std::string collName = cmdObj.firstElement().valuestrsafe();
             std::string ns = db->name() + "." + collName;
 
             IndexCatalog::IndexKillCriteria criteria;
@@ -212,12 +217,18 @@ namespace mongo {
                  string& errmsg,
                  BSONObjBuilder& result,
                  bool fromRepl ) {
-            // calls renamecollection which does a global lock, so we must too:
-            //
-            Lock::GlobalWrite globalWriteLock(txn->lockState());
-            Client::Context ctx(txn, dbname);
 
-            Database* db = ctx.db();
+            ScopedTransaction transaction(txn, MODE_IX);
+            AutoGetDb autoDb(txn, dbname, MODE_X);
+
+            Database* const db = autoDb.getDb();
+            if (!db) {
+                return appendCommandStatus(
+                            result,
+                            Status(ErrorCodes::NamespaceNotFound,
+                                   str::stream() << "source database "
+                                                 << dbname << " does not exist"));
+            }
 
             stopIndexBuilds(txn, db, jsobj);
             BackgroundOperation::assertNoBgOpInProgForDb(dbname.c_str());

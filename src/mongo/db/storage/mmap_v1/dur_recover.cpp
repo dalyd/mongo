@@ -28,7 +28,7 @@
 *    it in the license file.
 */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kJournaling
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kJournal
 
 #include "mongo/platform/basic.h"
 
@@ -602,6 +602,7 @@ namespace mongo {
             // we use a lock so that exitCleanly will wait for us
             // to finish (or at least to notice what is up and stop)
             OperationContextImpl txn;
+            ScopedTransaction transaction(&txn, MODE_X);
             Lock::GlobalWrite lk(txn.lockState());
 
             // can't lock groupCommitMutex here as

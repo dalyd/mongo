@@ -147,6 +147,15 @@ namespace mongo {
         abort();
     }
 
+    NOINLINE_DECL void invariantOKFailed(const char *msg, const Status& status, const char *file,
+                                         unsigned line) {
+        log() << "Invariant failure " << msg << ' ' << status << ' ' << file << ' ' << dec << line;
+        logContext();
+        breakpoint();
+        log() << "\n\n***aborting after invariant() failure\n\n" << endl;
+        abort();
+    }
+
     NOINLINE_DECL void fassertFailed( int msgid ) {
         log() << "Fatal Assertion " << msgid << endl;
         logContext();
@@ -168,6 +177,14 @@ namespace mongo {
         breakpoint();
         log() << "\n\n***aborting after fassert() failure\n\n" << endl;
         abort();
+    }
+
+    MONGO_COMPILER_NORETURN void fassertFailedWithStatusNoTrace(int msgid, const Status& status) {
+        log() << "Fatal assertion " <<  msgid << " " << status;
+        logContext();
+        breakpoint();
+        log() << "\n\n***aborting after fassert() failure\n\n" << endl;
+        quickExit(EXIT_ABRUPT); // bypass our handler for SIGABRT, which prints a stack trace.
     }
 
     void uasserted(int msgid , const string &msg) {

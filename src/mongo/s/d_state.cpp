@@ -595,6 +595,7 @@ namespace mongo {
         {
             // Exclusive collection lock needed since we're now potentially changing the metadata,
             // and don't want reads/writes to be ongoing.
+            ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock dbLock(txn->lockState(), nsToDatabaseSubstring(ns), MODE_IX);
             Lock::CollectionLock collLock(txn->lockState(), ns, MODE_X);
 
@@ -977,11 +978,24 @@ namespace mongo {
                 return true;
             }
 
+            ScopedTransaction transaction(txn, MODE_X);
             Lock::GlobalWrite lk(txn->lockState());
             return checkConfigOrInit(txn, configdb, authoritative, errmsg, result, true);
         }
 
         bool run(OperationContext* txn, const string& , BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
+
+            // Compatibility error for < v2.8 mongoses still active in the cluster
+            // TODO: Remove post-2.8
+            if (!cmdObj["serverID"].eoo()) {
+
+                // This mongos is too old to talk to us
+                string errMsg = stream() << "v2.8 mongod is incompatible with v2.6 mongos, "
+                                         << "a v2.6 mongos may be running in the v2.8 cluster at "
+                                         << txn->getClient()->clientAddress(false);
+                error() << errMsg;
+                return appendCommandStatus(result, Status(ErrorCodes::ProtocolError, errMsg));
+            }
 
             // Steps
             // 1. check basic config
@@ -1265,6 +1279,7 @@ namespace mongo {
         }
 
         bool run(OperationContext* txn, const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool) {
+            ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
             Client::Context ctx(txn, dbname);
 

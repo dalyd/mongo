@@ -65,10 +65,10 @@ namespace QueryStageSortTests {
             _client.insert(ns(), obj);
         }
 
-        void getLocs(set<DiskLoc>* out, Collection* coll) {
+        void getLocs(set<RecordId>* out, Collection* coll) {
             RecordIterator* it = coll->getIterator(&_txn);
             while (!it->isEOF()) {
-                DiskLoc nextLoc = it->getNext();
+                RecordId nextLoc = it->getNext();
                 out->insert(nextLoc);
             }
             delete it;
@@ -78,10 +78,10 @@ namespace QueryStageSortTests {
          * We feed a mix of (key, unowned, owned) data to the sort stage.
          */
         void insertVarietyOfObjects(MockStage* ms, Collection* coll) {
-            set<DiskLoc> locs;
+            set<RecordId> locs;
             getLocs(&locs, coll);
 
-            set<DiskLoc>::iterator it = locs.begin();
+            set<RecordId>::iterator it = locs.begin();
 
             for (int i = 0; i < numObj(); ++i, ++it) {
                 ASSERT_FALSE(it == locs.end());
@@ -127,7 +127,7 @@ namespace QueryStageSortTests {
                 PlanExecutor::make(&_txn,
                                    ws,
                                    new FetchStage(&_txn, ws,
-                                                  new SortStage(&_txn, params, ws, ms), NULL, coll),
+                                                  new SortStage(params, ws, ms), NULL, coll),
                                    coll, PlanExecutor::YIELD_MANUAL, &rawExec);
             ASSERT_OK(status);
             boost::scoped_ptr<PlanExecutor> exec(rawExec);
@@ -269,7 +269,7 @@ namespace QueryStageSortTests {
             fillData();
 
             // The data we're going to later invalidate.
-            set<DiskLoc> locs;
+            set<RecordId> locs;
             getLocs(&locs, coll);
 
             // Build the mock scan stage which feeds the data.
@@ -281,7 +281,7 @@ namespace QueryStageSortTests {
             params.collection = coll;
             params.pattern = BSON("foo" << 1);
             params.limit = limit();
-            auto_ptr<SortStage> ss(new SortStage(&_txn, params, &ws, ms.get()));
+            auto_ptr<SortStage> ss(new SortStage(params, &ws, ms.get()));
 
             const int firstRead = 10;
 
@@ -294,8 +294,8 @@ namespace QueryStageSortTests {
 
             // We should have read in the first 'firstRead' locs.  Invalidate the first.
             ss->saveState();
-            set<DiskLoc>::iterator it = locs.begin();
-            ss->invalidate(*it++, INVALIDATION_DELETION);
+            set<RecordId>::iterator it = locs.begin();
+            ss->invalidate(&_txn, *it++, INVALIDATION_DELETION);
             ss->restoreState(&_txn);
 
             // Read the rest of the data from the mock stage.
@@ -310,7 +310,7 @@ namespace QueryStageSortTests {
             // Let's just invalidate everything now.
             ss->saveState();
             while (it != locs.end()) {
-                ss->invalidate(*it++, INVALIDATION_DELETION);
+                ss->invalidate(&_txn, *it++, INVALIDATION_DELETION);
             }
             ss->restoreState(&_txn);
 
@@ -384,7 +384,7 @@ namespace QueryStageSortTests {
                                    ws,
                                    new FetchStage(&_txn,
                                                   ws,
-                                                  new SortStage(&_txn, params, ws, ms), NULL, coll),
+                                                  new SortStage(params, ws, ms), NULL, coll),
                                    coll, PlanExecutor::YIELD_MANUAL, &rawExec);
             boost::scoped_ptr<PlanExecutor> exec(rawExec);
 

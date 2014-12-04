@@ -26,15 +26,15 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kIndexing
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kIndex
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/db/diskloc.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/mmap_v1/btree/btree_logic.h"
 #include "mongo/db/storage/mmap_v1/btree/key.h"
+#include "mongo/db/storage/mmap_v1/diskloc.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -87,6 +87,21 @@ namespace mongo {
     }
 
     template <class BtreeLayout>
+    class BtreeLogic<BtreeLayout>::Builder::SetRightLeafLocChange : public RecoveryUnit::Change {
+    public:
+        SetRightLeafLocChange(Builder* builder, DiskLoc oldLoc)
+            : _builder(builder)
+            , _oldLoc(oldLoc)
+        {}
+
+        virtual void commit() {}
+        virtual void rollback() { _builder->_rightLeafLoc = _oldLoc; }
+
+        Builder* _builder;
+        const DiskLoc _oldLoc;
+    };
+
+    template <class BtreeLayout>
     Status BtreeLogic<BtreeLayout>::Builder::addKey(const BSONObj& keyObj, const DiskLoc& loc) {
         auto_ptr<KeyDataOwnedType> key(new KeyDataOwnedType(keyObj));
 
@@ -116,6 +131,7 @@ namespace mongo {
         BucketType* rightLeaf = _getModifiableBucket(_rightLeafLoc);
         if (!_logic->pushBack(rightLeaf, loc, *key, DiskLoc())) {
             // bucket was full, so split and try with the new node.
+            _txn->recoveryUnit()->registerChange(new SetRightLeafLocChange(this, _rightLeafLoc));
             _rightLeafLoc = newBucket(rightLeaf, _rightLeafLoc);
             rightLeaf = _getModifiableBucket(_rightLeafLoc);
             invariant(_logic->pushBack(rightLeaf, loc, *key, DiskLoc()));
@@ -1073,7 +1089,7 @@ namespace mongo {
         // Find the DiskLoc 
         bool found;
 
-        DiskLoc bucket = _locate(txn, getRootLoc(txn), key, &position, &found, minDiskLoc, 1);
+        DiskLoc bucket = _locate(txn, getRootLoc(txn), key, &position, &found, DiskLoc::min(), 1);
 
         while (!bucket.isNull()) {
             FullKey fullKey = getFullKey(getBucket(txn, bucket), position);
@@ -1105,7 +1121,7 @@ namespace mongo {
         int position;
         bool found;
 
-        DiskLoc posLoc = _locate(txn, getRootLoc(txn), key, &position, &found, minDiskLoc, 1);
+        DiskLoc posLoc = _locate(txn, getRootLoc(txn), key, &position, &found, DiskLoc::min(), 1);
 
         while (!posLoc.isNull()) {
             FullKey fullKey = getFullKey(getBucket(txn, posLoc), position);

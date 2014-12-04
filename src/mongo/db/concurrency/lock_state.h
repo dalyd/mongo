@@ -59,7 +59,7 @@ namespace mongo {
 
     private:
 
-        virtual void notify(const ResourceId& resId, LockResult result);
+        virtual void notify(ResourceId resId, LockResult result);
 
         // These two go together to implement the conditional variable pattern.
         boost::mutex _mutex;
@@ -96,6 +96,9 @@ namespace mongo {
         virtual LockerId getId() const { return _id; }
 
         virtual LockResult lockGlobal(LockMode mode, unsigned timeoutMs = UINT_MAX);
+        virtual LockResult lockGlobalBegin(LockMode mode);
+        virtual LockResult lockGlobalComplete(unsigned timeoutMs);
+
         virtual void downgradeGlobalXtoSForMMAPV1();
         virtual bool unlockAll();
 
@@ -104,17 +107,17 @@ namespace mongo {
 
         virtual bool inAWriteUnitOfWork() const { return _wuowNestingLevel > 0; }
 
-        virtual LockResult lock(const ResourceId& resId,
+        virtual LockResult lock(ResourceId resId,
                                 LockMode mode, 
                                 unsigned timeoutMs = UINT_MAX,
                                 bool checkDeadlock = false);
 
-        virtual void downgrade(const ResourceId& resId, LockMode newMode);
+        virtual void downgrade(ResourceId resId, LockMode newMode);
 
-        virtual bool unlock(const ResourceId& resId);
+        virtual bool unlock(ResourceId resId);
 
-        virtual LockMode getLockMode(const ResourceId& resId) const;
-        virtual bool isLockHeldForMode(const ResourceId& resId, LockMode mode) const;
+        virtual LockMode getLockMode(ResourceId resId) const;
+        virtual bool isLockHeldForMode(ResourceId resId, LockMode mode) const;
         virtual bool isDbLockedForMode(const StringData& dbName, LockMode mode) const;
         virtual bool isCollectionLockedForMode(const StringData& ns, LockMode mode) const;
 
@@ -127,13 +130,31 @@ namespace mongo {
         virtual void restoreLockState(const LockSnapshot& stateToRestore);
 
         /**
-         * Posts a request to the lock manager for the specified lock to be acquired and returns
-         * immediately.
+         * Allows for lock requests to be requested in a non-blocking way. There can be only one
+         * outstanding pending lock request per locker object.
          *
-         * NOTE: Must only be used to implement the actual lock call and for unit tests, because
-         * it skips any internal consistency checks.
+         * lockBegin posts a request to the lock manager for the specified lock to be acquired,
+         * which either immediately grants the lock, or puts the requestor on the conflict queue
+         * and returns immediately with the result of the acquisition. The result can be one of:
+         *
+         * LOCK_OK - Nothing more needs to be done. The lock is granted.
+         * LOCK_WAITING - The request has been queued up and will be granted as soon as the lock
+         *      is free. If this result is returned, typically lockComplete needs to be called in
+         *      order to wait for the actual grant to occur. If the caller no longer needs to wait
+         *      for the grant to happen, unlock needs to be called with the same resource passed
+         *      to lockBegin.
+         *
+         * In other words for each call to lockBegin, which does not return LOCK_OK, there needs to
+         * be a corresponding call to either lockComplete or unlock.
          */
-        LockResult lockImpl(const ResourceId& resId, LockMode mode);
+        LockResult lockBegin(ResourceId resId, LockMode mode);
+
+        /**
+         * Waits for the completion of a lock, previously requested through lockBegin or
+         * lockGlobalBegin. Must only be called, if lockBegin returned LOCK_WAITING. The resId
+         * argument must match what was previously passed to lockBegin.
+         */
+        LockResult lockComplete(ResourceId resId, unsigned timeoutMs, bool checkDeadlock);
 
     private:
 
@@ -215,9 +236,6 @@ namespace mongo {
         virtual Lock::ScopedLock* getCurrentScopedLock() const;
         virtual void leaveScopedLock(Lock::ScopedLock* lock);
 
-        virtual void recordLockTime() { _scopedLk->recordTime(); }
-        virtual void resetLockTime() { _scopedLk->resetTime(); }
-
         virtual void setIsBatchWriter(bool newValue) { _batchWriter = newValue; }
         virtual bool isBatchWriter() const { return _batchWriter; }
         virtual void setLockPendingParallelWriter(bool newValue) { 
@@ -237,6 +255,7 @@ namespace mongo {
         Lock::ScopedLock* _scopedLk;
     };
 
+    typedef LockerImpl<false> DefaultLockerImpl;
     typedef LockerImpl<true> MMAPV1LockerImpl;
 
 

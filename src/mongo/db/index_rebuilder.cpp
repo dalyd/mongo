@@ -26,7 +26,7 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kIndexing
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kIndex
 
 #include "mongo/platform/basic.h"
 
@@ -64,6 +64,7 @@ namespace {
 
             // This write lock is held throughout the index building process
             // for this namespace.
+            ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock lk(txn->lockState(), nsToDatabaseSubstring(ns), MODE_X);
             Client::Context ctx(txn, ns);
 

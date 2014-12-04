@@ -44,6 +44,16 @@ namespace mongo {
     class WriteConflictException : public DBException {
     public:
         WriteConflictException() : DBException( "WriteConflict", ErrorCodes::WriteConflict ){}
+
+        /**
+         * Will log a message if sensible and will do an exponential backoff to make sure
+         * we don't hammer the same doc over and over.
+         * @param attempt - what attempt is this, 1 based
+         * @param operation - e.g. "update"
+         */
+        static void logAndBackoff(int attempt,
+                                  const StringData& operation,
+                                  const StringData& ns);
     };
 
 }

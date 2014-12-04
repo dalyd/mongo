@@ -36,6 +36,7 @@
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/storage/record_fetcher.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 
@@ -55,9 +56,16 @@ namespace mongo {
           _filter(filter),
           _params(params),
           _isDead(false),
+          _wsidForFetch(_workingSet->allocate()),
           _commonStats(kStageType) {
         // Explain reports the direction of the collection scan.
         _specificStats.direction = params.direction;
+
+        // We pre-allocate a WSM and use it to pass up fetch requests. This should never be used
+        // for anything other than passing up NEED_FETCH. We use the loc and unowned obj state, but
+        // the loc isn't really pointing at any obj. The obj field of the WSM should never be used.
+        WorkingSetMember* member = _workingSet->get(_wsidForFetch);
+        member->state = WorkingSetMember::LOC_AND_UNOWNED_OBJ;
     }
 
     PlanStage::StageState CollectionScan::work(WorkingSetID* out) {
@@ -100,38 +108,62 @@ namespace mongo {
             return PlanStage::NEED_TIME;
         }
 
-        // What we'll return to the user.
-        DiskLoc nextLoc;
-
         // Should we try getNext() on the underlying _iter?
         if (isEOF())
             return PlanStage::IS_EOF;
 
-        // See if _iter gives us anything new.
-        nextLoc = _iter->getNext();
-        if (nextLoc.isNull()) {
+        const RecordId curr = _iter->curr();
+        if (curr.isNull()) {
+            // We just hit EOF
             if (_params.tailable)
                 _iter.reset(); // pick up where we left off on the next call to work()
             return PlanStage::IS_EOF;
         }
 
-        _lastSeenLoc = nextLoc;
+        _lastSeenLoc = curr;
+
+        // See if the record we're about to access is in memory. If not, pass a fetch request up.
+        // Note that curr() does not touch the record (on MMAPv1 which is the only place we use
+        // NEED_FETCH) so we are able to yield before touching the record, as long as we do so
+        // before calling getNext().
+        {
+            std::auto_ptr<RecordFetcher> fetcher(
+                _params.collection->documentNeedsFetch(_txn, curr));
+            if (NULL != fetcher.get()) {
+                WorkingSetMember* member = _workingSet->get(_wsidForFetch);
+                member->loc = curr;
+                // Pass the RecordFetcher off to the WSM.
+                member->setFetcher(fetcher.release());
+                *out = _wsidForFetch;
+                _commonStats.needFetch++;
+                return NEED_FETCH;
+            }
+        }
 
         WorkingSetID id = _workingSet->allocate();
         WorkingSetMember* member = _workingSet->get(id);
-        member->loc = nextLoc;
-        member->obj = _iter->dataFor(member->loc).toBson();
+        member->loc = curr;
+        member->obj = _iter->dataFor(member->loc).releaseToBson();
         member->state = WorkingSetMember::LOC_AND_UNOWNED_OBJ;
 
+        // Advance the iterator.
+        invariant(_iter->getNext() == curr);
+
+        return returnIfMatches(member, id, out);
+    }
+
+    PlanStage::StageState CollectionScan::returnIfMatches(WorkingSetMember* member,
+                                                          WorkingSetID memberID,
+                                                          WorkingSetID* out) {
         ++_specificStats.docsTested;
 
         if (Filter::passes(member, _filter)) {
-            *out = id;
+            *out = memberID;
             ++_commonStats.advanced;
             return PlanStage::ADVANCED;
         }
         else {
-            _workingSet->free(id);
+            _workingSet->free(memberID);
             ++_commonStats.needTime;
             return PlanStage::NEED_TIME;
         }
@@ -147,7 +179,9 @@ namespace mongo {
         return _iter->isEOF();
     }
 
-    void CollectionScan::invalidate(const DiskLoc& dl, InvalidationType type) {
+    void CollectionScan::invalidate(OperationContext* txn,
+                                    const RecordId& dl,
+                                    InvalidationType type) {
         ++_commonStats.invalidates;
 
         // We don't care about mutations since we apply any filters to the result when we (possibly)
@@ -171,6 +205,7 @@ namespace mongo {
     }
 
     void CollectionScan::saveState() {
+        _txn = NULL;
         ++_commonStats.yields;
         if (NULL != _iter) {
             _iter->saveState();
@@ -178,6 +213,7 @@ namespace mongo {
     }
 
     void CollectionScan::restoreState(OperationContext* opCtx) {
+        invariant(_txn == NULL);
         _txn = opCtx;
         ++_commonStats.unyields;
         if (NULL != _iter) {

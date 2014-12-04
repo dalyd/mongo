@@ -179,10 +179,13 @@ namespace mongo {
 
     MONGO_CLIENT_API MONGO_COMPILER_NORETURN void verifyFailed(const char *msg, const char *file, unsigned line);
     MONGO_CLIENT_API MONGO_COMPILER_NORETURN void invariantFailed(const char *msg, const char *file, unsigned line);
+    MONGO_CLIENT_API MONGO_COMPILER_NORETURN void invariantOKFailed(const char *msg, const Status& status, const char *file, unsigned line);
     MONGO_CLIENT_API void wasserted(const char *msg, const char *file, unsigned line);
     MONGO_CLIENT_API MONGO_COMPILER_NORETURN void fassertFailed( int msgid );
     MONGO_CLIENT_API MONGO_COMPILER_NORETURN void fassertFailedNoTrace( int msgid );
     MONGO_CLIENT_API MONGO_COMPILER_NORETURN void fassertFailedWithStatus(
+            int msgid, const Status& status);
+    MONGO_CLIENT_API MONGO_COMPILER_NORETURN void fassertFailedWithStatusNoTrace(
             int msgid, const Status& status);
 
     /** a "user assertion".  throws UserAssertion.  logs.  typically used for errors that a user
@@ -215,6 +218,12 @@ namespace mongo {
     MONGO_CLIENT_API inline void fassert(int msgid, const Status& status) {
         if (MONGO_unlikely(!status.isOK())) {
             fassertFailedWithStatus(msgid, status);
+        }
+    }
+
+    MONGO_CLIENT_API inline void fassertNoTrace(int msgid, const Status& status) {
+        if (MONGO_unlikely(!status.isOK())) {
+            fassertFailedWithStatusNoTrace(msgid, status);
         }
     }
 
@@ -258,25 +267,38 @@ namespace mongo {
         }
     }
 
+    MONGO_CLIENT_API inline void massertNoTraceStatusOK(const Status& status) {
+        if (MONGO_unlikely(!status.isOK())) {
+            msgassertedNoTrace((status.location() != 0 ? status.location() : status.code()),
+                        status.reason());
+        }
+    }
 
     /* same as massert except no msgid */
 #define MONGO_verify(_Expression) do {                                  \
-        if (MONGO_unlikely(!(_Expression))) {                               \
+        if (MONGO_unlikely(!(_Expression))) {                           \
             ::mongo::verifyFailed(#_Expression, __FILE__, __LINE__);    \
         }                                                               \
     } while (false)
 
 #define MONGO_invariant(_Expression) do {                               \
-        if (MONGO_unlikely(!(_Expression))) {                               \
+        if (MONGO_unlikely(!(_Expression))) {                           \
             ::mongo::invariantFailed(#_Expression, __FILE__, __LINE__); \
         }                                                               \
+    } while (false)
+
+#define MONGO_invariantOK(expression) do {                                                    \
+    const ::mongo::Status _invariantOK_status = expression;                                   \
+        if (MONGO_unlikely(!_invariantOK_status.isOK())) {                                    \
+            ::mongo::invariantOKFailed(#expression, _invariantOK_status, __FILE__, __LINE__); \
+        }                                                                                     \
     } while (false)
 
     /* dassert is 'debug assert' -- might want to turn off for production as these
        could be slow.
     */
 #if defined(_DEBUG)
-# define MONGO_dassert(x) fassert(16199, (x))
+# define MONGO_dassert(x) invariant(x)
 #else
 # define MONGO_dassert(x)
 #endif
@@ -285,6 +307,7 @@ namespace mongo {
 # define dassert MONGO_dassert
 # define verify MONGO_verify
 # define invariant MONGO_invariant
+# define invariantOK MONGO_invariantOK
 # define uassert MONGO_uassert
 # define wassert MONGO_wassert
 # define massert MONGO_massert

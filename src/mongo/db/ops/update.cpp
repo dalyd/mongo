@@ -28,7 +28,7 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kWrites
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kWrite
 
 #include "mongo/platform/basic.h"
 
@@ -50,11 +50,12 @@
 
 namespace mongo {
 
-    UpdateResult update(Database* db,
+    UpdateResult update(OperationContext* txn,
+                        Database* db,
                         const UpdateRequest& request,
                         OpDebug* opDebug) {
 
-        UpdateExecutor executor(&request, opDebug);
+        UpdateExecutor executor(txn, &request, opDebug);
         return executor.execute(db);
     }
 

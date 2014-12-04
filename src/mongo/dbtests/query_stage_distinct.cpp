@@ -55,7 +55,7 @@ namespace QueryStageDistinct {
         }
 
         void addIndex(const BSONObj& obj) {
-            _client.ensureIndex(ns(), obj);
+            ASSERT_OK(dbtests::createIndex(&_txn, ns(), obj));
         }
 
         void insert(const BSONObj& obj) {
@@ -79,7 +79,7 @@ namespace QueryStageDistinct {
 
             // Distinct hack execution is always covered.
             // Key value is retrieved from working set key data
-            // instead of DiskLoc.
+            // instead of RecordId.
             ASSERT_FALSE(member->hasObj());
             BSONElement keyElt;
             ASSERT_TRUE(member->getFieldDotted(field, &keyElt));

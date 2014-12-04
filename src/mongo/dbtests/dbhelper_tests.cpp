@@ -63,8 +63,8 @@ namespace mongo {
 
             {
                 // Remove _id range [_min, _max).
+                ScopedTransaction transaction(&txn, MODE_IX);
                 Lock::DBLock lk(txn.lockState(), nsToDatabaseSubstring(ns), MODE_X);
-                WriteUnitOfWork wunit(&txn);
                 Client::Context ctx(&txn,  ns );
 
                 KeyRange range( ns,
@@ -73,7 +73,6 @@ namespace mongo {
                                 BSON( "_id" << 1 ) );
                 mongo::WriteConcernOptions dummyWriteConcern;
                 Helpers::removeRange(&txn, range, false, dummyWriteConcern);
-                wunit.commit();
             }
 
             // Check that the expected documents remain.
@@ -135,7 +134,7 @@ namespace mongo {
 
         long long maxSizeBytes = 1024 * 1024 * 1024;
 
-        set<DiskLoc> locs;
+        set<RecordId> locs;
         long long numDocsFound;
         long long estSizeBytes;
         {
@@ -163,7 +162,7 @@ namespace mongo {
             const Collection* collection = db->getCollection(&txn, ns);
 
             // Make sure all the disklocs actually correspond to the right info
-            for ( set<DiskLoc>::const_iterator it = locs.begin(); it != locs.end(); ++it ) {
+            for ( set<RecordId>::const_iterator it = locs.begin(); it != locs.end(); ++it ) {
                 const BSONObj obj = collection->docFor(&txn, *it);
                 ASSERT_EQUALS(obj["tag"].OID(), tag);
             }
@@ -183,7 +182,7 @@ namespace mongo {
 
         long long maxSizeBytes = 1024 * 1024 * 1024;
 
-        set<DiskLoc> locs;
+        set<RecordId> locs;
         long long numDocsFound;
         long long estSizeBytes;
         {
@@ -228,7 +227,7 @@ namespace mongo {
         // Very small max size
         long long maxSizeBytes = 10;
 
-        set<DiskLoc> locs;
+        set<RecordId> locs;
         long long numDocsFound;
         long long estSizeBytes;
         {

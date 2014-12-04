@@ -28,11 +28,13 @@
 
 #pragma once
 
-#include <deque>
 #include <boost/thread/condition_variable.hpp>
 #include <boost/thread/mutex.hpp>
 
+#include <deque>
+
 #include "mongo/db/concurrency/lock_mgr_defs.h"
+#include "mongo/db/concurrency/lock_request_list.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/platform/cstdint.h"
@@ -41,109 +43,6 @@
 #include "mongo/util/timer.h"
 
 namespace mongo {
-
-    class Locker;
-    struct LockHead;
-
-    /**
-     * Interface on which granted lock requests will be notified. See the contract for the notify
-     * method for more information and also the LockManager::lock call.
-     *
-     * The default implementation of this method would simply block on an event until notify has
-     * been invoked (see CondVarLockGrantNotification).
-     *
-     * Test implementations could just count the number of notifications and their outcome so that
-     * they can validate locks are granted as desired and drive the test execution.
-     */
-    class LockGrantNotification {
-    public:
-        virtual ~LockGrantNotification() {}
-
-        /**
-         * This method is invoked at most once for each lock request and indicates the outcome of
-         * the lock acquisition for the specified resource id.
-         *
-         * Cases where it won't be called are if a lock acquisition (be it in waiting or converting
-         * state) is cancelled through a call to unlock.
-         *
-         * IMPORTANT: This callback runs under a spinlock for the lock manager, so the work done
-         *            inside must be kept to a minimum and no locks or operations which may block
-         *            should be run. Also, no methods which call back into the lock manager should
-         *            be invoked from within this methods (LockManager is not reentrant).
-         *
-         * @resId ResourceId for which a lock operation was previously called.
-         * @result Outcome of the lock operation.
-         */
-        virtual void notify(const ResourceId& resId, LockResult result) = 0;
-    };
-
-
-    /**
-     * There is one of those entries per each request for a lock. They hang on a linked list off
-     * the LockHead and also are in a map for each Locker. This structure is not thread-safe.
-     *
-     * The lifetime of a LockRequest is managed by the Locker class.
-     */
-    struct LockRequest {
-
-        enum Status {
-            STATUS_NEW,
-            STATUS_GRANTED,
-            STATUS_WAITING,
-            STATUS_CONVERTING,
-        };
-
-        /**
-         * Used for initialization of a LockRequest, which might have been retrieved from cache.
-         */
-        void initNew(Locker* locker, LockGrantNotification* notify);
-
-        //
-        // These fields are maintained by the Locker class
-        //
-
-        // This is the Locker, which created this LockRequest. Pointer is not owned, just
-        // referenced. Must outlive the LockRequest.
-        Locker* locker;
-
-        // Not owned, just referenced. If a request is in the WAITING or CONVERTING state, must
-        // live at least until LockManager::unlock is cancelled or the notification has been
-        // invoked.
-        LockGrantNotification* notify;
-
-
-        //
-        // These fields are owned and maintained by the LockManager class
-        //
-
-        // Pointer to the lock to which this request belongs, or null if this request has not yet
-        // been assigned to a lock. The LockHead should be alive as long as there are LockRequests
-        // on it, so it is safe to have this pointer hanging around.
-        LockHead* lock;
-
-        // The reason intrusive linked list is used instead of the std::list class is to allow
-        // for entries to be removed from the middle of the list in O(1) time, if they are known
-        // instead of having to search for them and we cannot persist iterators, because the list
-        // can be modified while an iterator is held.
-        LockRequest* prev;
-        LockRequest* next;
-
-        // Current status of this request.
-        Status status;
-
-        // If not granted, the mode which has been requested for this lock. If granted, the mode
-        // in which it is currently granted.
-        LockMode mode;
-
-        // This value is different from MODE_NONE only if a conversion is requested for a lock and
-        // that conversion cannot be immediately granted.
-        LockMode convertMode;
-
-        // How many times has LockManager::lock been called for this request. Locks are released
-        // when their recursive count drops to zero.
-        unsigned recursiveCount;
-    };
-
 
     /**
      * Entry point for the lock manager scheduling functionality. Don't use it directly, but
@@ -182,7 +81,8 @@ namespace mongo {
           *
           * @return See comments for LockResult.
           */
-        LockResult lock(const ResourceId& resId, LockRequest* request, LockMode mode);
+        LockResult lock(ResourceId resId, LockRequest* request, LockMode mode);
+        LockResult convert(ResourceId resId, LockRequest* request, LockMode newMode);
 
         /**
          * Decrements the reference count of a previously locked request and if the reference count
@@ -221,34 +121,46 @@ namespace mongo {
          */
         void dump() const;
 
-
-        //
-        // Test-only methods
-        //
-
-        void setNoCheckForLeakedLocksTestOnly(bool newValue);
-
     private:
-
         // The deadlock detector needs to access the buckets and locks directly
         friend class DeadlockDetector;
 
+        // The lockheads need access to the partitions
+        friend struct LockHead;
+
         // These types describe the locks hash table
-        typedef unordered_map<ResourceId, LockHead*> LockHeadMap;
-        typedef LockHeadMap::value_type LockHeadPair;
 
         struct LockBucket {
             LockBucket() : mutex("LockManager") { }
             SimpleMutex mutex;
-            LockHeadMap data;
+            typedef unordered_map<ResourceId, LockHead*> Map;
+            Map data;
+            LockHead* findOrInsert(ResourceId resId);
         };
 
+        // Each locker maps to a partition that is used for resources acquired in intent modes
+        // modes and potentially other modes that don't conflict with themselves. This avoids
+        // contention on the regular LockHead in the lock manager.
+        struct Partition {
+            Partition() : mutex("LockManager") { }
+            PartitionedLockHead* find(ResourceId resId);
+            PartitionedLockHead* findOrInsert(ResourceId resId);
+            typedef unordered_map<ResourceId, PartitionedLockHead*> Map;
+            SimpleMutex mutex;
+            Map data;
+        };
 
         /**
          * Retrieves the bucket in which the particular resource must reside. There is no need to
          * hold a lock when calling this function.
          */
-        LockBucket* _getBucket(const ResourceId& resId) const;
+        LockBucket* _getBucket(ResourceId resId) const;
+
+
+        /**
+         * Retrieves the Partition that a particular LockRequest should use for intent locking.
+         */
+        Partition* _getPartition(LockRequest* request) const;
 
         /**
          * Prints the contents of a bucket to the log.
@@ -259,7 +171,7 @@ namespace mongo {
          * Should be invoked when the state of a lock changes in a way, which could potentially
          * allow other blocked requests to proceed.
          *
-         * MUST be called under the lock bucket's spin lock.
+         * MUST be called under the lock bucket's mutex.
          *
          * @param lock Lock whose grant state should be recalculated.
          * @param checkConflictQueue Whether to go through the conflict queue. This is an
@@ -268,9 +180,11 @@ namespace mongo {
          */
         void _onLockModeChanged(LockHead* lock, bool checkConflictQueue);
 
-
-        unsigned _numLockBuckets;
+        static const unsigned _numLockBuckets;
         LockBucket* _lockBuckets;
+
+        static const unsigned _numPartitions;
+        Partition* _partitions;
     };
 
 
@@ -332,7 +246,7 @@ namespace mongo {
         typedef std::vector<LockerId> ConflictingOwnersList;
 
         struct Edges {
-            Edges(const ResourceId& resId) : resId(resId) { }
+            explicit Edges(ResourceId resId) : resId(resId) { }
 
             // Resource id indicating the lock node
             ResourceId resId;

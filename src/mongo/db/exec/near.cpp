@@ -76,7 +76,7 @@ namespace mongo {
             return PlanStage::NEED_TIME;
         }
 
-        invariant(state != PlanStage::ADVANCED);
+        invariant(state != PlanStage::ADVANCED && state != PlanStage::NEED_FETCH);
 
         // Propagate NEED_TIME or errors upward.
         return state;
@@ -105,7 +105,7 @@ namespace mongo {
             nextState = initNext();
         }
         else if (SearchState_Buffering == _searchState) {
-            nextState = bufferNext(&error);
+            nextState = bufferNext(&toReturn, &error);
         }
         else if (SearchState_Advancing == _searchState) {
             nextState = advanceNext(&toReturn);
@@ -125,6 +125,10 @@ namespace mongo {
         else if (PlanStage::ADVANCED == nextState) {
             *out = toReturn;
             ++_stats->common.advanced;
+        }
+        else if (PlanStage::NEED_FETCH == nextState) {
+            *out = toReturn;
+            ++_stats->common.needFetch;
         }
         else if (PlanStage::NEED_TIME == nextState) {
             ++_stats->common.needTime;
@@ -154,7 +158,8 @@ namespace mongo {
         double distance;
     };
 
-    PlanStage::StageState NearStage::bufferNext(Status* error) {
+    // Set "toReturn" when NEED_FETCH.
+    PlanStage::StageState NearStage::bufferNext(WorkingSetID* toReturn, Status* error) {
 
         //
         // Try to retrieve the next covered member
@@ -199,6 +204,10 @@ namespace mongo {
             *error = WorkingSetCommon::getMemberStatus(*_workingSet->get(nextMemberID));
             return intervalState;
         }
+        else if (PlanStage::NEED_FETCH == intervalState) {
+            *toReturn = nextMemberID;
+            return intervalState;
+        }
         else if (PlanStage::ADVANCED != intervalState) {
             return intervalState;
         }
@@ -219,7 +228,7 @@ namespace mongo {
 
         StatusWith<double> distanceStatus = computeDistance(nextMember);
 
-        // Store the member's DiskLoc, if available, for quick invalidation
+        // Store the member's RecordId, if available, for quick invalidation
         if (nextMember->hasLoc()) {
             _nextIntervalSeen.insert(make_pair(nextMember->loc, nextMemberID));
         }
@@ -294,6 +303,7 @@ namespace mongo {
     }
 
     void NearStage::saveState() {
+        _txn = NULL;
         ++_stats->common.yields;
         for (size_t i = 0; i < _childrenIntervals.size(); i++) {
             _childrenIntervals[i]->covering->saveState();
@@ -301,6 +311,7 @@ namespace mongo {
     }
 
     void NearStage::restoreState(OperationContext* opCtx) {
+        invariant(_txn == NULL);
         _txn = opCtx;
         ++_stats->common.unyields;
         for (size_t i = 0; i < _childrenIntervals.size(); i++) {
@@ -308,25 +319,25 @@ namespace mongo {
         }
     }
 
-    void NearStage::invalidate(const DiskLoc& dl, InvalidationType type) {
+    void NearStage::invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
         ++_stats->common.invalidates;
         for (size_t i = 0; i < _childrenIntervals.size(); i++) {
-            _childrenIntervals[i]->covering->invalidate(dl, type);
+            _childrenIntervals[i]->covering->invalidate(txn, dl, type);
         }
 
-        // If a result is in _resultBuffer and has a DiskLoc it will be in _nextIntervalSeen as
-        // well. It's safe to return the result w/o the DiskLoc, so just fetch the result.
-        unordered_map<DiskLoc, WorkingSetID, DiskLoc::Hasher>::iterator seenIt = _nextIntervalSeen
+        // If a result is in _resultBuffer and has a RecordId it will be in _nextIntervalSeen as
+        // well. It's safe to return the result w/o the RecordId, so just fetch the result.
+        unordered_map<RecordId, WorkingSetID, RecordId::Hasher>::iterator seenIt = _nextIntervalSeen
             .find(dl);
 
         if (seenIt != _nextIntervalSeen.end()) {
 
             WorkingSetMember* member = _workingSet->get(seenIt->second);
             verify(member->hasLoc());
-            WorkingSetCommon::fetchAndInvalidateLoc(_txn, member, _collection);
+            WorkingSetCommon::fetchAndInvalidateLoc(txn, member, _collection);
             verify(!member->hasLoc());
 
-            // Don't keep it around in the seen map since there's no valid DiskLoc anymore
+            // Don't keep it around in the seen map since there's no valid RecordId anymore
             _nextIntervalSeen.erase(seenIt);
         }
     }

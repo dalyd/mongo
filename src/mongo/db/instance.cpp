@@ -28,7 +28,7 @@
 *    it in the license file.
 */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommands
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -42,8 +42,10 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/background.h"
 #include "mongo/db/clientcursor.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/commands/fsync.h"
 #include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/currentop_command.h"
 #include "mongo/db/db.h"
@@ -69,7 +71,7 @@
 #include "mongo/db/ops/update_driver.h"
 #include "mongo/db/ops/update_executor.h"
 #include "mongo/db/ops/update_request.h"
-#include "mongo/db/query/new_find.h"
+#include "mongo/db/query/find.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_coordinator_global.h"
 #include "mongo/db/stats/counters.h"
@@ -98,7 +100,7 @@ namespace {
         case dbInsert:
         case dbUpdate:
         case dbDelete:
-            return LogComponent::kWrites;
+            return LogComponent::kWrite;
         default:
             return LogComponent::kQuery;
         }
@@ -216,7 +218,7 @@ namespace {
                 audit::logQueryAuthzCheck(client, ns, q.query, status.code());
                 uassertStatusOK(status);
             }
-            dbresponse.exhaustNS = newRunQuery(txn, m, q, op, *resp, fromDBDirectClient);
+            dbresponse.exhaustNS = runQuery(txn, m, q, op, *resp, fromDBDirectClient);
             verify( !resp->empty() );
         }
         catch ( SendStaleConfigException& e ){
@@ -375,9 +377,6 @@ namespace {
             nestedOp.reset( new CurOp( &c , currentOpP ) );
             currentOpP = nestedOp.get();
         }
-        else {
-            c.newTopLevelRequest();
-        }
 
         CurOp& currentOp = *currentOpP;
         currentOp.reset(remote,op);
@@ -532,7 +531,7 @@ namespace {
         DbMessage d(m);
         NamespaceString ns(d.getns());
         uassertStatusOK( userAllowedWriteNS( ns ) );
-        op.debug().ns = ns.ns().c_str();
+        op.debug().ns = ns.ns();
         int flags = d.pullInt();
         BSONObj query = d.nextJsObj();
 
@@ -556,7 +555,7 @@ namespace {
         op.debug().query = query;
         op.setQuery(query);
 
-        UpdateRequest request(txn, ns);
+        UpdateRequest request(ns);
 
         request.setUpsert(upsert);
         request.setMulti(multi);
@@ -571,10 +570,11 @@ namespace {
         int attempt = 1;
         while ( 1 ) {
             try {
-                UpdateExecutor executor(&request, &op.debug());
+                UpdateExecutor executor(txn, &request, &op.debug());
                 uassertStatusOK(executor.prepare());
 
                 //  Tentatively take an intent lock, fix up if we need to create the collection
+                ScopedTransaction transaction(txn, MODE_IX);
                 Lock::DBLock dbLock(txn->lockState(), ns.db(), MODE_IX);
                 if (dbHolder().get(txn, ns.db()) == NULL) {
                     //  If DB doesn't exist, don't implicitly create it in Client::Context
@@ -595,22 +595,20 @@ namespace {
             }
             catch ( const WriteConflictException& dle ) {
                 if ( multi ) {
-                    log(LogComponent::kWrites) << "Had WriteConflict during multi update, aborting";
+                    log(LogComponent::kWrite) << "Had WriteConflict during multi update, aborting";
                     throw;
                 }
-                else if ( attempt++ > 1 ) {
-                    log(LogComponent::kWrites) << "Had WriteConflict doing update on " << ns
-                                               << ", attempt: " << attempt << " retrying";
-                }
+                WriteConflictException::logAndBackoff( attempt++, "update", ns.toString() );
             }
         }
 
         //  This is an upsert into a non-existing database, so need an exclusive lock
         //  to avoid deadlock
         {
-            UpdateExecutor executor(&request, &op.debug());
+            UpdateExecutor executor(txn, &request, &op.debug());
             uassertStatusOK(executor.prepare());
 
+            ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock dbLock(txn->lockState(), ns.db(), MODE_X);
             Client::Context ctx(txn, ns);
             Database* db = ctx.db();
@@ -637,7 +635,7 @@ namespace {
         NamespaceString ns(d.getns());
         uassertStatusOK( userAllowedWriteNS( ns ) );
 
-        op.debug().ns = ns.ns().c_str();
+        op.debug().ns = ns.ns();
         int flags = d.pullInt();
         bool justOne = flags & RemoveOption_JustOne;
         verify( d.moreJSObjs() );
@@ -650,7 +648,7 @@ namespace {
         op.debug().query = pattern;
         op.setQuery(pattern);
 
-        DeleteRequest request(txn, ns);
+        DeleteRequest request(ns);
         request.setQuery(pattern);
         request.setMulti(!justOne);
         request.setUpdateOpLog(true);
@@ -660,7 +658,7 @@ namespace {
         int attempt = 1;
         while ( 1 ) {
             try {
-                DeleteExecutor executor(&request);
+                DeleteExecutor executor(txn, &request);
                 uassertStatusOK(executor.prepare());
 
                 AutoGetDb autoDb(txn, ns.db(), MODE_IX);
@@ -676,10 +674,7 @@ namespace {
                 break;
             }
             catch ( const WriteConflictException& dle ) {
-                if ( attempt++ > 1 ) {
-                    log(LogComponent::kWrites) << "Had WriteConflict doing delete on " << ns
-                                               << ", attempt: " << attempt << " retrying";
-                }
+                WriteConflictException::logAndBackoff( attempt++, "delete", ns.toString() );
             }
         }
     }
@@ -733,15 +728,15 @@ namespace {
                     }
                 }
 
-                msgdata = newGetMore(txn,
-                                     ns,
-                                     ntoreturn,
-                                     cursorid,
-                                     curop,
-                                     pass,
-                                     exhaust,
-                                     &isCursorAuthorized,
-                                     fromDBDirectClient);
+                msgdata = getMore(txn,
+                                  ns,
+                                  ntoreturn,
+                                  cursorid,
+                                  curop,
+                                  pass,
+                                  exhaust,
+                                  &isCursorAuthorized,
+                                  fromDBDirectClient);
             }
             catch ( AssertionException& e ) {
                 if ( isCursorAuthorized ) {
@@ -806,7 +801,7 @@ namespace {
 
         dbresponse.response = resp;
         dbresponse.responseTo = m.header().getId();
-        
+
         if( exhaust ) {
             curop.debug().exhaust = true;
             dbresponse.exhaustNS = ns;
@@ -819,50 +814,6 @@ namespace {
                         Client::Context& ctx,
                         const char *ns,
                         /*modifies*/BSONObj& js) {
-
-        if ( nsToCollectionSubstring( ns ) == "system.indexes" ) {
-            string targetNS = js["ns"].String();
-            uassertStatusOK( userAllowedWriteNS( targetNS ) );
-
-            Collection* collection = ctx.db()->getCollection( txn, targetNS );
-            if ( !collection ) {
-                // implicitly create
-                WriteUnitOfWork wunit(txn);
-                collection = ctx.db()->createCollection( txn, targetNS );
-                verify( collection );
-                repl::logOp(txn,
-                            "c",
-                            (ctx.db()->name() + ".$cmd").c_str(),
-                            BSON("create" << nsToCollectionSubstring(targetNS)));
-                wunit.commit();
-            }
-
-            // Only permit interrupting an (index build) insert if the
-            // insert comes from a socket client request rather than a
-            // parent operation using the client interface.  The parent
-            // operation might not support interrupts.
-            const bool mayInterrupt = txn->getCurOp()->parent() == NULL;
-
-            txn->getCurOp()->setQuery(js);
-
-            MultiIndexBlock indexer(txn, collection);
-            indexer.allowBackgroundBuilding();
-            if (mayInterrupt)
-                indexer.allowInterruption();
-
-            Status status = indexer.init(js);
-            if ( status.code() == ErrorCodes::IndexAlreadyExists )
-                return; // inserting an existing index is a no-op.
-            uassertStatusOK(status);
-            uassertStatusOK(indexer.insertAllDocumentsInCollection());
-
-            WriteUnitOfWork wunit(txn);
-            indexer.commit();
-            repl::logOp(txn, "i", ns, js);
-            wunit.commit();
-
-            return;
-        }
 
         StatusWith<BSONObj> fixed = fixDocumentForInsert( js );
         uassertStatusOK( fixed.getStatus() );
@@ -880,7 +831,7 @@ namespace {
                         BSON("create" << nsToCollectionSubstring(ns)));
         }
 
-        StatusWith<DiskLoc> status = collection->insertDocument( txn, js, true );
+        StatusWith<RecordId> status = collection->insertDocument( txn, js, true );
         uassertStatusOK( status.getStatus() );
         repl::logOp(txn, "i", ns, js);
         wunit.commit();
@@ -911,13 +862,93 @@ namespace {
         op.debug().ninserted = i;
     }
 
+    static void convertSystemIndexInsertsToCommands(
+            DbMessage& d,
+            BSONArrayBuilder* allCmdsBuilder) {
+        while (d.moreJSObjs()) {
+            BSONObj spec = d.nextJsObj();
+            BSONElement indexNsElement = spec["ns"];
+            uassert(ErrorCodes::NoSuchKey,
+                    str::stream() << "Missing \"ns\" field while inserting into " << d.getns(),
+                    !indexNsElement.eoo());
+            uassert(ErrorCodes::TypeMismatch,
+                    str::stream() << "Expected \"ns\" field to have type String, not " <<
+                    typeName(indexNsElement.type()) << " while inserting into " << d.getns(),
+                    indexNsElement.type() == String);
+            const StringData nsToIndex(indexNsElement.valueStringData());
+            BSONObjBuilder cmdObjBuilder(allCmdsBuilder->subobjStart());
+            cmdObjBuilder << "createIndexes" << nsToCollectionSubstring(nsToIndex);
+            BSONArrayBuilder specArrayBuilder(cmdObjBuilder.subarrayStart("indexes"));
+            while (true) {
+                BSONObjBuilder specBuilder(specArrayBuilder.subobjStart());
+                BSONElement specNsElement = spec["ns"];
+                if ((specNsElement.type() != String) ||
+                    (specNsElement.valueStringData() != nsToIndex)) {
+
+                    break;
+                }
+                for (BSONObjIterator iter(spec); iter.more();) {
+                    BSONElement element = iter.next();
+                    if (element.fieldNameStringData() != "ns") {
+                        specBuilder.append(element);
+                    }
+                }
+                if (!d.moreJSObjs()) {
+                    break;
+                }
+                spec = d.nextJsObj();
+            }
+        }
+    }
+
+    static void insertSystemIndexes(OperationContext* txn, DbMessage& d, CurOp& curOp) {
+        BSONArrayBuilder allCmdsBuilder;
+        try {
+            convertSystemIndexInsertsToCommands(d, &allCmdsBuilder);
+        }
+        catch (const DBException& ex) {
+            setLastError(ex.getCode(), ex.getInfo().msg.c_str());
+            curOp.debug().exceptionInfo = ex.getInfo();
+            return;
+        }
+        BSONArray allCmds(allCmdsBuilder.done());
+        Command* createIndexesCmd = Command::findCommand("createIndexes");
+        invariant(createIndexesCmd);
+        const bool keepGoing = d.reservedField() & InsertOption_ContinueOnError;
+        for (BSONObjIterator iter(allCmds); iter.more();) {
+            try {
+                BSONObjBuilder resultBuilder;
+                BSONObj cmdObj = iter.next().Obj();
+                Command::execCommand(
+                        txn,
+                        createIndexesCmd,
+                        0, /* what should I use for query option? */
+                        d.getns(),
+                        cmdObj,
+                        resultBuilder,
+                        false /* fromRepl */);
+                uassertStatusOK(Command::getStatusFromCommandResult(resultBuilder.done()));
+            }
+            catch (const DBException& ex) {
+                setLastError(ex.getCode(), ex.getInfo().msg.c_str());
+                curOp.debug().exceptionInfo = ex.getInfo();
+                if (!keepGoing) {
+                    return;
+                }
+            }
+        }
+    }
+
     void receivedInsert(OperationContext* txn, Message& m, CurOp& op) {
         DbMessage d(m);
         const char *ns = d.getns();
-        const NamespaceString nsString(ns);
         op.debug().ns = ns;
-
         uassertStatusOK( userAllowedWriteNS( ns ) );
+        if (nsToCollectionSubstring(ns) == "system.indexes") {
+            insertSystemIndexes(txn, d, op);
+            return;
+        }
+        const NamespaceString nsString(ns);
 
         if( !d.moreJSObjs() ) {
             // strange.  should we complain?
@@ -940,6 +971,7 @@ namespace {
         {
             const bool isIndexBuild = (nsToCollectionSubstring(ns) == "system.indexes");
             const LockMode mode = isIndexBuild ? MODE_X : MODE_IX;
+            ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock dbLock(txn->lockState(), nsString.db(), mode);
             Lock::CollectionLock collLock(txn->lockState(), nsString.ns(), mode);
 
@@ -967,6 +999,7 @@ namespace {
         }
 
         // Collection didn't exist so try again with MODE_X
+        ScopedTransaction transaction(txn, MODE_IX);
         Lock::DBLock dbLock(txn->lockState(), nsString.db(), MODE_X);
 
         // CONCURRENCY TODO: is being read locked in big log sufficient here?
@@ -992,25 +1025,22 @@ namespace {
         return shutdownInProgress.loadRelaxed() != 0;
     }
 
-    static void shutdownServer(OperationContext* txn) {
-        // Must hold global lock to get to here
-        invariant(txn->lockState()->isW());
-
-        log(LogComponent::kNetworking) << "shutdown: going to close listening sockets..." << endl;
+    static void shutdownServer() {
+        log(LogComponent::kNetwork) << "shutdown: going to close listening sockets..." << endl;
         ListeningSockets::get()->closeAll();
 
-        log(LogComponent::kNetworking) << "shutdown: going to flush diaglog..." << endl;
+        log(LogComponent::kNetwork) << "shutdown: going to flush diaglog..." << endl;
         _diaglog.flush();
 
         /* must do this before unmapping mem or you may get a seg fault */
-        log(LogComponent::kNetworking) << "shutdown: going to close sockets..." << endl;
+        log(LogComponent::kNetwork) << "shutdown: going to close sockets..." << endl;
         boost::thread close_socket_thread( stdx::bind(MessagingPort::closeAllSockets, 0) );
 
         StorageEngine* storageEngine = getGlobalEnvironment()->getGlobalStorageEngine();
-        storageEngine->cleanShutdown(txn);
+        storageEngine->cleanShutdown();
     }
 
-    void exitCleanly( ExitCode code, OperationContext* txn ) {
+    void exitCleanly(ExitCode code) {
         if (shutdownInProgress.fetchAndAdd(1) != 0) {
             while (true) {
                 sleepsecs(1000);
@@ -1018,37 +1048,47 @@ namespace {
         }
 
         // Global storage engine may not be started in all cases before we exit
-        if (getGlobalEnvironment()->getGlobalStorageEngine() != NULL) {
+        if (getGlobalEnvironment()->getGlobalStorageEngine() == NULL) {
+            dbexit(code); // never returns
+            invariant(false);
+        }
 
-            getGlobalEnvironment()->setKillAllOperations();
+        getGlobalEnvironment()->setKillAllOperations();
 
-            repl::getGlobalReplicationCoordinator()->shutdown();
+        repl::getGlobalReplicationCoordinator()->shutdown();
 
-            if (!txn) {
-                // leaked, but we are exiting so doesn't matter
-                txn = new OperationContextImpl();
-            }
+        // We should always be able to acquire the global lock at shutdown.
+        //
+        // TODO: This call chain uses the locker directly, because we do not want to start an
+        // operation context, which also instantiates a recovery unit. Also, using the
+        // lockGlobalBegin/lockGlobalComplete sequence, we avoid taking the flush lock. This will
+        // all go away if we start acquiring the global/flush lock as part of ScopedTransaction.
+        DefaultLockerImpl globalLocker(0);
+        LockResult result = globalLocker.lockGlobalBegin(MODE_X);
+        if (result == LOCK_WAITING) {
+            result = globalLocker.lockGlobalComplete(UINT_MAX);
+        }
 
-            Lock::GlobalWrite lk(txn->lockState());
-            log() << "now exiting" << endl;
+        invariant(LOCK_OK == result);
 
-            // Execute the graceful shutdown tasks, such as flushing the outstanding journal 
-            // and data files, close sockets, etc.
-            try {
-                shutdownServer(txn);
-            }
-            catch (const DBException& ex) {
-                severe() << "shutdown failed with DBException " << ex;
-                std::terminate();
-            }
-            catch (const std::exception& ex) {
-                severe() << "shutdown failed with std::exception: " << ex.what();
-                std::terminate();
-            }
-            catch (...) {
-                severe() << "shutdown failed with exception";
-                std::terminate();
-            }
+        log() << "now exiting" << endl;
+
+        // Execute the graceful shutdown tasks, such as flushing the outstanding journal 
+        // and data files, close sockets, etc.
+        try {
+            shutdownServer();
+        }
+        catch (const DBException& ex) {
+            severe() << "shutdown failed with DBException " << ex;
+            std::terminate();
+        }
+        catch (const std::exception& ex) {
+            severe() << "shutdown failed with std::exception: " << ex.what();
+            std::terminate();
+        }
+        catch (...) {
+            severe() << "shutdown failed with exception";
+            std::terminate();
         }
 
         dbexit( code );

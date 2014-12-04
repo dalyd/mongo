@@ -32,7 +32,8 @@
 
 #include <algorithm>
 
-#include "mongo/db/diskloc.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/db/record_id.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/unittest/unittest.h"
@@ -44,7 +45,7 @@ namespace mongo {
 
     // Insert multiple records and iterate through them in the forward direction.
     // When curr() or getNext() is called on an iterator positioned at EOF,
-    // the iterator returns DiskLoc() and stays at EOF.
+    // the iterator returns RecordId() and stays at EOF.
     TEST( RecordStoreTestHarness, IterateOverMultipleRecords ) {
         scoped_ptr<HarnessHelper> harnessHelper( newHarnessHelper() );
         scoped_ptr<RecordStore> rs( harnessHelper->newNonCappedRecordStore() );
@@ -55,7 +56,7 @@ namespace mongo {
         }
 
         const int nToInsert = 10;
-        DiskLoc locs[nToInsert];
+        RecordId locs[nToInsert];
         for ( int i = 0; i < nToInsert; i++ ) {
             scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
             {
@@ -64,7 +65,7 @@ namespace mongo {
                 string data = ss.str();
 
                 WriteUnitOfWork uow( opCtx.get() );
-                StatusWith<DiskLoc> res = rs->insertRecord( opCtx.get(),
+                StatusWith<RecordId> res = rs->insertRecord( opCtx.get(),
                                                             data.c_str(),
                                                             data.size() + 1,
                                                             false );
@@ -79,12 +80,12 @@ namespace mongo {
             ASSERT_EQUALS( nToInsert, rs->numRecords( opCtx.get() ) );
         }
 
-        std::sort( locs, locs + nToInsert ); // inserted records may not be in DiskLoc order
+        std::sort( locs, locs + nToInsert ); // inserted records may not be in RecordId order
         {
             scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
 
             RecordIterator *it = rs->getIterator( opCtx.get(),
-                                                  DiskLoc(),
+                                                  RecordId(),
                                                   CollectionScanParams::FORWARD );
 
             for ( int i = 0; i < nToInsert; i++ ) {
@@ -94,10 +95,10 @@ namespace mongo {
             }
             ASSERT( it->isEOF() );
 
-            ASSERT_EQUALS( DiskLoc(), it->curr() );
-            ASSERT_EQUALS( DiskLoc(), it->getNext() );
+            ASSERT_EQUALS( RecordId(), it->curr() );
+            ASSERT_EQUALS( RecordId(), it->getNext() );
             ASSERT( it->isEOF() );
-            ASSERT_EQUALS( DiskLoc(), it->curr() );
+            ASSERT_EQUALS( RecordId(), it->curr() );
 
             delete it;
         }
@@ -105,7 +106,7 @@ namespace mongo {
 
     // Insert multiple records and iterate through them in the reverse direction.
     // When curr() or getNext() is called on an iterator positioned at EOF,
-    // the iterator returns DiskLoc() and stays at EOF.
+    // the iterator returns RecordId() and stays at EOF.
     TEST( RecordStoreTestHarness, IterateOverMultipleRecordsReversed ) {
         scoped_ptr<HarnessHelper> harnessHelper( newHarnessHelper() );
         scoped_ptr<RecordStore> rs( harnessHelper->newNonCappedRecordStore() );
@@ -116,7 +117,7 @@ namespace mongo {
         }
 
         const int nToInsert = 10;
-        DiskLoc locs[nToInsert];
+        RecordId locs[nToInsert];
         for ( int i = 0; i < nToInsert; i++ ) {
             scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
             {
@@ -125,7 +126,7 @@ namespace mongo {
                 string data = ss.str();
 
                 WriteUnitOfWork uow( opCtx.get() );
-                StatusWith<DiskLoc> res = rs->insertRecord( opCtx.get(),
+                StatusWith<RecordId> res = rs->insertRecord( opCtx.get(),
                                                             data.c_str(),
                                                             data.size() + 1,
                                                             false );
@@ -140,12 +141,12 @@ namespace mongo {
             ASSERT_EQUALS( nToInsert, rs->numRecords( opCtx.get() ) );
         }
 
-        std::sort( locs, locs + nToInsert ); // inserted records may not be in DiskLoc order
+        std::sort( locs, locs + nToInsert ); // inserted records may not be in RecordId order
         {
             scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
 
             RecordIterator *it = rs->getIterator( opCtx.get(),
-                                                  DiskLoc(),
+                                                  RecordId(),
                                                   CollectionScanParams::BACKWARD );
 
             for ( int i = nToInsert - 1; i >= 0; i-- ) {
@@ -155,10 +156,10 @@ namespace mongo {
             }
             ASSERT( it->isEOF() );
 
-            ASSERT_EQUALS( DiskLoc(), it->curr() );
-            ASSERT_EQUALS( DiskLoc(), it->getNext() );
+            ASSERT_EQUALS( RecordId(), it->curr() );
+            ASSERT_EQUALS( RecordId(), it->getNext() );
             ASSERT( it->isEOF() );
-            ASSERT_EQUALS( DiskLoc(), it->curr() );
+            ASSERT_EQUALS( RecordId(), it->curr() );
 
             delete it;
         }
@@ -176,7 +177,7 @@ namespace mongo {
         }
 
         const int nToInsert = 10;
-        DiskLoc locs[nToInsert];
+        RecordId locs[nToInsert];
         for ( int i = 0; i < nToInsert; i++ ) {
             scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
             {
@@ -185,7 +186,7 @@ namespace mongo {
                 string data = ss.str();
 
                 WriteUnitOfWork uow( opCtx.get() );
-                StatusWith<DiskLoc> res = rs->insertRecord( opCtx.get(),
+                StatusWith<RecordId> res = rs->insertRecord( opCtx.get(),
                                                             data.c_str(),
                                                             data.size() + 1,
                                                             false );
@@ -200,7 +201,7 @@ namespace mongo {
             ASSERT_EQUALS( nToInsert, rs->numRecords( opCtx.get() ) );
         }
 
-        std::sort( locs, locs + nToInsert ); // inserted records may not be in DiskLoc order
+        std::sort( locs, locs + nToInsert ); // inserted records may not be in RecordId order
         {
             scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
 
@@ -216,10 +217,10 @@ namespace mongo {
             }
             ASSERT( it->isEOF() );
 
-            ASSERT_EQUALS( DiskLoc(), it->curr() );
-            ASSERT_EQUALS( DiskLoc(), it->getNext() );
+            ASSERT_EQUALS( RecordId(), it->curr() );
+            ASSERT_EQUALS( RecordId(), it->getNext() );
             ASSERT( it->isEOF() );
-            ASSERT_EQUALS( DiskLoc(), it->curr() );
+            ASSERT_EQUALS( RecordId(), it->curr() );
 
             delete it;
         }
@@ -237,7 +238,7 @@ namespace mongo {
         }
 
         const int nToInsert = 10;
-        DiskLoc locs[nToInsert];
+        RecordId locs[nToInsert];
         for ( int i = 0; i < nToInsert; i++ ) {
             scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
             {
@@ -246,7 +247,7 @@ namespace mongo {
                 string data = ss.str();
 
                 WriteUnitOfWork uow( opCtx.get() );
-                StatusWith<DiskLoc> res = rs->insertRecord( opCtx.get(),
+                StatusWith<RecordId> res = rs->insertRecord( opCtx.get(),
                                                             data.c_str(),
                                                             data.size() + 1,
                                                             false );
@@ -261,7 +262,7 @@ namespace mongo {
             ASSERT_EQUALS( nToInsert, rs->numRecords( opCtx.get() ) );
         }
 
-        std::sort( locs, locs + nToInsert ); // inserted records may not be in DiskLoc order
+        std::sort( locs, locs + nToInsert ); // inserted records may not be in RecordId order
         {
             scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
 
@@ -277,12 +278,87 @@ namespace mongo {
             }
             ASSERT( it->isEOF() );
 
-            ASSERT_EQUALS( DiskLoc(), it->curr() );
-            ASSERT_EQUALS( DiskLoc(), it->getNext() );
+            ASSERT_EQUALS( RecordId(), it->curr() );
+            ASSERT_EQUALS( RecordId(), it->getNext() );
             ASSERT( it->isEOF() );
-            ASSERT_EQUALS( DiskLoc(), it->curr() );
+            ASSERT_EQUALS( RecordId(), it->curr() );
 
             delete it;
+        }
+    }
+
+    // Insert several records, and iterate to the end. Ensure that the record iterator
+    // is EOF. Add an additional record, saving and restoring the iterator state, and check
+    // that the iterator remains EOF.
+    TEST( RecordStoreTestHarness, RecordIteratorEOF ) {
+        scoped_ptr<HarnessHelper> harnessHelper( newHarnessHelper() );
+        scoped_ptr<RecordStore> rs( harnessHelper->newNonCappedRecordStore() );
+
+        {
+            scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
+            ASSERT_EQUALS( 0, rs->numRecords( opCtx.get() ) );
+        }
+
+        const int nToInsert = 10;
+        RecordId locs[nToInsert];
+        for ( int i = 0; i < nToInsert; i++ ) {
+            scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
+            {
+                StringBuilder sb;
+                sb << "record " << i;
+                string data = sb.str();
+
+                WriteUnitOfWork uow( opCtx.get() );
+                StatusWith<RecordId> res = rs->insertRecord( opCtx.get(),
+                                                            data.c_str(),
+                                                            data.size() + 1,
+                                                            false );
+                ASSERT_OK( res.getStatus() );
+                locs[i] = res.getValue();
+                uow.commit();
+            }
+        }
+
+        {
+            scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
+            ASSERT_EQUALS( nToInsert, rs->numRecords( opCtx.get() ) );
+        }
+
+        {
+            scoped_ptr<OperationContext> opCtx( harnessHelper->newOperationContext() );
+
+            // Get a forward iterator starting at the beginning of the record store.
+            scoped_ptr<RecordIterator> it( rs->getIterator( opCtx.get() ) );
+
+            // Iterate, checking EOF along the way.
+            for ( int i = 0; i < nToInsert; i++ ) {
+                ASSERT( !it->isEOF() );
+                RecordId nextLoc = it->getNext();
+                ASSERT( !nextLoc.isNull() );
+            }
+            ASSERT( it->isEOF() );
+            ASSERT( it->getNext().isNull() );
+
+            // Add a record and ensure we're still EOF.
+            it->saveState();
+
+            StringBuilder sb;
+            sb << "record " << nToInsert + 1;
+            string data = sb.str();
+
+            WriteUnitOfWork uow( opCtx.get() );
+            StatusWith<RecordId> res = rs->insertRecord( opCtx.get(),
+                                                        data.c_str(),
+                                                        data.size() + 1,
+                                                        false );
+            ASSERT_OK( res.getStatus() );
+            uow.commit();
+
+            ASSERT( it->restoreState( opCtx.get() ) );
+
+            // Iterator should still be EOF.
+            ASSERT( it->isEOF() );
+            ASSERT( it->getNext().isNull() );
         }
     }
 

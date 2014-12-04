@@ -121,6 +121,7 @@ namespace mongo {
             // TODO A write lock is currently taken here to accommodate stages that perform writes
             //      (e.g. DeleteStage).  This should be changed to use a read lock for read-only
             //      execution trees.
+            ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock lk(txn->lockState(), dbname, MODE_X);
             Client::Context ctx(txn, dbname);
 
@@ -228,7 +229,7 @@ namespace mongo {
                 uassert(16921, "Nodes argument must be provided to AND",
                         nodeArgs["nodes"].isABSONObj());
 
-                auto_ptr<AndHashStage> andStage(new AndHashStage(txn, workingSet, matcher, collection));
+                auto_ptr<AndHashStage> andStage(new AndHashStage(workingSet, matcher, collection));
 
                 int nodesAdded = 0;
                 BSONObjIterator it(nodeArgs["nodes"].Obj());
@@ -253,8 +254,8 @@ namespace mongo {
                 uassert(16924, "Nodes argument must be provided to AND",
                         nodeArgs["nodes"].isABSONObj());
 
-                auto_ptr<AndSortedStage> andStage(new AndSortedStage(txn, workingSet,
-                                                                     matcher, collection));
+                auto_ptr<AndSortedStage> andStage(new AndSortedStage(workingSet, matcher,
+                                                                     collection));
 
                 int nodesAdded = 0;
                 BSONObjIterator it(nodeArgs["nodes"].Obj());
@@ -372,8 +373,8 @@ namespace mongo {
                 params.pattern = nodeArgs["pattern"].Obj();
                 // Dedup is true by default.
 
-                auto_ptr<MergeSortStage> mergeStage(new MergeSortStage(txn, params,
-                                                                       workingSet, collection));
+                auto_ptr<MergeSortStage> mergeStage(new MergeSortStage(params, workingSet,
+                                                                       collection));
 
                 BSONObjIterator it(nodeArgs["nodes"].Obj());
                 while (it.more()) {

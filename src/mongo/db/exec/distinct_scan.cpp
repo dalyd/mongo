@@ -127,7 +127,7 @@ namespace mongo {
         if (GETTING_NEXT == _scanState) {
             // Grab the next (key, value) from the index.
             BSONObj ownedKeyObj = _btreeCursor->getKey().getOwned();
-            DiskLoc loc = _btreeCursor->getValue();
+            RecordId loc = _btreeCursor->getValue();
 
             // The underlying IndexCursor points at the *next* thing we want to return.  We do this
             // so that if we're scanning an index looking for docs to delete we don't continually
@@ -170,6 +170,7 @@ namespace mongo {
     }
 
     void DistinctScan::saveState() {
+        _txn = NULL;
         ++_commonStats.yields;
 
         if (HIT_END == _scanState || INITIALIZING == _scanState) { return; }
@@ -183,6 +184,7 @@ namespace mongo {
     }
 
     void DistinctScan::restoreState(OperationContext* opCtx) {
+        invariant(_txn == NULL);
         _txn = opCtx;
         ++_commonStats.unyields;
 
@@ -201,7 +203,7 @@ namespace mongo {
         }
     }
 
-    void DistinctScan::invalidate(const DiskLoc& dl, InvalidationType type) {
+    void DistinctScan::invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
         ++_commonStats.invalidates;
     }
 

@@ -11,8 +11,8 @@ Import("has_option")
 Import("get_option")
 Import("usev8")
 Import("v8suffix")
-Import("enforce_glibc")
 Import("darwin windows solaris linux nix")
+Import("wiredtiger")
 
 # Boost we need everywhere. 's2' is spammed in all over the place by
 # db/geo unfortunately. pcre is also used many places.
@@ -36,10 +36,11 @@ env.SConscript(['base/SConscript',
                 'db/sorter/SConscript',
                 'db/storage/SConscript',
                 'db/storage/devnull/SConscript',
-                'db/storage/heap1/SConscript',
+                'db/storage/in_memory/SConscript',
                 'db/storage/kv/SConscript',
                 'db/storage/mmap_v1/SConscript',
                 'db/storage/rocks/SConscript',
+                'db/storage/wiredtiger/SConscript',
                 'db/SConscript',
                 'installer/msi/SConscript',
                 'logger/SConscript',
@@ -620,6 +621,7 @@ serverOnlyFiles = [ "db/background.cpp",
                     "db/commands/validate.cpp",
                     "db/commands/write_commands/batch_executor.cpp",
                     "db/commands/write_commands/write_commands.cpp",
+                    "db/commands/writeback_compatibility_shim.cpp",
                     "db/curop.cpp",
                     "db/currentop_command.cpp",
                     "db/dbcommands.cpp",
@@ -659,36 +661,23 @@ serverOnlyFiles = [ "db/background.cpp",
                     "db/range_deleter_db_env.cpp",
                     "db/range_deleter_service.cpp",
                     "db/repl/bgsync.cpp",
-                    "db/repl/connections.cpp",
-                    "db/repl/consensus.cpp",
-                    "db/repl/health.cpp",
-                    "db/repl/heartbeat.cpp",
-                    "db/repl/heartbeat_info.cpp",
                     "db/repl/initial_sync.cpp",
-                    "db/repl/manager.cpp",
                     "db/repl/master_slave.cpp",
-                    "db/repl/member.cpp",
                     "db/repl/minvalid.cpp",
                     "db/repl/multicmd.cpp",
                     "db/repl/oplog.cpp",
                     "db/repl/oplogreader.cpp",
                     "db/repl/repl_coordinator_external_state_impl.cpp",
-                    "db/repl/repl_coordinator_legacy.cpp",
                     "db/repl/repl_info.cpp",
-                    "db/repl/repl_set_health_poll_task.cpp",
-                    "db/repl/repl_set_impl.cpp",
                     "db/repl/replset_commands.cpp",
                     "db/repl/resync.cpp",
-                    "db/repl/rs.cpp",
-                    "db/repl/rs_config.cpp",
                     "db/repl/rs_initialsync.cpp",
                     "db/repl/rs_rollback.cpp",
                     "db/repl/rs_sync.cpp",
-                    "db/repl/state_box.cpp",
+                    "db/repl/scoped_conn.cpp",
                     "db/repl/sync.cpp",
                     "db/repl/sync_source_feedback.cpp",
                     "db/repl/sync_tail.cpp",
-                    "db/repl/write_concern.cpp",
                     "db/startup_warnings_mongod.cpp",
                     "db/stats/lock_server_status_section.cpp",
                     "db/stats/range_deleter_server_status.cpp",
@@ -729,8 +718,6 @@ env.Library("server_options", [
 
 env.CppUnitTest('server_options_test', 'db/server_options_test.cpp',
                 LIBDEPS=['server_options'])
-
-env.CppUnitTest('diskloc_test', 'db/diskloc_test.cpp', LIBDEPS=[])
 
 env.CppUnitTest('v8_deadline_monitor_test', 'scripting/v8_deadline_monitor_test.cpp', LIBDEPS=[])
 
@@ -924,6 +911,7 @@ serveronlyLibdeps = ["coreshard",
                      "db/fts/ftsmongod",
                      "db/common",
                      "db/concurrency/lock_mgr",
+                     "db/concurrency/write_conflict_exception",
                      "db/ops/update_driver",
                      "defaultversion",
                      "global_optime",
@@ -946,14 +934,19 @@ serveronlyLibdeps = ["coreshard",
                      "db/repl/replication_executor",
                      "db/repl/rslog",
                      'db/storage/devnull/storage_devnull',
+                     'db/storage/in_memory/storage_in_memory',
                      'db/storage/mmap_v1/storage_mmapv1',
-                     'db/storage/heap1/storage_heap1',
+                     'db/storage/storage_engine_metadata',
                      'mmap',
                      'elapsed_tracker',
                      '$BUILD_DIR/third_party/shim_snappy']
 
 if has_option("rocksdb" ):
     serveronlyLibdeps.append( 'db/storage/rocks/storage_rocks' )
+
+if wiredtiger:
+    serveronlyLibdeps.append( 'db/storage/wiredtiger/storage_wiredtiger' )
+    serveronlyLibdeps.append( '$BUILD_DIR/third_party/shim_wiredtiger')
 
 serveronlyEnv.Library("serveronly", serverOnlyFiles,
                       LIBDEPS=serveronlyLibdeps )
@@ -983,14 +976,12 @@ env.Library("mongodandmongos", mongodAndMongosFiles,
 env.Library("mongodwebserver",
             [
              "db/clientlistplugin.cpp",
-             "db/repl/replset_web_handler.cpp",
              "db/restapi.cpp",
              "db/stats/snapshots_webplugins.cpp",
              ],
             LIBDEPS=["coredb", "mongodandmongos"])
 
-mongodOnlyFiles = [ "db/db.cpp", "db/commands/touch.cpp", "db/mongod_options_init.cpp",
-                    "db/repl/replication_initializer_${MONGO_REPL_IMPL}.cpp", ]
+mongodOnlyFiles = [ "db/db.cpp", "db/commands/touch.cpp", "db/mongod_options_init.cpp" ]
 
 # ----- TARGETS ------
 
@@ -1090,7 +1081,8 @@ env.Library('mocklib', [
         'dbtests/mock/mock_remote_db_server.cpp',
         'dbtests/mock/mock_replica_set.cpp'
     ],
-    LIBDEPS=['clientdriver'])
+    LIBDEPS=['clientdriver',
+             '$BUILD_DIR/mongo/db/repl/replica_set_messages'])
 
 test = env.Install(
     '#/',
@@ -1120,15 +1112,6 @@ test = env.Install(
 
 if len(env.subst('$PROGSUFFIX')):
     env.Alias( "dbtest", "#/${PROGPREFIX}dbtest${PROGSUFFIX}" )
-
-env.Install( '#/', env.Program( "perftest", [ "dbtests/perf/perftest.cpp" ],
-                                 LIBDEPS = [
-                                     "serveronly",
-                                     "coreserver",
-                                     "coredb",
-                                     "testframework",
-                                     "signal_handlers_synchronous",
-                                 ] ) )
 
 env.Install('$BUILD_ROOT/', env.Program('file_allocator_bench',
             'util/file_allocator_bench.cpp',
@@ -1238,17 +1221,6 @@ if not has_option('noshell'):
 
 # binaries
 
-def checkGlibc(target,source,env):
-    import subprocess
-    import SCons.Errors
-    stringProcess = subprocess.Popen( [ "strings", str( target[0] ) ], stdout=subprocess.PIPE )
-    stringResult = stringProcess.communicate()[0]
-    if stringResult.count( "GLIBC_2.4" ) > 0:
-        print( "************* " + str( target[0] ) + " has GLIBC_2.4 dependencies!" )
-        raise SCons.Errors.BuildError(
-            node=target[0],
-            errstr="target has GLIBC_2.4 dependencies!")
-
 distBinaries = []
 
 if windows:
@@ -1258,9 +1230,6 @@ def installBinary( e, name ):
     global distBinaries
 
     name = add_exe( name )
-
-    if enforce_glibc:
-        e.AddPostAction( name, checkGlibc )
 
     if (solaris or linux) and (not has_option("nostrip")):
         name = e.Command('stripped/%s' % name, name, Copy('$TARGET', '$SOURCE'))[0]
@@ -1290,7 +1259,6 @@ for t in rewrittenTools:
 installBinary(env, "mongoperf")
 env.Alias("tools", '#/' + add_exe("mongoperf"))
 
-env.Alias("tools", "#/" + add_exe("perftest"))
 env.Alias("tools", "#/" + add_exe("mongobridge"))
 
 if mongosniff_built:

@@ -32,7 +32,7 @@ from buildscripts import moduleconfig
 
 import libdeps
 
-EnsureSConsVersion( 1, 1, 0 )
+EnsureSConsVersion( 2, 3, 0 )
 
 def findSettingsSetup():
     sys.path.append( "." )
@@ -215,6 +215,9 @@ add_option( "cxx-use-shell-environment", "use $CXX from shell for C++ compiler" 
 add_option( "ld", "linker to use" , 1 , True )
 add_option( "c++11", "enable c++11 support (experimental)", "?", True,
             type="choice", choices=["on", "off", "auto"], const="on", default="auto" )
+add_option( "disable-minimum-compiler-version-enforcement",
+            "allow use of unsupported older compilers (NEVER for production builds)",
+            0, False )
 
 add_option( "cpppath", "Include path if you have headers in a nonstandard directory" , 1 , False )
 add_option( "libpath", "Library path if you have libraries in a nonstandard directory" , 1 , False )
@@ -223,16 +226,13 @@ add_option( "extrapath", "comma separated list of add'l paths  (--extrapath /opt
 add_option( "extrapathdyn", "comma separated list of add'l paths  (--extrapath /opt/foo/,/foo) dynamic linking" , 1 , False )
 add_option( "extralib", "comma separated list of libraries  (--extralib js_static,readline" , 1 , False )
 
-add_option( "no-glibc-check" , "don't check for new versions of glibc" , 0 , False )
-
 # experimental features
 add_option( "mm", "use main memory instead of memory mapped files" , 0 , True )
 add_option( "ssl" , "Enable SSL" , 0 , True )
 add_option( "ssl-fips-capability", "Enable the ability to activate FIPS 140-2 mode", 0, True );
 add_option( "rocksdb" , "Enable RocksDB" , 0 , False )
-add_option( "replication-implementation",
-            "Controls what implementation is used for the replication system", "?", False,
-            type="choice", choices=["impl", "legacy"], const="impl", default="impl" )
+add_option( "wiredtiger", "Enable wiredtiger", "?", True, "wiredtiger",
+            type="choice", choices=["on", "off"], const="on", default="on")
 
 # library choices
 js_engine_choices = ['v8-3.12', 'v8-3.25', 'none']
@@ -271,7 +271,7 @@ add_option( "pch" , "use precompiled headers to speed up the build (experimental
 add_option( "distcc" , "use distcc for distributing builds" , 0 , False )
 
 # debugging/profiling help
-if os.sys.platform.startswith("linux") or (os.sys.platform == "darwin"):
+if os.sys.platform.startswith("linux"):
     defaultAllocator = 'tcmalloc'
 else:
     defaultAllocator = 'system'
@@ -290,6 +290,8 @@ add_option( "use-system-tcmalloc", "use system version of tcmalloc library", 0, 
 
 add_option( "use-system-pcre", "use system version of pcre library", 0, True )
 
+add_option( "use-system-wiredtiger", "use system version of wiredtiger library", 0, True)
+
 # library choices
 boost_choices = ['1.49', '1.56']
 add_option( "internal-boost", "Specify internal boost version to use", 1, True,
@@ -298,6 +300,8 @@ add_option( "internal-boost", "Specify internal boost version to use", 1, True,
 add_option( "use-system-boost", "use system version of boost libraries", 0, True )
 
 add_option( "use-system-snappy", "use system version of snappy library", 0, True )
+
+add_option( "use-system-zlib", "use system version of zlib library", 0, True )
 
 add_option( "use-system-v8", "use system version of v8 library", 0, True )
 
@@ -472,7 +476,7 @@ envDict = dict(BUILD_ROOT=buildDir,
                ARCHIVE_ADDITIONS=[],
                PYTHON=utils.find_python(),
                SERVER_ARCHIVE='${SERVER_DIST_BASENAME}${DIST_ARCHIVE_SUFFIX}',
-               tools=["default", "gch", "jsheader", "mergelib", "mongo_unittest"],
+               tools=["default", "gch", "jsheader", "mergelib", "mongo_unittest", "textfile"],
                UNITTEST_ALIAS='unittests',
                # TODO: Move unittests.txt to $BUILD_DIR, but that requires
                # changes to MCI.
@@ -986,7 +990,7 @@ if has_option( "ssl" ):
 else:
     env.Append( MONGO_CRYPTO=["tom"] )
 
-env['MONGO_REPL_IMPL'] = get_option('replication-implementation')
+wiredtiger = (get_option('wiredtiger') == 'on')
 
 try:
     umask = os.umask(022)
@@ -1014,6 +1018,7 @@ env['MONGO_MODULES'] = [m.name for m in mongo_modules]
 # --- check system ---
 
 def doConfigure(myenv):
+    global wiredtiger
 
     # Check that the compilers work.
     #
@@ -1105,6 +1110,99 @@ def doConfigure(myenv):
 
     myenv = conf.Finish()
 
+    if using_msvc():
+        compiler_minimum_string = "Microsoft Visual Studio 2013 Update 2"
+        compiler_test_body = textwrap.dedent(
+        """
+        #if !defined(_MSC_VER)
+        #error
+        #endif
+
+        #if _MSC_VER < 1800 || (_MSC_VER == 1800 && _MSC_FULL_VER < 180030501)
+        #error %s or newer is required to build MongoDB
+        #endif
+
+        int main(int argc, char* argv[]) {
+            return 0;
+        }
+        """ % compiler_minimum_string)
+    elif using_gcc():
+        # TODO: Really, we want GCC 4.8.2 here, but we are admitting 4.8.1
+        # until our Solaris toolchain solution reaches 4.8.2. When our Solaris
+        # toolchain reaches 4.8.2, upgrade this string, and the check below.
+        compiler_minimum_string = "GCC 4.8.1"
+        compiler_test_body = textwrap.dedent(
+        """
+        #if !defined(__GNUC__) || defined(__clang__)
+        #error
+        #endif
+
+        #if (__GNUC__ < 4) || (__GNUC__ == 4 && __GNUC_MINOR__ < 8) || (__GNUC__ == 4 && __GNUC_MINOR__ == 8 && __GNUC_PATCHLEVEL__ < 1)
+        #error %s or newer is required to build MongoDB
+        #endif
+
+        int main(int argc, char* argv[]) {
+            return 0;
+        }
+        """ % compiler_minimum_string)
+    elif using_clang:
+        compiler_minimum_string = "clang 3.4 (or Apple XCode 5.1.1)"
+        compiler_test_body = textwrap.dedent(
+        """
+        #if !defined(__clang__)
+        #error
+        #endif
+
+        #if defined(__apple_build_version__)
+        #if __apple_build_version__ < 5030040
+        #error %s or newer is required to build MongoDB
+        #endif
+        #elif (__clang_major__ < 3) || (__clang_major__ == 3 && __clang_minor__ < 4)
+        #error %s or newer is required to build MongoDB
+        #endif
+
+        int main(int argc, char* argv[]) {
+            return 0;
+        }
+        """ % (compiler_minimum_string, compiler_minimum_string))
+    else:
+        print("Error: can't check compiler minimum; don't know this compiler...")
+        Exit(1)
+
+    def CheckForMinimumCompiler(context, language):
+        extension_for = {
+            "C" : ".c",
+            "C++" : ".cpp",
+        }
+        context.Message("Checking if %s compiler is %s or newer..." %
+                        (language, compiler_minimum_string))
+        result = context.TryCompile(compiler_test_body, extension_for[language])
+        context.Result(result)
+        return result;
+
+    conf = Configure(myenv, help=False, custom_tests = {
+        'CheckForMinimumCompiler' : CheckForMinimumCompiler,
+    })
+
+    c_compiler_validated = True
+    if check_c:
+        c_compiler_validated = conf.CheckForMinimumCompiler('C')
+    cxx_compiler_validated = conf.CheckForMinimumCompiler('C++')
+
+    myenv = conf.Finish();
+
+    suppress_invalid = has_option("disable-minimum-compiler-version-enforcement")
+    if releaseBuild and suppress_invalid:
+        print("--disable-minimum-compiler-version-enforcement is forbidden with --release")
+        Exit(1)
+
+    if not (c_compiler_validated and cxx_compiler_validated):
+        if not suppress_invalid:
+            print("ERROR: Refusing to build with compiler that does not meet requirements")
+            Exit(1)
+        print("WARNING: Ignoring failed compiler version check per explicit user request.")
+        print("WARNING: The build may fail, binaries may crash, or may run but corrupt data...")
+
     global use_clang
     use_clang = using_clang()
 
@@ -1154,7 +1252,25 @@ def doConfigure(myenv):
         env.Append( CPPDEFINES=[("_WIN32_WINNT", "0x" + win_version_min[0])] )
         env.Append( CPPDEFINES=[("NTDDI_VERSION", "0x" + win_version_min[0] + win_version_min[1])] )
 
-    if using_gcc() or using_clang():
+    def CheckForx86(context):
+        # See http://nadeausoftware.com/articles/2012/02/c_c_tip_how_detect_processor_type_using_compiler_predefined_macros
+        test_body = """
+        #if defined(__i386) || defined(_M_IX86)
+        /* x86 32-bit */
+        #else
+        #error not 32-bit x86
+        #endif
+        """
+        context.Message('Checking if target architecture is 32-bit x86...')
+        ret = context.TryCompile(textwrap.dedent(test_body), ".c")
+        context.Result(ret)
+        return ret
+
+    conf = Configure(myenv, help=False, custom_tests = {
+        'CheckForx86' : CheckForx86,
+    })
+
+    if conf.CheckForx86():
 
         # If we are using GCC or clang to target 32 or x86, set the ISA minimum to 'nocona',
         # and the tuning to 'generic'. The choice of 'nocona' is selected because it
@@ -1167,27 +1283,15 @@ def doConfigure(myenv):
         # contemporaries, the generic scheduling should be appropriate for a wide range of
         # deployed hardware.
 
-        def CheckForx86(context):
-            # See http://nadeausoftware.com/articles/2012/02/c_c_tip_how_detect_processor_type_using_compiler_predefined_macros
-            test_body = """
-            #if defined(__i386) || defined(_M_IX86)
-            /* x86 32-bit */
-            #else
-            #error not 32-bit x86
-            #endif
-            """
-            context.Message('Checking if target architecture is 32-bit x86...')
-            ret = context.TryCompile(textwrap.dedent(test_body), ".c")
-            context.Result(ret)
-            return ret
+        if using_gcc() or using_clang():
+                myenv.Append( CCFLAGS=['-march=nocona', '-mtune=generic'] )
 
-        conf = Configure(myenv, help=False, custom_tests = {
-            'CheckForx86' : CheckForx86,
-        })
-
-        if conf.CheckForx86():
-            myenv.Append( CCFLAGS=['-march=nocona', '-mtune=generic'] )
-        conf.Finish()
+        # Wiredtiger only supports 64-bit architecture, and will fail to compile on 32-bit
+        # so disable WiredTiger automatically on 32-bit since wiredtiger is on by default
+        if wiredtiger == True:
+            print "WARNING: WiredTiger is not supported on 32-bit platforms, disabling support"
+            wiredtiger = False
+    conf.Finish()
 
     # Enable PCH if we are on using gcc or clang and the 'Gch' tool is enabled. Otherwise,
     # remove any pre-compiled header since the compiler may try to use it if it exists.
@@ -1291,6 +1395,10 @@ def doConfigure(myenv):
         # in boost/date_time/format_date_parser.hpp which does not work for compilers
         # GCC >= 4.6. Error explained in https://svn.boost.org/trac/boost/ticket/6136 .
         AddToCCFLAGSIfSupported(myenv, "-Wno-unused-but-set-variable")
+
+        # This has been suppressed in gcc 4.8, due to false positives, but not in clang.  So
+        # we explicitly disable it here.
+        AddToCCFLAGSIfSupported(myenv, "-Wno-missing-braces")
 
     # Check if we need to disable null-conversion warnings
     if using_clang():
@@ -1614,63 +1722,15 @@ def doConfigure(myenv):
             print("Using the leak sanitizer requires a valid symbolizer")
             Exit(1)
 
-    # When using msvc,
-    # check for min version of VS2013 for fixes in std::list::splice
-    # check for VS 2013 Update 2+ so we can use new compiler flags
-    if using_msvc():
-        haveVS2013OrLater = False
-        def CheckVS2013(context):
-            test_body = """
-            #if _MSC_VER < 1800
-            #error Old Version
-            #endif
-            int main(int argc, char* argv[]) {
-            return 0;
-            }
-            """
-            context.Message('Checking for VS 2013 or Later... ')
-            ret = context.TryCompile(textwrap.dedent(test_body), ".cpp")
-            context.Result(ret)
-            return ret
-        conf = Configure(myenv, help=False, custom_tests = {
-            'CheckVS2013' : CheckVS2013,
-        })
-        haveVS2013 = conf.CheckVS2013()
-        conf.Finish()
+    if using_msvc() and optBuild:
+        # http://blogs.msdn.com/b/vcblog/archive/2013/09/11/introducing-gw-compiler-switch.aspx
+        #
+        myenv.Append( CCFLAGS=["/Gw", "/Gy"] )
+        myenv.Append( LINKFLAGS=["/OPT:REF"])
 
-        if not haveVS2013:
-            print("Visual Studio 2013 RTM or later is required to compile MongoDB.")
-            Exit(1)
-
-        haveVS2013Update2OrLater = False
-        def CheckVS2013Update2(context):
-            test_body = """
-            #if _MSC_VER < 1800 || (_MSC_VER == 1800 && _MSC_FULL_VER < 180030501)
-            #error Old Version
-            #endif
-            int main(int argc, char* argv[]) {
-            return 0;
-            }
-            """
-            context.Message('Checking for VS 2013 Update 2 or Later... ')
-            ret = context.TryCompile(textwrap.dedent(test_body), ".cpp")
-            context.Result(ret)
-            return ret
-        conf = Configure(myenv, help=False, custom_tests = {
-            'CheckVS2013Update2' : CheckVS2013Update2,
-        })
-        haveVS2013Update2OrLater = conf.CheckVS2013Update2()
-        conf.Finish()
-
-        if haveVS2013Update2OrLater and optBuild:
-            # http://blogs.msdn.com/b/vcblog/archive/2013/09/11/introducing-gw-compiler-switch.aspx
-            #
-            myenv.Append( CCFLAGS=["/Gw", "/Gy"] )
-            myenv.Append( LINKFLAGS=["/OPT:REF"])
-
-            # http://blogs.msdn.com/b/vcblog/archive/2014/03/25/linker-enhancements-in-visual-studio-2013-update-2-ctp2.aspx
-            #
-            myenv.Append( CCFLAGS=["/Zc:inline"])
+        # http://blogs.msdn.com/b/vcblog/archive/2014/03/25/linker-enhancements-in-visual-studio-2013-update-2-ctp2.aspx
+        #
+        myenv.Append( CCFLAGS=["/Zc:inline"])
 
     # Apply any link time optimization settings as selected by the 'lto' option.
     if has_option('lto'):
@@ -1881,11 +1941,20 @@ def doConfigure(myenv):
     if use_system_version_of_library("snappy"):
         conf.FindSysLibDep("snappy", ["snappy"])
 
+    if use_system_version_of_library("zlib"):
+        conf.FindSysLibDep("zlib", ["zlib" if windows else "z"])
+
     if use_system_version_of_library("stemmer"):
         conf.FindSysLibDep("stemmer", ["stemmer"])
 
     if use_system_version_of_library("yaml"):
         conf.FindSysLibDep("yaml", ["yaml-cpp"])
+
+    if wiredtiger and use_system_version_of_library("wiredtiger"):
+        if not conf.CheckCXXHeader( "wiredtiger.h" ):
+            print( "Cannot find wiredtiger headers" )
+            Exit(1)
+        conf.FindSysLibDep("wiredtiger", ["wiredtiger"])
 
     if use_system_version_of_library("boost"):
         if not conf.CheckCXXHeader( "boost/filesystem/operations.hpp" ):
@@ -1977,8 +2046,6 @@ def doConfigure(myenv):
 env = doConfigure( env )
 
 env['PDB'] = '${TARGET.base}.pdb'
-
-enforce_glibc = linux and releaseBuild and not has_option("no-glibc-check")
 
 def checkErrorCodes():
     import buildscripts.errorcodes as x
@@ -2189,9 +2256,9 @@ Export("boostSuffix")
 Export("darwin windows solaris linux freebsd nix openbsd")
 Export('module_sconscripts')
 Export("debugBuild optBuild")
-Export("enforce_glibc")
 Export("s3push")
 Export("use_clang")
+Export("wiredtiger")
 
 def injectMongoIncludePaths(thisEnv):
     thisEnv.AppendUnique(CPPPATH=['$BUILD_DIR'])

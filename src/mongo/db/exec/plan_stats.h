@@ -64,6 +64,7 @@ namespace mongo {
                         invalidates(0),
                         advanced(0),
                         needTime(0),
+                        needFetch(0),
                         executionTimeMillis(0),
                         isEOF(false) { }
         // String giving the type of the stage. Not owned.
@@ -78,6 +79,7 @@ namespace mongo {
         // How many times was this state the return value of work(...)?
         size_t advanced;
         size_t needTime;
+        size_t needFetch;
 
         // BSON representation of a MatchExpression affixed to this node. If there
         // is no filter affixed, then 'filter' should be an empty BSONObj.
@@ -91,6 +93,8 @@ namespace mongo {
 
         // TODO: once we've picked a plan, collect different (or additional) stats for display to
         // the user, eg. time_t totalTimeSpent;
+
+        // TODO: keep track of the total yield time / fetch time done for a plan.
 
         bool isEOF;
     private:
@@ -160,7 +164,7 @@ namespace mongo {
         size_t flaggedInProgress;
 
         // How many entries are in the map after each child?
-        // child 'i' produced children[i].common.advanced DiskLocs, of which mapAfterChild[i] were
+        // child 'i' produced children[i].common.advanced RecordIds, of which mapAfterChild[i] were
         // intersections.
         std::vector<size_t> mapAfterChild;
 
@@ -442,7 +446,7 @@ namespace mongo {
         size_t dupsTested;
         size_t dupsDropped;
 
-        // How many calls to invalidate(...) actually removed a DiskLoc from our deduping map?
+        // How many calls to invalidate(...) actually removed a RecordId from our deduping map?
         size_t locsForgotten;
 
         // We know how many passed (it's the # of advanced) and therefore how many failed.

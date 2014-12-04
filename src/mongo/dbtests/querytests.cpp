@@ -39,7 +39,7 @@
 #include "mongo/db/global_optime.h"
 #include "mongo/db/json.h"
 #include "mongo/db/lasterror.h"
-#include "mongo/db/query/new_find.h"
+#include "mongo/db/query/find.h"
 #include "mongo/db/query/lite_parsed_query.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/operation_context_impl.h"
@@ -95,9 +95,7 @@ namespace QueryTests {
             Helpers::ensureIndex(&_txn, _collection, key, false, key.firstElementFieldName());
         }
         void insert( const char *s ) {
-            WriteUnitOfWork wunit(&_txn);
             insert( fromjson( s ) );
-            wunit.commit();
         }
         void insert( const BSONObj &o ) {
             WriteUnitOfWork wunit(&_txn);
@@ -163,6 +161,7 @@ namespace QueryTests {
         void run() {
             // We don't normally allow empty objects in the database, but test that we can find
             // an empty object (one might be allowed inside a reserved namespace at some point).
+            ScopedTransaction transaction(&_txn, MODE_X);
             Lock::GlobalWrite lk(_txn.lockState());
             Client::Context ctx(&_txn,  "unittests.querytests" );
 
@@ -198,6 +197,7 @@ namespace QueryTests {
             _prevError = mongo::lastError._get( false );
             mongo::lastError.release();
             mongo::lastError.reset( new LastError() );
+            _txn.getCurOp()->reset();
         }
         virtual ~ClientBase() {
             mongo::lastError.reset( _prevError );
@@ -233,7 +233,7 @@ namespace QueryTests {
             a.appendMaxKey( "$lt" );
             BSONObj limit = a.done();
             ASSERT( !_client.findOne( ns, QUERY( "a" << limit ) ).isEmpty() );
-            _client.ensureIndex( ns, BSON( "a" << 1 ) );
+            ASSERT_OK(dbtests::createIndex( &_txn, ns, BSON( "a" << 1 ) ));
             ASSERT( !_client.findOne( ns, QUERY( "a" << limit ).hint( BSON( "a" << 1 ) ) ).isEmpty() );
         }
     };
@@ -486,7 +486,7 @@ namespace QueryTests {
 
             // Inserting a document into a capped collection can force another document out.
             // In this case, the capped collection has 2 documents, so inserting two more clobbers
-            // whatever DiskLoc that the underlying cursor had as its state.
+            // whatever RecordId that the underlying cursor had as its state.
             //
             // In the Cursor world, the ClientCursor was responsible for manipulating cursors.  It
             // would detect that the cursor's "refloc" (translation: diskloc required to maintain
@@ -633,8 +633,8 @@ namespace QueryTests {
         }
         void run() {
             const char *ns = "unittests.querytests.OplogReplaySlaveReadTill";
+            ScopedTransaction transaction(&_txn, MODE_IX);
             Lock::DBLock lk(_txn.lockState(), "unittests", MODE_X);
-            WriteUnitOfWork wunit(&_txn);
             Client::Context ctx(&_txn,  ns );
 
             BSONObj info;
@@ -658,7 +658,6 @@ namespace QueryTests {
             
             ClientCursorPin clientCursor( ctx.db()->getCollection( &_txn, ns ), cursorId );
             ASSERT_EQUALS( three.millis, clientCursor.c()->getSlaveReadTill().asDate() );
-            wunit.commit();
         }
     };
 
@@ -695,7 +694,7 @@ namespace QueryTests {
         }
         void run() {
             const char *ns = "unittests.querytests.BasicCount";
-            _client.ensureIndex( ns, BSON( "a" << 1 ) );
+            ASSERT_OK(dbtests::createIndex(&_txn, ns, BSON( "a" << 1 ) ));
             count( 0 );
             insert( ns, BSON( "a" << 3 ) );
             count( 0 );
@@ -719,7 +718,7 @@ namespace QueryTests {
         }
         void run() {
             const char *ns = "unittests.querytests.ArrayId";
-            _client.ensureIndex( ns, BSON( "_id" << 1 ) );
+            ASSERT_OK(dbtests::createIndex( &_txn, ns, BSON( "_id" << 1 ) ));
             ASSERT( !error() );
             _client.insert( ns, fromjson( "{'_id':[1,2]}" ) );
             ASSERT( error() );
@@ -790,7 +789,7 @@ namespace QueryTests {
             const char *ns = "unittests.querytests.NumericEmbedded";
             _client.insert( ns, BSON( "a" << BSON ( "b" << 1 ) ) );
             ASSERT( ! _client.findOne( ns, BSON( "a" << BSON ( "b" << 1.0 ) ) ).isEmpty() );
-            _client.ensureIndex( ns , BSON( "a" << 1 ) );
+            ASSERT_OK(dbtests::createIndex( &_txn, ns , BSON( "a" << 1 ) ));
             ASSERT( ! _client.findOne( ns, BSON( "a" << BSON ( "b" << 1.0 ) ) ).isEmpty() );
         }
     };
@@ -805,7 +804,7 @@ namespace QueryTests {
         void index() { ASSERT_EQUALS(2u, _client.getIndexSpecs(ns()).size()); }
         void noIndex() { ASSERT_EQUALS(0u, _client.getIndexSpecs(ns()).size()); }
         void checkIndex() {
-            _client.ensureIndex( ns(), BSON( "a" << 1 ) );
+            ASSERT_OK(dbtests::createIndex( &_txn, ns() , BSON( "a" << 1 ) ));
             index();
         }
         void run() {
@@ -828,12 +827,12 @@ namespace QueryTests {
         }
         void run() {
             const char *ns = "unittests.querytests.UniqueIndex";
-            _client.ensureIndex( ns, BSON( "a" << 1 ), true );
+            ASSERT_OK(dbtests::createIndex( &_txn, ns , BSON( "a" << 1 ), true ));
             _client.insert( ns, BSON( "a" << 4 << "b" << 2 ) );
             _client.insert( ns, BSON( "a" << 4 << "b" << 3 ) );
             ASSERT_EQUALS( 1U, _client.count( ns, BSONObj() ) );
             _client.dropCollection( ns );
-            _client.ensureIndex( ns, BSON( "b" << 1 ), true );
+            ASSERT_OK(dbtests::createIndex( &_txn, ns , BSON( "b" << 1 ), true ));
             _client.insert( ns, BSON( "a" << 4 << "b" << 2 ) );
             _client.insert( ns, BSON( "a" << 4 << "b" << 3 ) );
             ASSERT_EQUALS( 2U, _client.count( ns, BSONObj() ) );
@@ -849,7 +848,8 @@ namespace QueryTests {
             const char *ns = "unittests.querytests.UniqueIndexPreexistingData";
             _client.insert( ns, BSON( "a" << 4 << "b" << 2 ) );
             _client.insert( ns, BSON( "a" << 4 << "b" << 3 ) );
-            _client.ensureIndex( ns, BSON( "a" << 1 ), true );
+            ASSERT_EQUALS(ErrorCodes::DuplicateKey,
+                          dbtests::createIndex( &_txn, ns , BSON( "a" << 1 ), true ));
             ASSERT_EQUALS( 0U, _client.count( "unittests.system.indexes", BSON( "ns" << ns << "name" << NE << "_id_" ) ) );
         }
     };
@@ -875,7 +875,7 @@ namespace QueryTests {
         void run() {
             const char *ns = "unittests.querytests.Size";
             _client.insert( ns, fromjson( "{a:[1,2,3]}" ) );
-            _client.ensureIndex( ns, BSON( "a" << 1 ) );
+            ASSERT_OK(dbtests::createIndex( &_txn, ns , BSON( "a" << 1 ) ));
             ASSERT( _client.query( ns, QUERY( "a" << mongo::BSIZE << 3 ).hint( BSON( "a" << 1 ) ) )->more() );
         }
     };
@@ -889,7 +889,7 @@ namespace QueryTests {
             const char *ns = "unittests.querytests.IndexedArray";
             _client.insert( ns, fromjson( "{a:[1,2,3]}" ) );
             ASSERT( _client.query( ns, Query( "{a:[1,2,3]}" ) )->more() );
-            _client.ensureIndex( ns, BSON( "a" << 1 ) );
+            ASSERT_OK(dbtests::createIndex( &_txn, ns , BSON( "a" << 1 ) ));
             ASSERT( _client.query( ns, Query( "{a:{$in:[1,[1,2,3]]}}" ).hint( BSON( "a" << 1 ) ) )->more() );
             ASSERT( _client.query( ns, Query( "{a:[1,2,3]}" ).hint( BSON( "a" << 1 ) ) )->more() ); // SERVER-146
         }
@@ -904,7 +904,7 @@ namespace QueryTests {
             const char *ns = "unittests.querytests.InsideArray";
             _client.insert( ns, fromjson( "{a:[[1],2]}" ) );
             check( "$natural" );
-            _client.ensureIndex( ns, BSON( "a" << 1 ) );
+            ASSERT_OK(dbtests::createIndex( &_txn, ns , BSON( "a" << 1 ) ));
             check( "a" ); // SERVER-146
         }
     private:
@@ -926,7 +926,7 @@ namespace QueryTests {
             const char *ns = "unittests.querytests.IndexInsideArrayCorrect";
             _client.insert( ns, fromjson( "{'_id':1,a:[1]}" ) );
             _client.insert( ns, fromjson( "{'_id':2,a:[[1]]}" ) );
-            _client.ensureIndex( ns, BSON( "a" << 1 ) );
+            ASSERT_OK(dbtests::createIndex( &_txn, ns , BSON( "a" << 1 ) ));
             ASSERT_EQUALS( 1, _client.query( ns, Query( "{a:[1]}" ).hint( BSON( "a" << 1 ) ) )->next().getIntField( "_id" ) );
         }
     };
@@ -940,7 +940,7 @@ namespace QueryTests {
             const char *ns = "unittests.querytests.SubobjArr";
             _client.insert( ns, fromjson( "{a:[{b:[1]}]}" ) );
             check( "$natural" );
-            _client.ensureIndex( ns, BSON( "a" << 1 ) );
+            ASSERT_OK(dbtests::createIndex( &_txn, ns , BSON( "a" << 1 ) ));
             check( "a" );
         }
     private:
@@ -958,7 +958,7 @@ namespace QueryTests {
             _client.dropCollection( "unittests.querytests.MinMax" );
         }
         void run() {
-            _client.ensureIndex( ns, BSON( "a" << 1 << "b" << 1 ) );
+            ASSERT_OK(dbtests::createIndex( &_txn, ns, BSON( "a" << 1 << "b" << 1 ) ));
             _client.insert( ns, BSON( "a" << 1 << "b" << 1 ) );
             _client.insert( ns, BSON( "a" << 1 << "b" << 2 ) );
             _client.insert( ns, BSON( "a" << 2 << "b" << 1 ) );
@@ -1014,7 +1014,7 @@ namespace QueryTests {
         }
         void run() {
             checkMatch();
-            _client.ensureIndex( _ns, BSON( "a" << 1 ) );
+            ASSERT_OK(dbtests::createIndex( &_txn, _ns, BSON( "a" << 1 ) ));
             checkMatch();
         }
     private:
@@ -1051,7 +1051,7 @@ namespace QueryTests {
         }
         void run() {
             checkMatch();
-            _client.ensureIndex( _ns, BSON( "a" << 1 ) );
+            ASSERT_OK(dbtests::createIndex( &_txn, _ns, BSON( "a" << 1 ) ));
             checkMatch();
         }
     private:
@@ -1073,11 +1073,10 @@ namespace QueryTests {
     class DirectLocking : public ClientBase {
     public:
         void run() {
+            ScopedTransaction transaction(&_txn, MODE_X);
             Lock::GlobalWrite lk(_txn.lockState());
             Client::Context ctx(&_txn, "unittests.DirectLocking");
-            WriteUnitOfWork wunit(&_txn);
             _client.remove( "a.b", BSONObj() );
-            wunit.commit();
             ASSERT_EQUALS( "unittests", ctx.db()->name() );
         }
         const char *ns;
@@ -1091,7 +1090,7 @@ namespace QueryTests {
         void run() {
             const char *ns = "unittests.querytests.FastCountIn";
             _client.insert( ns, BSON( "i" << "a" ) );
-            _client.ensureIndex( ns, BSON( "i" << 1 ) );
+            ASSERT_OK(dbtests::createIndex( &_txn, ns, BSON( "i" << 1 ) ));
             ASSERT_EQUALS( 1U, _client.count( ns, fromjson( "{i:{$in:['a']}}" ) ) );
         }
     };
@@ -1136,7 +1135,7 @@ namespace QueryTests {
             { BSONObjBuilder b; b.append( "7" , (double)3.7 ); _client.insert( ns , b.obj() ); }
 
             t(ns);
-            _client.ensureIndex( ns , BSON( "7" << 1 ) );
+            ASSERT_OK(dbtests::createIndex( &_txn, ns , BSON( "7" << 1 ) ));
             t(ns);
         }
     };
@@ -1187,7 +1186,7 @@ namespace QueryTests {
                 ASSERT_EQUALS( 17 , _client.findOne( ns() , b.obj() )["z"].number() );
             }
             ASSERT_EQUALS( 17 , _client.findOne( ns() , BSON( "x" << "eliot" ) )["z"].number() );
-            _client.ensureIndex( ns() , BSON( "x" << 1 ) );
+            ASSERT_OK(dbtests::createIndex( &_txn,  ns() , BSON( "x" << 1 ) ));
             ASSERT_EQUALS( 17 , _client.findOne( ns() , BSON( "x" << "eliot" ) )["z"].number() );
         }
     };
@@ -1470,7 +1469,7 @@ namespace QueryTests {
             DbMessage dbMessage( message );
             QueryMessage queryMessage( dbMessage );
             Message result;
-            string exhaust = newRunQuery( &_txn, message, queryMessage, *cc().curop(), result, false );
+            string exhaust = runQuery( &_txn, message, queryMessage, *cc().curop(), result, false );
             ASSERT( exhaust.size() );
             ASSERT_EQUALS( string( ns() ), exhaust );
         }

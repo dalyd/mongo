@@ -44,7 +44,7 @@ namespace mongo {
     class CmdListDatabases : public Command {
     public:
         virtual bool slaveOk() const {
-            return true;
+            return false;
         }
         virtual bool slaveOverrideOk() const {
             return true;
@@ -87,6 +87,7 @@ namespace mongo {
                 b.append( "name", dbname );
 
                 {
+                    ScopedTransaction transaction(txn, MODE_IS);
                     Lock::DBLock dbLock(txn->lockState(), dbname, MODE_IS);
 
                     Database* db = dbHolder().get( txn, dbname );

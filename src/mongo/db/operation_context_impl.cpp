@@ -63,11 +63,11 @@ namespace {
             _locker.reset(new LockerImpl<false>(idCounter.addAndFetch(1)));
         }
 
-        getGlobalEnvironment()->registerOperationContext(this);
+        _client->setOperationContext(this);
     }
 
     OperationContextImpl::~OperationContextImpl() {
-        getGlobalEnvironment()->unregisterOperationContext(this);
+        _client->setOperationContext(NULL);
     }
 
     RecoveryUnit* OperationContextImpl::recoveryUnit() const {
@@ -162,46 +162,23 @@ namespace {
 
     } // namespace
 
-    void OperationContextImpl::checkForInterrupt(bool heedMutex) const {
-        Client* c = getClient();
+    void OperationContextImpl::checkForInterrupt() const {
+        // We cannot interrupt operation, while it's inside of a write unit of work, because logOp
+        // cannot handle being iterrupted.
+        if (lockState()->inAWriteUnitOfWork()) return;
 
-        if (heedMutex && lockState()->isWriteLocked() && c->hasWrittenSinceCheckpoint()) {
-            return;
-        }
-
-        uassert(ErrorCodes::InterruptedAtShutdown,
-                "interrupted at shutdown",
-                !getGlobalEnvironment()->getKillAllOperations());
-
-        if (c->curop()->maxTimeHasExpired()) {
-            c->curop()->kill();
-            uasserted(ErrorCodes::ExceededTimeLimit, "operation exceeded time limit");
-        }
-
-        MONGO_FAIL_POINT_BLOCK(checkForInterruptFail, scopedFailPoint) {
-            if (opShouldFail(*c, scopedFailPoint.getData())) {
-                log() << "set pending kill on " << (c->curop()->parent() ? "nested" : "top-level")
-                      << " op " << c->curop()->opNum() << ", for checkForInterruptFail";
-                c->curop()->kill();
-            }
-        }
-
-        if (c->curop()->killPending()) {
-            uasserted(ErrorCodes::Interrupted, "operation was interrupted");
-        }
+        uassertStatusOK(checkForInterruptNoAssert());
     }
 
     Status OperationContextImpl::checkForInterruptNoAssert() const {
-        // TODO(spencer): Unify error codes and implementation with checkForInterrupt()
-        Client* c = getClient();
-
         if (getGlobalEnvironment()->getKillAllOperations()) {
-            return Status(ErrorCodes::Interrupted, "interrupted at shutdown");
+            return Status(ErrorCodes::InterruptedAtShutdown, "interrupted at shutdown");
         }
 
+        Client* c = getClient();
         if (c->curop()->maxTimeHasExpired()) {
             c->curop()->kill();
-            return Status(ErrorCodes::Interrupted, "exceeded time limit");
+            return Status(ErrorCodes::ExceededTimeLimit, "operation exceeded time limit");
         }
 
         MONGO_FAIL_POINT_BLOCK(checkForInterruptFail, scopedFailPoint) {
@@ -213,7 +190,7 @@ namespace {
         }
 
         if (c->curop()->killPending()) {
-            return Status(ErrorCodes::Interrupted, "interrupted");
+            return Status(ErrorCodes::Interrupted, "operation was interrupted");
         }
 
         return Status::OK();

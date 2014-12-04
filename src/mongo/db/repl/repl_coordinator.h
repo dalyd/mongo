@@ -106,10 +106,8 @@ namespace repl {
 
         /**
          * Returns a reference to the parsed command line arguments that are related to replication.
-         * TODO(spencer): Change this to a const ref once we are no longer using it for mutable
-         * global state.
          */
-        virtual ReplSettings& getSettings() = 0;
+        virtual const ReplSettings& getSettings() const = 0;
 
         enum Mode {
             modeNone = 0,
@@ -175,14 +173,6 @@ namespace repl {
                 const WriteConcernOptions& writeConcern) = 0;
 
         /**
-         * Like awaitReplication(), above, but waits for the replication of the last operation
-         * applied to this node.
-         */
-        virtual StatusAndDuration awaitReplicationOfLastOpApplied(
-                const OperationContext* txn,
-                const WriteConcernOptions& writeConcern) = 0;
-
-        /**
          * Causes this node to relinquish being primary for at least 'stepdownTime'.  If 'force' is
          * false, before doing so it will wait for 'waitTime' for one other node to be within 10
          * seconds of this node's optime before stepping down. Returns a Status with the code
@@ -210,6 +200,9 @@ namespace repl {
          * If a node was started with the replSet argument, but has not yet received a config, it
          * will not be able to receive writes to a database other than local (it will not be treated
          * as standalone node).
+         *
+         * NOTE: This function can only be meaningfully called while the caller holds the global
+         * lock in some mode other than MODE_NONE.
          */
         virtual bool canAcceptWritesForDatabase(const StringData& dbName) = 0;
 
@@ -310,7 +303,7 @@ namespace repl {
          * This is an interface that allows the applier to reenable writes after
          * a successful election triggers the draining of the applier buffer.
          */
-        virtual void signalDrainComplete() = 0;
+        virtual void signalDrainComplete(OperationContext* txn) = 0;
 
         /**
          * Signals the sync source feedback thread to wake up and send a handshake and
@@ -508,7 +501,7 @@ namespace repl {
         /**
          * Returns a BSONObj containing a representation of the current default write concern.
          */
-        virtual BSONObj getGetLastErrorDefault() = 0;
+        virtual WriteConcernOptions getGetLastErrorDefault() = 0;
 
         /**
          * Checks that the --replSet flag was passed when starting up the node and that the node

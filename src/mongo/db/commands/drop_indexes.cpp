@@ -28,7 +28,7 @@
 *    it in the license file.
 */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommands
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -74,7 +74,7 @@ namespace mongo {
         virtual std::vector<BSONObj> stopIndexBuilds(OperationContext* opCtx,
                                                      Database* db, 
                                                      const BSONObj& cmdObj) {
-            std::string toDeleteNs = db->name() + "." + cmdObj.firstElement().valuestr();
+            std::string toDeleteNs = db->name() + "." + cmdObj.firstElement().valuestrsafe();
             Collection* collection = db->getCollection(opCtx, toDeleteNs);
             IndexCatalog::IndexKillCriteria criteria;
 
@@ -104,6 +104,7 @@ namespace mongo {
 
         CmdDropIndexes() : Command("dropIndexes", false, "deleteIndexes") { }
         bool run(OperationContext* txn, const string& dbname, BSONObj& jsobj, int, string& errmsg, BSONObjBuilder& anObjBuilder, bool fromRepl) {
+            ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
             WriteUnitOfWork wunit(txn);
             bool ok = wrappedRun(txn, dbname, jsobj, errmsg, anObjBuilder);
@@ -121,8 +122,13 @@ namespace mongo {
                         BSONObj& jsobj,
                         string& errmsg,
                         BSONObjBuilder& anObjBuilder) {
-            BSONElement e = jsobj.firstElement();
-            const string toDeleteNs = dbname + '.' + e.valuestr();
+            const std::string coll = jsobj.firstElement().valuestrsafe();
+            if (coll.empty()) {
+                errmsg = "no collection name specified";
+                return false;
+            }
+
+            const std::string toDeleteNs = dbname + '.' + coll;
             if (!serverGlobalParams.quiet) {
                 LOG(0) << "CMD: dropIndexes " << toDeleteNs << endl;
             }
@@ -240,6 +246,7 @@ namespace mongo {
 
             LOG(0) << "CMD: reIndex " << toDeleteNs << endl;
 
+            ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
             Client::Context ctx(txn, toDeleteNs);
 

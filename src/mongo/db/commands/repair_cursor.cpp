@@ -73,6 +73,11 @@ namespace mongo {
 
             std::auto_ptr<RecordIterator> iter(
                 collection->getRecordStore()->getIteratorForRepair(txn));
+            if (iter.get() == NULL) {
+                return appendCommandStatus(result,
+                                           Status(ErrorCodes::CommandNotSupported,
+                                                  "repair iterator not supported"));
+            }
 
             std::auto_ptr<WorkingSet> ws(new WorkingSet());
             std::auto_ptr<MultiIteratorStage> stage(new MultiIteratorStage(txn, ws.get(),
@@ -89,7 +94,7 @@ namespace mongo {
             invariant(execStatus.isOK());
             std::auto_ptr<PlanExecutor> exec(rawExec);
 
-            // 'exec' will be used in newGetMore(). It was automatically registered on construction
+            // 'exec' will be used in getMore(). It was automatically registered on construction
             // due to the auto yield policy, so it could yield during plan selection. We deregister
             // it now so that it can be registed with ClientCursor.
             exec->deregisterExec();

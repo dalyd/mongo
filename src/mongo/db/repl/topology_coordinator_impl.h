@@ -184,6 +184,7 @@ namespace repl {
         virtual bool checkShouldStandForElection(Date_t now, const OpTime& lastOpApplied);
         virtual void setMyHeartbeatMessage(const Date_t now, const std::string& message);
         virtual bool stepDown(Date_t until, bool force, OpTime lastOpApplied);
+        virtual bool stepDownIfPending();
         virtual Date_t getStepDownTime() const;
 
         ////////////////////////////////////////////////////////////
@@ -236,10 +237,10 @@ namespace repl {
         // Returns the current "ping" value for the given member by their address
         int _getPing(const HostAndPort& host);
 
-        // Determines if we will veto the member specified by "memberID", given that the last op
+        // Determines if we will veto the member specified by "args.id", given that the last op
         // we have applied locally is "lastOpApplied".
         // If we veto, the errmsg will be filled in with a reason
-        bool _shouldVetoMember(unsigned int memberID,
+        bool _shouldVetoMember(const ReplicationCoordinator::ReplSetFreshArgs& args,
                                const Date_t& now,
                                const OpTime& lastOpApplied,
                                std::string* errmsg) const;
@@ -303,8 +304,7 @@ namespace repl {
                                              int selfIndex,
                                              Date_t now);
 
-        HeartbeatResponseAction _stepDownSelf();
-        HeartbeatResponseAction _stepDownSelfAndReplaceWith(int newPrimary);
+        void _stepDownSelfAndReplaceWith(int newPrimary);
 
         MemberState _getMyState() const;
 
@@ -319,6 +319,7 @@ namespace repl {
 
         // the index of the member we currently believe is primary, if one exists, otherwise -1
         int _currentPrimaryIndex;
+
         // the hostandport we are currently syncing from
         // empty if no sync source (we are primary, or we cannot connect to anyone yet)
         HostAndPort _syncSource;
@@ -345,6 +346,9 @@ namespace repl {
         // in the same order as the MemberConfigs in _currentConfig, therefore the member config
         // index can be used to index into this vector as well.
         std::vector<MemberHeartbeatData> _hbdata;
+
+        // Indicates that we've received a request to stepdown from PRIMARY (likely via a heartbeat)
+        bool _stepDownPending;
 
         // Time when stepDown command expires
         Date_t _stepDownUntil;

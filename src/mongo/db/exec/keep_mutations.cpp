@@ -73,6 +73,9 @@ namespace mongo {
                 else if (PlanStage::NEED_TIME == status) {
                     ++_commonStats.needTime;
                 }
+                else if (PlanStage::NEED_FETCH == status) {
+                    ++_commonStats.needFetch;
+                }
 
                 return status;
             }
@@ -121,9 +124,11 @@ namespace mongo {
         _child->restoreState(opCtx);
     }
 
-    void KeepMutationsStage::invalidate(const DiskLoc& dl, InvalidationType type) {
+    void KeepMutationsStage::invalidate(OperationContext* txn,
+                                        const RecordId& dl,
+                                        InvalidationType type) {
         ++_commonStats.invalidates;
-        _child->invalidate(dl, type);
+        _child->invalidate(txn, dl, type);
     }
 
     vector<PlanStage*> KeepMutationsStage::getChildren() const {

@@ -111,12 +111,14 @@ namespace mongo {
             ++_commonStats.advanced;
             return status;
         }
-        else {
-            if (PlanStage::NEED_TIME == status) {
-                ++_commonStats.needTime;
-            }
-            return status;
+        else if (PlanStage::NEED_TIME == status) {
+            ++_commonStats.needTime;
         }
+        else if (PlanStage::NEED_FETCH == status) {
+            ++_commonStats.needFetch;
+        }
+
+        return status;
     }
 
     void ShardFilterStage::saveState() {
@@ -129,9 +131,11 @@ namespace mongo {
         _child->restoreState(opCtx);
     }
 
-    void ShardFilterStage::invalidate(const DiskLoc& dl, InvalidationType type) {
+    void ShardFilterStage::invalidate(OperationContext* txn,
+                                      const RecordId& dl,
+                                      InvalidationType type) {
         ++_commonStats.invalidates;
-        _child->invalidate(dl, type);
+        _child->invalidate(txn, dl, type);
     }
 
     vector<PlanStage*> ShardFilterStage::getChildren() const {

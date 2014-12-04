@@ -68,7 +68,12 @@ namespace mongo {
           _commonStats(kStageType) {
         _iam = _params.descriptor->getIndexCatalog()->getIndex(_params.descriptor);
         _keyPattern = _params.descriptor->keyPattern().getOwned();
+
+        // We can't always access the descriptor in the call to getStats() so we pull
+        // any info we need for stats reporting out here.
         _specificStats.keyPattern = _keyPattern;
+        _specificStats.indexName = _params.descriptor->indexName();
+        _specificStats.isMultiKey = _params.descriptor->isMultikey(_txn);
     }
 
     void IndexScan::initIndexScan() {
@@ -83,11 +88,6 @@ namespace mongo {
         else {
             _shouldDedup = _params.descriptor->isMultikey(_txn);
         }
-
-        // We can't always access the descriptor in the call to getStats() so we pull
-        // the status-only information we need out here.
-        _specificStats.indexName = _params.descriptor->indexName();
-        _specificStats.isMultiKey = _params.descriptor->isMultikey(_txn);
 
         // Set up the index cursor.
         CursorOptions cursorOptions;
@@ -169,7 +169,7 @@ namespace mongo {
         if (GETTING_NEXT == _scanState) {
             // Grab the next (key, value) from the index.
             BSONObj keyObj = _indexCursor->getKey();
-            DiskLoc loc = _indexCursor->getValue();
+            RecordId loc = _indexCursor->getValue();
 
             bool filterPasses = Filter::passes(keyObj, _keyPattern, _filter);
             if ( filterPasses ) {
@@ -242,6 +242,7 @@ namespace mongo {
     }
 
     void IndexScan::saveState() {
+        _txn = NULL;
         ++_commonStats.yields;
 
         if (HIT_END == _scanState || INITIALIZING == _scanState) { return; }
@@ -253,6 +254,7 @@ namespace mongo {
     }
 
     void IndexScan::restoreState(OperationContext* opCtx) {
+        invariant(_txn == NULL);
         _txn = opCtx;
         ++_commonStats.unyields;
 
@@ -276,18 +278,18 @@ namespace mongo {
         }
     }
 
-    void IndexScan::invalidate(const DiskLoc& dl, InvalidationType type) {
+    void IndexScan::invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
         ++_commonStats.invalidates;
 
-        // The only state we're responsible for holding is what DiskLocs to drop.  If a document
+        // The only state we're responsible for holding is what RecordIds to drop.  If a document
         // mutates the underlying index cursor will deal with it.
         if (INVALIDATION_MUTATION == type) {
             return;
         }
 
-        // If we see this DiskLoc again, it may not be the same document it was before, so we want
+        // If we see this RecordId again, it may not be the same document it was before, so we want
         // to return it if we see it again.
-        unordered_set<DiskLoc, DiskLoc::Hasher>::iterator it = _returned.find(dl);
+        unordered_set<RecordId, RecordId::Hasher>::iterator it = _returned.find(dl);
         if (it != _returned.end()) {
             ++_specificStats.seenInvalidated;
             _returned.erase(it);

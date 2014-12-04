@@ -28,9 +28,9 @@
 
 #pragma once
 
-#include "mongo/db/diskloc.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/storage/mmap_v1/btree/key.h"
+#include "mongo/db/storage/mmap_v1/diskloc.h"
 
 namespace mongo {
 
@@ -258,8 +258,8 @@ namespace mongo {
         //
 
         enum { 
-            // first bit of offsets used in _KeyNode we don't use -1 here.
-            OurNullOfs = -2
+            OurNullOfs = -2, // first bit of offsets used in _KeyNode we don't use -1 here
+            OurMaxA = 0xffffff, // highest 3-byte value
         };
 
         void Null() { 
@@ -273,7 +273,7 @@ namespace mongo {
         // Type Conversion
         //
 
-        operator const DiskLoc() const { 
+        operator DiskLoc() const {
             // endian
             if( isNull() ) return DiskLoc();
             unsigned a = *((unsigned *) (_a-1));

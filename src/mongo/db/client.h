@@ -36,16 +36,19 @@
 
 #pragma once
 
+#include <boost/thread/thread.hpp>
+
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/client_basic.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/lasterror.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/platform/unordered_set.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/util/concurrency/spin_lock.h"
 #include "mongo/util/concurrency/threadlocal.h"
 #include "mongo/util/paths.h"
-
 
 namespace mongo {
 
@@ -77,6 +80,7 @@ namespace mongo {
         Database* getDb() const {
             return _db;
         }
+
     private:
         const Lock::DBLock _dbLock;
         Database* const _db;
@@ -110,6 +114,7 @@ namespace mongo {
         Lock::DBLock& lock() { return _dbLock; }
 
     private:
+        ScopedTransaction _transaction;
         Lock::DBLock _dbLock; // not const, as we may need to relock for implicit create
         Database* _db;
         bool _justCreated;
@@ -140,23 +145,25 @@ namespace mongo {
         }
 
     private:
-        void _init();
+        void _init(const std::string& ns,
+                   const StringData& coll);
 
         const Timer _timer;
         OperationContext* const _txn;
-        const NamespaceString _nss;
         const AutoGetDb _db;
         const Lock::CollectionLock _collLock;
 
         Collection* _coll;
     };
 
+    typedef unordered_set<Client*> ClientSet;
+
     /** the database's concept of an outside "client" */
     class Client : public ClientBasic {
     public:
-        // always be in clientsMutex when manipulating this. killop stuff uses these.
-        static std::set<Client*>& clients;
-        static mongo::mutex& clientsMutex;
+        // A set of currently active clients along with a mutex to protect the list
+        static boost::mutex clientsMutex;
+        static ClientSet clients;
 
         ~Client();
 
@@ -176,13 +183,12 @@ namespace mongo {
         }
 
         /**
-         * Inits a thread if that thread has not already been init'd, setting the thread name to
-         * the string returned by "nameCallback".
+         * Inits a thread if that thread has not already been init'd, using the existing thread name
          */
-        static void initThreadIfNotAlready(stdx::function<std::string ()>& nameCallback) { 
+        static void initThreadIfNotAlready() {
             if (currentClient.get())
                 return;
-            initThread(nameCallback().c_str());
+            initThread(getThreadName().c_str());
         }
 
         /** this has to be called as the client goes away, but before thread termination
@@ -200,6 +206,16 @@ namespace mongo {
         void appendLastOp( BSONObjBuilder& b ) const;
         void reportState(BSONObjBuilder& builder);
 
+        // Ensures stability of the client. When the client is locked, it is safe to access its
+        // contents. For example, the OperationContext will not disappear.
+        void lock() { _lock.lock(); }
+        void unlock() { _lock.unlock(); }
+
+        // Changes the currently active operation context on this client. There can only be one
+        // active OperationContext at a time.
+        void setOperationContext(OperationContext* txn);
+        const OperationContext* getOperationContext() const { return _txn; }
+
         // TODO(spencer): SERVER-10228 SERVER-14779 Remove this/move it fully into OperationContext.
         bool isGod() const { return _god; } /* this is for map/reduce writes */
         bool setGod(bool newVal) { const bool prev = _god; _god = newVal; return prev; }
@@ -207,33 +223,40 @@ namespace mongo {
         void setRemoteID(const OID& rid) { _remoteId = rid;  } // Only used for master/slave
         OID getRemoteID() const { return _remoteId; } // Only used for master/slave
         ConnectionId getConnectionId() const { return _connectionId; }
-        const std::string& getThreadId() const { return _threadId; }
-
-        // XXX(hk): this is per-thread mmapv1 recovery unit stuff, move into that
-        // impl of recovery unit
-        void writeHappened() { _hasWrittenSinceCheckpoint = true; }
-        bool hasWrittenSinceCheckpoint() const { return _hasWrittenSinceCheckpoint; }
-        void checkpointHappened() { _hasWrittenSinceCheckpoint = false; }
-
-        // XXX: this is really a method in the recovery unit iface to reset any state
-        void newTopLevelRequest() {
-            _hasWrittenSinceCheckpoint = false;
-        }
+        bool isFromUserConnection() const { return _connectionId > 0; }
 
     private:
         Client(const std::string& desc, AbstractMessagingPort *p = 0);
         friend class CurOp;
-        ConnectionId _connectionId; // > 0 for things "conn", 0 otherwise
-        std::string _threadId; // "" on non support systems
-        CurOp * _curOp;
-        bool _shutdown; // to track if Client::shutdown() gets called
-        std::string _desc;
+
+        // Description for the client (e.g. conn8)
+        const std::string _desc;
+
+        // OS id of the thread, which owns this client
+        const boost::thread::id _threadId;
+
+        // > 0 for things "conn", 0 otherwise
+        const ConnectionId _connectionId;
+
+        // Protects the contents of the Client (such as changing the OperationContext, etc)
+        mutable SpinLock _lock;
+
+        // Whether this client is running as DBDirectClient
         bool _god;
+
+        // If != NULL, then contains the currently active OperationContext
+        OperationContext* _txn;
+
+        // Changes, based on what operation is running. Some of this should be in OperationContext.
+        CurOp* _curOp;
+
+        // Used by replication
         OpTime _lastOp;
         OID _remoteId; // Only used by master-slave
 
-        bool _hasWrittenSinceCheckpoint;
-        
+        // Tracks if Client::shutdown() gets called (TODO: Is this necessary?)
+        bool _shutdown;
+
     public:
 
         /* Set database we want to use, then, restores when we finish (are out of scope)

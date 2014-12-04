@@ -28,7 +28,7 @@
 *    it in the license file.
 */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kIndexing
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kIndex
 
 #include "mongo/platform/basic.h"
 
@@ -60,6 +60,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
+#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
@@ -377,14 +378,14 @@ namespace {
         invariant( descriptor );
         invariant( entry == _entries.find( descriptor ) );
 
-        status = entry->accessMethod()->initializeAsEmpty(txn);
-        if (!status.isOK())
-            return status;
-
         txn->recoveryUnit()->registerChange(new IndexCleanupOnRollback(txn,
                                                                        _collection,
                                                                        &_entries,
                                                                        entry->descriptor()));
+
+        status = entry->accessMethod()->initializeAsEmpty(txn);
+        if (!status.isOK())
+            return status;
         indexBuildBlock.success();
 
         // sanity check
@@ -577,6 +578,26 @@ namespace {
                 // this is not exactly the right error code, but I think will make the most sense
                 return Status( ErrorCodes::IndexAlreadyExists, "no indexes per repl" );
             }
+        }
+
+        BSONElement storageEngineElement = spec.getField("storageEngine");
+        if (storageEngineElement.eoo()) {
+            return Status::OK();
+        }
+        if (storageEngineElement.type() != mongo::Object) {
+            return Status(ErrorCodes::BadValue, "'storageEngine' has to be a document.");
+        }
+        BSONObj storageEngineOptions = storageEngineElement.Obj();
+        if (storageEngineOptions.isEmpty()) {
+            return Status(ErrorCodes::BadValue,
+                          "Empty 'storageEngine' options are invalid. "
+                          "Please remove, or include valid options.");
+
+        }
+        Status storageEngineStatus = validateStorageOptions(storageEngineOptions,
+            &StorageEngine::Factory::validateIndexStorageOptions);
+        if (!storageEngineStatus.isOK()) {
+            return storageEngineStatus;
         }
 
         return Status::OK();
@@ -858,7 +879,7 @@ namespace {
     bool IndexCatalog::isMultikey( OperationContext* txn, const IndexDescriptor* idx ) {
         IndexCatalogEntry* entry = _entries.find( idx );
         invariant( entry );
-        return entry->isMultikey( txn );
+        return entry->isMultikey();
     }
 
 
@@ -1014,6 +1035,38 @@ namespace {
         return entry;
     }
 
+
+    const IndexDescriptor* IndexCatalog::refreshEntry( OperationContext* txn,
+                                                       const IndexDescriptor* oldDesc ) {
+        txn->lockState()->assertWriteLocked( _collection->_database->name() );
+
+        std::string indexName = oldDesc->indexName();
+        invariant( _collection->getCatalogEntry()->isIndexReady( txn, indexName ) );
+
+        // Notify other users of the IndexCatalog that we're about to invalidate 'oldDesc'.
+        const bool collectionGoingAway = false;
+        _collection->cursorCache()->invalidateAll( collectionGoingAway );
+
+        // Delete the IndexCatalogEntry that owns this descriptor.  After deletion, 'oldDesc' is
+        // invalid and should not be dereferenced.
+        const bool removed = _entries.remove( oldDesc );
+        invariant( removed );
+
+        // Ask the CollectionCatalogEntry for the new index spec.
+        BSONObj spec = _collection->getCatalogEntry()->getIndexSpec( txn, indexName ).getOwned();
+        BSONObj keyPattern = spec.getObjectField( "key" );
+
+        // Re-register this index in the index catalog with the new spec.
+        IndexDescriptor* newDesc = new IndexDescriptor( _collection,
+                                                        _getAccessMethodName( txn, keyPattern ),
+                                                        spec );
+        const IndexCatalogEntry* entry = _setupInMemoryStructures( txn, newDesc );
+        invariant( entry->isReady( txn ) );
+
+        // Return the new descriptor.
+        return entry->descriptor();
+    }
+
     // ---------------------------
 
     namespace {
@@ -1030,7 +1083,7 @@ namespace {
     Status IndexCatalog::_indexRecord(OperationContext* txn,
                                       IndexCatalogEntry* index,
                                       const BSONObj& obj,
-                                      const DiskLoc &loc ) {
+                                      const RecordId &loc ) {
         InsertDeleteOptions options;
         options.logIfError = false;
         options.dupsAllowed = isDupsAllowed( index->descriptor() );
@@ -1042,7 +1095,7 @@ namespace {
     Status IndexCatalog::_unindexRecord(OperationContext* txn,
                                         IndexCatalogEntry* index,
                                         const BSONObj& obj,
-                                        const DiskLoc &loc,
+                                        const RecordId &loc,
                                         bool logIfError) {
         InsertDeleteOptions options;
         options.logIfError = logIfError;
@@ -1063,7 +1116,7 @@ namespace {
 
     Status IndexCatalog::indexRecord(OperationContext* txn,
                                    const BSONObj& obj,
-                                   const DiskLoc &loc ) {
+                                   const RecordId &loc ) {
 
         for ( IndexCatalogEntryContainer::const_iterator i = _entries.begin();
               i != _entries.end();
@@ -1078,7 +1131,7 @@ namespace {
 
     void IndexCatalog::unindexRecord(OperationContext* txn,
                                      const BSONObj& obj,
-                                     const DiskLoc& loc,
+                                     const RecordId& loc,
                                      bool noWarn) {
 
         for ( IndexCatalogEntryContainer::const_iterator i = _entries.begin();

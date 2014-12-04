@@ -1,31 +1,27 @@
 // test read/write permissions
+// skip this test on 32-bit platforms
 
-print("START auth1.js");
+function setupTest() {
+    print("START auth1.js");
 
-port = allocatePorts( 1 )[ 0 ];
-baseName = "jstests_auth_auth1";
+    port = allocatePorts( 1 )[ 0 ];
+    baseName = "jstests_auth_auth1";
 
-authWithMech = function(database, user, pwd, mech) {
-    if (mech == "")
-        return database.auth(user, pwd);
-    else
-        return database.auth({user:user, pwd:pwd, mechanism:mech});
+    m = startMongod( "--auth", "--port", port, "--dbpath", MongoRunner.dataPath + baseName, "--nohttpinterface", "--bind_ip", "127.0.0.1" );
+    return m;
 }
 
-run = function( mech ) {
-    var m = startMongod( "--auth", "--port", port, "--dbpath", MongoRunner.dataPath + baseName,
-                         "--nohttpinterface", "--bind_ip", "127.0.0.1" );
-    db = m.getDB( "test" );
-
+function runTest(m) {
     // these are used by read-only user
-    var mro = new Mongo(m.host);
-    var dbRO = mro.getDB( "test" );
-    var tRO = dbRO[ baseName ];
+    db = m.getDB( "test" );
+    mro = new Mongo(m.host);
+    dbRO = mro.getDB( "test" );
+    tRO = dbRO[ baseName ];
 
     db.getSisterDB("admin").createUser({user: "root", pwd: "root", roles: ["root"]});
-    authWithMech(db.getSisterDB("admin"),"root", "root");
+    db.getSisterDB("admin").auth("root", "root");
 
-    var t = db[ baseName ];
+    t = db[ baseName ];
     t.drop();
 
     db.dropAllUsers();
@@ -46,12 +42,12 @@ run = function( mech ) {
     var rslt = db.runCommand({getLog : "global"});
     assert.eq(rslt.code, codeUnauthorized, tojson(rslt));
 
-    assert(!authWithMech(db, "eliot", "eliot2", mech), "auth succeeded with wrong password");
-    assert(authWithMech(db, "eliot", "eliot", mech), "auth failed");
+    assert(!db.auth("eliot", "eliot2"), "auth succeeded with wrong password");
+    assert(db.auth("eliot", "eliot"), "auth failed");
     // Change password
     db.changeUserPassword("eliot", "eliot2");
-    assert(!authWithMech(db, "eliot", "eliot", mech), "auth succeeded with wrong password");
-    assert(authWithMech(db, "eliot", "eliot2", mech), "auth failed");
+    assert(!db.auth("eliot", "eliot"), "auth succeeded with wrong password");
+    assert(db.auth("eliot", "eliot2"), "auth failed");
 
     for( i = 0; i < 1000; ++i ) {
         t.save( {i:i} );
@@ -84,8 +80,8 @@ run = function( mech ) {
     assert.eq( 1000, tRO.group( p ).length , "C1" );
 
     var p = { key : { i : true } ,
-            reduce : function(obj,prev) { db.jstests_auth_auth1.save( {i:10000} ); prev.count++; },
-            initial: { count: 0 }
+              reduce : function(obj,prev) { db.jstests_auth_auth1.save( {i:10000} ); prev.count++; },
+              initial: { count: 0 }
             };
 
 
@@ -93,23 +89,14 @@ run = function( mech ) {
     assert.eq( 1000, dbRO.jstests_auth_auth1.count() , "C3" );
 
 
-    authWithMech(db.getSisterDB('admin'), 'super', 'super', mech);
+    db.getSiblingDB('admin').auth('super', 'super');
 
     assert.eq( 1000, db.eval( function() { return db[ "jstests_auth_auth1" ].count(); } ) , "D1" );
     db.eval( function() { db[ "jstests_auth_auth1" ].save( {i:1000} ) } );
     assert.eq( 1001, db.eval( function() { return db[ "jstests_auth_auth1" ].count(); } ) , "D2" );
 
-    jsTest.log("About to delete users")
-    printjson(db.getSiblingDB('admin').system.users.findOne())
-    db.getSiblingDB('admin').dropAllUsers()
-    db.getSiblingDB('admin').logout()
-    MongoRunner.stopMongod(port);
+    print("SUCCESS auth1.js");
 }
 
-// Test the default mechanism
-run()
-
-// Test MONGODB-CR
-run('MONGODB-CR')
-
-print("SUCCESS auth1.js");
+var m = setupTest();
+runTest(m);

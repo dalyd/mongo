@@ -46,6 +46,7 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/bson/ordering.h"
 #include "mongo/db/storage/kv/kv_engine.h"
+#include "mongo/db/storage/rocks/rocks_transaction.h"
 #include "mongo/util/string_map.h"
 
 namespace rocksdb {
@@ -80,8 +81,6 @@ namespace mongo {
                                             const StringData& ident,
                                             const CollectionOptions& options) override;
 
-        virtual Status dropRecordStore(OperationContext* opCtx, const StringData& ident) override;
-
         virtual Status createSortedDataInterface(OperationContext* opCtx, const StringData& ident,
                                                  const IndexDescriptor* desc) override;
 
@@ -89,12 +88,28 @@ namespace mongo {
                                                             const StringData& ident,
                                                             const IndexDescriptor* desc) override;
 
-        virtual Status dropSortedDataInterface(OperationContext* opCtx,
-                                               const StringData& ident) override;
+        virtual Status dropIdent(OperationContext* opCtx, const StringData& ident) override;
+
+        virtual std::vector<std::string> getAllIdents( OperationContext* opCtx ) const override;
 
         virtual bool supportsDocLocking() const override {
             return true;
         }
+
+        virtual bool isDurable() const { return true; }
+
+        virtual int64_t getIdentSize(OperationContext* opCtx,
+                                      const StringData& ident) {
+          // TODO: return correct size.
+          return 1;
+        }
+
+        virtual Status repairIdent(OperationContext* opCtx,
+                                    const StringData& ident) {
+            return Status::OK();
+        }
+
+        virtual void cleanShutdown() {}
 
         // rocks specific api
 
@@ -134,6 +149,9 @@ namespace mongo {
         mutable boost::mutex _identColumnFamilyMapMutex;
         typedef StringMap<boost::shared_ptr<rocksdb::ColumnFamilyHandle> > IdentColumnFamilyMap;
         IdentColumnFamilyMap _identColumnFamilyMap;
+
+        // This is for concurrency control
+        RocksTransactionEngine _transactionEngine;
 
         static const std::string kOrderingPrefix;
         static const std::string kCollectionPrefix;

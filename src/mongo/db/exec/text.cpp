@@ -98,6 +98,9 @@ namespace mongo {
         case PlanStage::NEED_TIME:
             ++_commonStats.needTime;
             break;
+        case PlanStage::NEED_FETCH:
+            ++_commonStats.needFetch;
+            break;
         default:
             break;
         }
@@ -106,6 +109,7 @@ namespace mongo {
     }
 
     void TextStage::saveState() {
+        _txn = NULL;
         ++_commonStats.yields;
 
         for (size_t i = 0; i < _scanners.size(); ++i) {
@@ -114,6 +118,7 @@ namespace mongo {
     }
 
     void TextStage::restoreState(OperationContext* opCtx) {
+        invariant(_txn == NULL);
         _txn = opCtx;
         ++_commonStats.unyields;
 
@@ -122,15 +127,15 @@ namespace mongo {
         }
     }
 
-    void TextStage::invalidate(const DiskLoc& dl, InvalidationType type) {
+    void TextStage::invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
         ++_commonStats.invalidates;
 
         // Propagate invalidate to children.
         for (size_t i = 0; i < _scanners.size(); ++i) {
-            _scanners.mutableVector()[i]->invalidate(dl, type);
+            _scanners.mutableVector()[i]->invalidate(txn, dl, type);
         }
 
-        // We store the score keyed by DiskLoc.  We have to toss out our state when the DiskLoc
+        // We store the score keyed by RecordId.  We have to toss out our state when the RecordId
         // changes.
         // TODO: If we're RETURNING_RESULTS we could somehow buffer the object.
         ScoreMap::iterator scoreIt = _scores.find(dl);
@@ -264,7 +269,7 @@ namespace mongo {
         }
 
         // Filter for phrases and negative terms, score and truncate.
-        DiskLoc loc = _scoreIterator->first;
+        RecordId loc = _scoreIterator->first;
         double score = _scoreIterator->second;
         _scoreIterator++;
 
@@ -294,7 +299,7 @@ namespace mongo {
         TextMatchableDocument(OperationContext* txn,
                               const BSONObj& keyPattern,
                               const BSONObj& key,
-                              DiskLoc loc,
+                              RecordId loc,
                               const Collection* collection,
                               bool *fetched)
             : _txn(txn),
@@ -343,11 +348,11 @@ namespace mongo {
         const Collection* _collection;
         BSONObj _keyPattern;
         BSONObj _key;
-        DiskLoc _loc;
+        RecordId _loc;
         bool* _fetched;
     };
 
-    void TextStage::addTerm(const BSONObj& key, const DiskLoc& loc) {
+    void TextStage::addTerm(const BSONObj& key, const RecordId& loc) {
         double *documentAggregateScore = &_scores[loc];
 
         ++_specificStats.keysExamined;

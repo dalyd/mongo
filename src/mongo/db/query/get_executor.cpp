@@ -34,6 +34,7 @@
 
 #include <limits>
 
+#include "mongo/base/error_codes.h"
 #include "mongo/base/parse_number.h"
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/exec/cached_plan.h"
@@ -545,7 +546,7 @@ namespace mongo {
     //
 
     Status getExecutorUpdate(OperationContext* txn,
-                             Database* db,
+                             Collection* collection,
                              CanonicalQuery* rawCanonicalQuery,
                              const UpdateRequest* request,
                              UpdateDriver* driver,
@@ -554,8 +555,6 @@ namespace mongo {
                              PlanExecutor** execOut) {
         auto_ptr<CanonicalQuery> canonicalQuery(rawCanonicalQuery);
         auto_ptr<WorkingSet> ws(new WorkingSet());
-        Collection* collection = db->getCollection(request->getOpCtx(),
-                                                   request->getNamespaceString().ns());
 
         PlanStage* root;
         QuerySolution* querySolution;
@@ -568,7 +567,7 @@ namespace mongo {
         invariant(root);
         UpdateStageParams updateStageParams(request, driver, opDebug);
         updateStageParams.canonicalQuery = rawCanonicalQuery;
-        root = new UpdateStage(updateStageParams, ws.get(), db, root);
+        root = new UpdateStage(txn, updateStageParams, ws.get(), collection, root);
         // We must have a tree of stages in order to have a valid plan executor, but the query
         // solution may be null. Takes ownership of all args other than 'collection' and 'txn'
         return PlanExecutor::make(txn,
@@ -582,7 +581,7 @@ namespace mongo {
     }
 
     Status getExecutorUpdate(OperationContext* txn,
-                             Database* db,
+                             Collection* collection,
                              const std::string& ns,
                              const UpdateRequest* request,
                              UpdateDriver* driver,
@@ -590,8 +589,6 @@ namespace mongo {
                              PlanExecutor::YieldPolicy yieldPolicy,
                              PlanExecutor** execOut) {
         auto_ptr<WorkingSet> ws(new WorkingSet());
-        Collection* collection = db->getCollection(request->getOpCtx(),
-                                                   request->getNamespaceString().ns());
         const BSONObj& unparsedQuery = request->getQuery();
 
         UpdateStageParams updateStageParams(request, driver, opDebug);
@@ -601,7 +598,7 @@ namespace mongo {
             // UpdateStage, so in this case we put an UpdateStage on top of an EOFStage.
             LOG(2) << "Collection " << ns << " does not exist."
                    << " Using EOF stage: " << unparsedQuery.toString();
-            UpdateStage* updateStage = new UpdateStage(updateStageParams, ws.get(), db,
+            UpdateStage* updateStage = new UpdateStage(txn, updateStageParams, ws.get(), collection,
                                                        new EOFStage());
             return PlanExecutor::make(txn, ws.release(), updateStage, ns, yieldPolicy, execOut);
         }
@@ -612,7 +609,8 @@ namespace mongo {
 
             PlanStage* idHackStage = new IDHackStage(txn, collection, unparsedQuery["_id"].wrap(),
                                                      ws.get());
-            UpdateStage* root = new UpdateStage(updateStageParams, ws.get(), db, idHackStage);
+            UpdateStage* root = new UpdateStage(txn, updateStageParams, ws.get(), collection,
+                                                idHackStage);
             return PlanExecutor::make(txn, ws.release(), root, collection, yieldPolicy, execOut);
         }
 
@@ -627,7 +625,8 @@ namespace mongo {
             return status;
 
         // Takes ownership of 'cq'.
-        return getExecutorUpdate(txn, db, cq, request, driver, opDebug, yieldPolicy, execOut);
+        return getExecutorUpdate(txn, collection, cq, request, driver, opDebug, yieldPolicy,
+                                 execOut);
     }
 
     //
@@ -874,6 +873,43 @@ namespace mongo {
         PlanStage* root;
         QuerySolution* querySolution;
 
+        // If collection exists and the query is empty, no additional canonicalization is needed.
+        if (collection && request.query.isEmpty()) {
+            // If the query is empty, then we can determine the count by just asking the collection
+            // for its number of records. This is implemented by the CountStage, and we don't need
+            // to create a child for the count stage in this case.
+            root = new CountStage(txn, collection, request, ws.get(), NULL);
+            return PlanExecutor::make(txn, ws.release(), root, request.ns, yieldPolicy, execOut);
+        }
+
+        auto_ptr<CanonicalQuery> cq;
+        if (!request.query.isEmpty()) {
+            // If query is not empty, canonicalize it before working with collection.
+            typedef MatchExpressionParser::WhereCallback WhereCallback;
+            CanonicalQuery* rawCq = NULL;
+            Status canonStatus = CanonicalQuery::canonicalize(
+                request.ns,
+                request.query,
+                BSONObj(), // sort
+                BSONObj(), // projection
+                0, // skip
+                0, // limit
+                request.hint,
+                BSONObj(), // min
+                BSONObj(), // max
+                false, // snapshot
+                request.explain,
+                &rawCq,
+                collection ?
+                    static_cast<const WhereCallback&>(WhereCallbackReal(txn,
+                                                                        collection->ns().db())) :
+                    static_cast<const WhereCallback&>(WhereCallbackNoop()));
+            if (!canonStatus.isOK()) {
+                return canonStatus;
+            }
+            cq.reset(rawCq);
+        }
+
         if (!collection) {
             // Treat collections that do not exist as empty collections. Note that the explain
             // reporting machinery always assumes that the root stage for a count operation is
@@ -882,35 +918,7 @@ namespace mongo {
             return PlanExecutor::make(txn, ws.release(), root, request.ns, yieldPolicy, execOut);
         }
 
-        if (request.query.isEmpty()) {
-            // If the query is empty, then we can determine the count by just asking the collection
-            // for its number of records. This is implemented by the CountStage, and we don't need
-            // to create a child for the count stage in this case.
-            root = new CountStage(txn, collection, request, ws.get(), NULL);
-            return PlanExecutor::make(txn, ws.release(), root, request.ns, yieldPolicy, execOut);
-        }
-
-        const WhereCallbackReal whereCallback(txn, collection->ns().db());
-
-        CanonicalQuery* rawCq;
-        Status canonStatus = CanonicalQuery::canonicalize(collection->ns().ns(),
-                                                          request.query,
-                                                          BSONObj(), // sort
-                                                          BSONObj(), // projection
-                                                          0, // skip
-                                                          0, // limit
-                                                          request.hint,
-                                                          BSONObj(), // min
-                                                          BSONObj(), // max
-                                                          false, // snapshot
-                                                          request.explain,
-                                                          &rawCq,
-                                                          whereCallback);
-        if (!canonStatus.isOK()) {
-            return canonStatus;
-        }
-
-        auto_ptr<CanonicalQuery> cq(rawCq);
+        invariant(cq.get());
 
         const size_t plannerOptions = QueryPlannerParams::PRIVATE_IS_COUNT;
         Status prepStatus = prepareExecution(txn, collection, ws.get(), cq.get(), plannerOptions,

@@ -45,10 +45,6 @@
 #include "mongo/util/goodies.h"
 #include "mongo/util/log.h"
 
-namespace {
-    const size_t MAX_PROFILE_DOC_SIZE_BYTES = 100*1024;
-}
-
 namespace mongo {
 
 namespace {
@@ -94,8 +90,7 @@ namespace {
         // build object
         BSONObjBuilder b(profileBufBuilder);
 
-        const bool isQueryObjTooBig = !currentOp.debug().append(currentOp, b,
-                MAX_PROFILE_DOC_SIZE_BYTES);
+        currentOp.debug().append(currentOp, b);
 
         b.appendDate("ts", jsTime());
         b.append("client", c.clientAddress());
@@ -105,45 +100,27 @@ namespace {
 
         BSONObj p = b.done();
 
-        if (static_cast<size_t>(p.objsize()) > MAX_PROFILE_DOC_SIZE_BYTES || isQueryObjTooBig) {
-            string small = p.toString(/*isArray*/false, /*full*/false);
-
-            warning() << "can't add full line to system.profile: " << small << endl;
-
-            // rebuild with limited info
-            BSONObjBuilder b(profileBufBuilder);
-            b.appendDate("ts", jsTime());
-            b.append("client", c.clientAddress() );
-            _appendUserInfo(currentOp, b, authSession);
-
-            b.append("err", "profile line too large (max is 100KB)");
-
-            // should be much smaller but if not don't break anything
-            if (small.size() < MAX_PROFILE_DOC_SIZE_BYTES){
-                b.append("abbreviated", small);
-            }
-
-            p = b.done();
-        }
+        WriteUnitOfWork wunit(txn);
 
         // write: not replicated
         // get or create the profiling collection
         Collection* profileCollection = getOrCreateProfileCollection(txn, db);
-        if ( profileCollection ) {
-            profileCollection->insertDocument( txn, p, false );
-            return true;
+        if ( !profileCollection ) {
+            return false;
         }
-        return false;
+        profileCollection->insertDocument( txn, p, false );
+        wunit.commit();
+        return true;
     }
 
     void profile(OperationContext* txn, const Client& c, int op, CurOp& currentOp) {
-        // initialize with 1kb to start, to avoid realloc later
-        // doing this outside the dblock to improve performance
-        BufBuilder profileBufBuilder(1024);
-
         bool tryAgain = false;
         while ( 1 ) {
             try {
+                // initialize with 1kb to start, to avoid realloc later
+                // doing this outside the dblock to improve performance
+                BufBuilder profileBufBuilder(1024);
+
                 // NOTE: It's kind of weird that we lock the op's namespace, but have to for now
                 // since we're sometimes inside the lock already
                 const string dbname(nsToDatabase(currentOp.getNS()));
@@ -157,9 +134,7 @@ namespace {
                 }
                 Database* db = dbHolder().get(txn, dbname);
                 if (db != NULL) {
-                    // We want the profiling to happen in a different WUOW from the actual op.
                     Lock::CollectionLock clk(txn->lockState(), db->getProfilingNS(), MODE_X);
-                    WriteUnitOfWork wunit(txn);
                     Client::Context cx(txn, currentOp.getNS(), false);
                     if ( !_profile(txn, c, cx.db(), currentOp, profileBufBuilder ) && lk.get() ) {
                         if ( tryAgain ) {
@@ -170,7 +145,6 @@ namespace {
                         tryAgain = true;
                         continue;
                     }
-                    wunit.commit();
                 }
                 else {
                     mongo::log() << "note: not profiling because db went away - "

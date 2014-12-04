@@ -57,7 +57,7 @@ namespace QueryStageMergeSortTests {
         }
 
         void addIndex(const BSONObj& obj) {
-            _client.ensureIndex(ns(), obj);
+            ASSERT_OK(dbtests::createIndex(&_txn, ns(), obj));
         }
 
         IndexDescriptor* getIndex(const BSONObj& obj, Collection* coll) {
@@ -72,10 +72,10 @@ namespace QueryStageMergeSortTests {
             _client.remove(ns(), obj);
         }
 
-        void getLocs(set<DiskLoc>* out, Collection* coll) {
+        void getLocs(set<RecordId>* out, Collection* coll) {
             RecordIterator* it = coll->getIterator(&_txn);
             while (!it->isEOF()) {
-                DiskLoc nextLoc = it->getNext();
+                RecordId nextLoc = it->getNext();
                 out->insert(nextLoc);
             }
             delete it;
@@ -135,7 +135,7 @@ namespace QueryStageMergeSortTests {
             // Sort by c:1
             MergeSortStageParams msparams;
             msparams.pattern = BSON("c" << 1);
-            MergeSortStage* ms = new MergeSortStage(&_txn, msparams, ws, coll);
+            MergeSortStage* ms = new MergeSortStage(msparams, ws, coll);
 
             // a:1
             IndexScanParams params;
@@ -204,7 +204,7 @@ namespace QueryStageMergeSortTests {
             // Sort by c:1
             MergeSortStageParams msparams;
             msparams.pattern = BSON("c" << 1);
-            MergeSortStage* ms = new MergeSortStage(&_txn, msparams, ws, coll);
+            MergeSortStage* ms = new MergeSortStage(msparams, ws, coll);
 
             // a:1
             IndexScanParams params;
@@ -272,7 +272,7 @@ namespace QueryStageMergeSortTests {
             MergeSortStageParams msparams;
             msparams.dedup = false;
             msparams.pattern = BSON("c" << 1);
-            MergeSortStage* ms = new MergeSortStage(&_txn, msparams, ws, coll);
+            MergeSortStage* ms = new MergeSortStage(msparams, ws, coll);
 
             // a:1
             IndexScanParams params;
@@ -342,7 +342,7 @@ namespace QueryStageMergeSortTests {
             // Sort by c:-1
             MergeSortStageParams msparams;
             msparams.pattern = BSON("c" << -1);
-            MergeSortStage* ms = new MergeSortStage(&_txn, msparams, ws, coll);
+            MergeSortStage* ms = new MergeSortStage(msparams, ws, coll);
 
             // a:1
             IndexScanParams params;
@@ -411,7 +411,7 @@ namespace QueryStageMergeSortTests {
             // Sort by c:1
             MergeSortStageParams msparams;
             msparams.pattern = BSON("c" << 1);
-            MergeSortStage* ms = new MergeSortStage(&_txn, msparams, ws, coll);
+            MergeSortStage* ms = new MergeSortStage(msparams, ws, coll);
 
             // a:1
             IndexScanParams params;
@@ -466,7 +466,7 @@ namespace QueryStageMergeSortTests {
             // Sort by foo:1
             MergeSortStageParams msparams;
             msparams.pattern = BSON("foo" << 1);
-            MergeSortStage* ms = new MergeSortStage(&_txn, msparams, ws, coll);
+            MergeSortStage* ms = new MergeSortStage(msparams, ws, coll);
 
             IndexScanParams params;
             params.bounds.isSimpleRange = true;
@@ -524,7 +524,7 @@ namespace QueryStageMergeSortTests {
             // Sort by foo:1
             MergeSortStageParams msparams;
             msparams.pattern = BSON("foo" << 1);
-            auto_ptr<MergeSortStage> ms(new MergeSortStage(&_txn, msparams, &ws, coll));
+            auto_ptr<MergeSortStage> ms(new MergeSortStage(msparams, &ws, coll));
 
             IndexScanParams params;
             params.bounds.isSimpleRange = true;
@@ -547,10 +547,10 @@ namespace QueryStageMergeSortTests {
                 ms->addChild(new IndexScan(&_txn, params, &ws, NULL));
             }
 
-            set<DiskLoc> locs;
+            set<RecordId> locs;
             getLocs(&locs, coll);
 
-            set<DiskLoc>::iterator it = locs.begin();
+            set<RecordId>::iterator it = locs.begin();
 
             // Get 10 results.  Should be getting results in order of 'locs'.
             int count = 0;
@@ -573,7 +573,7 @@ namespace QueryStageMergeSortTests {
 
             // Invalidate locs[11].  Should force a fetch.  We don't get it back.
             ms->saveState();
-            ms->invalidate(*it, INVALIDATION_DELETION);
+            ms->invalidate(&_txn, *it, INVALIDATION_DELETION);
             ms->restoreState(&_txn);
 
             // Make sure locs[11] was fetched for us.

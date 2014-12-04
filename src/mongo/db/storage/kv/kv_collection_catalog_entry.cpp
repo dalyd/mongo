@@ -47,7 +47,7 @@ namespace mongo {
         virtual void commit() {}
         virtual void rollback() {
             // Intentionally ignoring failure.
-            _cce->_engine->dropSortedDataInterface(_opCtx, _ident);
+            _cce->_engine->dropIdent(_opCtx, _ident);
         }
 
         OperationContext* const _opCtx;
@@ -68,7 +68,7 @@ namespace mongo {
         virtual void commit() {
             // Intentionally ignoring failure here. Since we've removed the metadata pointing to the
             // index, we should never see it again anyway.
-            _cce->_engine->dropSortedDataInterface(_opCtx, _ident);
+            _cce->_engine->dropIdent(_opCtx, _ident);
         }
 
         OperationContext* const _opCtx;
@@ -108,7 +108,7 @@ namespace mongo {
 
     void KVCollectionCatalogEntry::setIndexHead( OperationContext* txn,
                                                  const StringData& indexName,
-                                                 const DiskLoc& newHead ) {
+                                                 const RecordId& newHead ) {
         MetaData md = _getMetaData( txn );
         int offset = md.findIndexOffset( indexName );
         invariant( offset >= 0 );
@@ -132,7 +132,7 @@ namespace mongo {
     Status KVCollectionCatalogEntry::prepareForIndexBuild( OperationContext* txn,
                                                            const IndexDescriptor* spec ) {
         MetaData md = _getMetaData( txn );
-        md.indexes.push_back( IndexMetaData( spec->infoObj(), false, DiskLoc(), false ) );
+        md.indexes.push_back( IndexMetaData( spec->infoObj(), false, RecordId(), false ) );
         _catalog->putMetaData( txn, ns().toString(), md );
 
         string ident = _catalog->getIndexIdent( txn, ns().ns(), spec->indexName() );

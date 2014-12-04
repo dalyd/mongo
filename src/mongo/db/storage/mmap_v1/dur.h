@@ -30,7 +30,7 @@
 
 #pragma once
 
-#include "mongo/db/diskloc.h"
+#include "mongo/db/storage/mmap_v1/diskloc.h"
 #include "mongo/db/storage/mmap_v1/durable_mapped_file.h"
 
 
@@ -80,6 +80,13 @@ namespace mongo {
                 if you aren't, use writingPtr() instead.
             */
             virtual void declareWriteIntent(void *x, unsigned len) = 0;
+
+            /**
+             * Allows you to declare many write intents at once more efficiently than repeated calls
+             * to declareWriteIntent.
+             */
+            virtual void declareWriteIntents(
+                const std::vector<std::pair<void*, unsigned> >& intents) = 0;
 
             /** declare intent to write
                 @param ofs offset within buf at which we will write
@@ -135,7 +142,7 @@ namespace mongo {
              *
              * Must be called under the global X lock.
              */
-            virtual void commitAndStopDurThread(OperationContext* txn) = 0;
+            virtual void commitAndStopDurThread() = 0;
 
             /** Declare write intent for an int */
             inline int& writingInt(int& d) { return *static_cast<int*>(writingPtr( &d, sizeof(d))); }
@@ -190,13 +197,14 @@ namespace mongo {
             void* writingAtOffset(void *buf, unsigned ofs, unsigned len) { return buf; }
             void* writingRangesAtOffsets(void *buf, const std::vector< std::pair< long long, unsigned > > &ranges) { return buf; }
             void declareWriteIntent(void *, unsigned);
+            void declareWriteIntents(const std::vector<std::pair<void*, unsigned> >& intents) {}
             void createdFile(const std::string& filename, unsigned long long len) { }
             bool awaitCommit() { return false; }
             bool commitNow(OperationContext* txn);
             bool commitIfNeeded(OperationContext* txn);
             void syncDataAndTruncateJournal(OperationContext* txn) {}
             bool isDurable() const { return false; }
-            void commitAndStopDurThread(OperationContext* txn) { }
+            void commitAndStopDurThread() { }
         };
 
         class DurableImpl : public DurableInterface {
@@ -204,13 +212,14 @@ namespace mongo {
             void* writingAtOffset(void *buf, unsigned ofs, unsigned len);
             void* writingRangesAtOffsets(void *buf, const std::vector< std::pair< long long, unsigned > > &ranges);
             void declareWriteIntent(void *, unsigned);
+            void declareWriteIntents(const std::vector<std::pair<void*, unsigned> >& intents);
             void createdFile(const std::string& filename, unsigned long long len);
             bool awaitCommit();
             bool commitNow(OperationContext* txn);
             bool commitIfNeeded(OperationContext* txn);
             void syncDataAndTruncateJournal(OperationContext* txn);
             bool isDurable() const { return true; }
-            void commitAndStopDurThread(OperationContext* txn);
+            void commitAndStopDurThread();
         };
 
     } // namespace dur

@@ -34,13 +34,13 @@
 
 #include <boost/filesystem/path.hpp>
 
-#include "mongo/platform/atomic_word.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/concurrency/lock_mgr_defs.h"
-#include "mongo/db/diskloc.h"
+#include "mongo/db/storage/mmap_v1/diskloc.h"
 #include "mongo/db/storage/mmap_v1/extent_manager.h"
 #include "mongo/db/storage/mmap_v1/record_access_tracker.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/util/concurrency/mutex.h"
 
 namespace mongo {
@@ -124,7 +124,7 @@ namespace mongo {
          */
         Record* recordForV1( const DiskLoc& loc ) const;
 
-        bool likelyInPhysicalMem( const DiskLoc& loc ) const;
+        RecordFetcher* recordNeedsFetch( const DiskLoc& loc ) const;
 
         /**
          * @param loc - has to be for a specific Record (not an Extent)

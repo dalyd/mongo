@@ -29,17 +29,21 @@
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kReplication
 
 #include "mongo/platform/basic.h"
+#include "mongo/platform/bits.h"
 
 #include "mongo/db/repl/sync_tail.h"
 
 #include <boost/functional/hash.hpp>
+#include <boost/ref.hpp>
 #include "third_party/murmurhash3/MurmurHash3.h"
 
 #include "mongo/base/counter.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/commands/fsync.h"
 #include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/global_environment_experiment.h"
 #include "mongo/db/prefetch.h"
@@ -47,8 +51,6 @@
 #include "mongo/db/repl/minvalid.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_coordinator_global.h"
-#include "mongo/db/repl/rs.h"
-#include "mongo/db/repl/rslog.h"
 #include "mongo/db/stats/timer_stats.h"
 #include "mongo/db/operation_context_impl.h"
 #include "mongo/util/exit.h"
@@ -58,12 +60,14 @@
 namespace mongo {
 
 namespace repl {
-#ifdef MONGO_PLATFORM_64
+#if defined(MONGO_PLATFORM_64)
     const int replWriterThreadCount = 16;
     const int replPrefetcherThreadCount = 16;
-#else
+#elif defined(MONGO_PLATFORM_32)
     const int replWriterThreadCount = 2;
     const int replPrefetcherThreadCount = 2;
+#else
+#error need to include something that defines MONGO_PLATFORM_XX
 #endif
 
     static Counter64 opsAppliedStats;
@@ -81,8 +85,8 @@ namespace repl {
                                                     &applyBatchStats );
     void initializePrefetchThread() {
         if (!ClientBasic::getCurrent()) {
-            Client::initThread("repl prefetch worker");
-            replLocalAuth();
+            Client::initThreadIfNotAlready();
+            cc().getAuthorizationSession()->grantInternalAuthorization();
         }
     }
     namespace {
@@ -199,8 +203,8 @@ namespace repl {
         Sync(""), 
         _networkQueue(q), 
         _applyFunc(func),
-        _writerPool(replWriterThreadCount),
-        _prefetcherPool(replPrefetcherThreadCount)
+        _writerPool(replWriterThreadCount, "repl writer worker "),
+        _prefetcherPool(replPrefetcherThreadCount, "repl prefetch worker ")
     {}
 
     SyncTail::~SyncTail() {}
@@ -213,6 +217,10 @@ namespace repl {
     */
     bool SyncTail::syncApply(
                         OperationContext* txn, const BSONObj &op, bool convertUpdateToUpsert) {
+        if (inShutdown()) {
+            return true;
+        }
+
         const char *ns = op.getStringField("ns");
         verify(ns);
 
@@ -221,7 +229,7 @@ namespace repl {
             // this is often a no-op
             // but can't be 100% sure
             if( *op.getStringField("op") != 'n' ) {
-                error() << "replSet skipping bad op in oplog: " << op.toString() << rsLog;
+                error() << "replSet skipping bad op in oplog: " << op.toString();
             }
             return true;
         }
@@ -231,52 +239,58 @@ namespace repl {
         bool isCommand(opType[0] == 'c');
 
         for ( int createCollection = 0; createCollection < 2; createCollection++ ) {
+            try {
+                boost::scoped_ptr<Lock::ScopedLock> lk;
+                boost::scoped_ptr<Lock::CollectionLock> lk2;
 
-            boost::scoped_ptr<Lock::ScopedLock> lk;
-            boost::scoped_ptr<Lock::CollectionLock> lk2;
+                bool isIndexBuild = opType[0] == 'i' &&
+                    nsToCollectionSubstring( ns ) == "system.indexes";
 
-            bool isIndexBuild = opType[0] == 'i' &&
-                nsToCollectionSubstring( ns ) == "system.indexes";
+                if(isCommand) {
+                    // a command may need a global write lock. so we will conservatively go
+                    // ahead and grab one here. suboptimal. :-(
+                    lk.reset(new Lock::GlobalWrite(txn->lockState()));
+                } else if (isCrudOpType(opType)) {
+                    LockMode mode = createCollection ? MODE_X : MODE_IX;
+                    lk.reset(new Lock::DBLock(txn->lockState(), nsToDatabaseSubstring(ns), mode));
+                    lk2.reset(new Lock::CollectionLock(txn->lockState(), ns, mode));
 
-            if(isCommand) {
-                // a command may need a global write lock. so we will conservatively go
-                // ahead and grab one here. suboptimal. :-(
-                lk.reset(new Lock::GlobalWrite(txn->lockState()));
-            } else if (isCrudOpType(opType)) {
-                LockMode mode = createCollection ? MODE_X : MODE_IX;
-                lk.reset(new Lock::DBLock(txn->lockState(), nsToDatabaseSubstring(ns), mode));
-                lk2.reset(new Lock::CollectionLock(txn->lockState(), ns, mode));
+                    if (!createCollection && !dbHolder().get(txn, nsToDatabaseSubstring(ns))) {
+                        // need to create database, try again
+                        continue;
+                    }
 
-                if (!createCollection && !dbHolder().get(txn, nsToDatabaseSubstring(ns))) {
-                    // need to create database, try again
+                } else if (isIndexBuild) {
+                    lk.reset(new Lock::DBLock(txn->lockState(), nsToDatabaseSubstring(ns), MODE_X));
+                    lk2.reset(new Lock::CollectionLock(txn->lockState(), ns, MODE_X));
+                } else {
+                    // DB level lock for this operation
+                    log() << "non command or crup op: " << op;
+                    lk.reset(new Lock::DBLock(txn->lockState(), nsToDatabaseSubstring(ns), MODE_X));
+                }
+
+                Client::Context ctx(txn, ns);
+                ctx.getClient()->curop()->reset();
+
+                if ( createCollection == 0 &&
+                     isCrudOpType(opType) &&
+                     ctx.db()->getCollection(txn,ns) == NULL ) {
+                    // uh, oh, we need to create collection
+                    // try again
                     continue;
                 }
 
-            } else if (isIndexBuild) {
-                lk.reset(new Lock::DBLock(txn->lockState(), nsToDatabaseSubstring(ns), MODE_X));
-                lk2.reset(new Lock::CollectionLock(txn->lockState(), ns, MODE_X));
-            } else {
-                // DB level lock for this operation
-                log() << "non command or crup op: " << op;
-                lk.reset(new Lock::DBLock(txn->lockState(), nsToDatabaseSubstring(ns), MODE_X));
+                // For non-initial-sync, we convert updates to upserts
+                // to suppress errors when replaying oplog entries.
+                bool ok = !applyOperation_inlock(txn, ctx.db(), op, true, convertUpdateToUpsert);
+                opsAppliedStats.increment();
+                return ok;
             }
-
-            Client::Context ctx(txn, ns);
-            ctx.getClient()->curop()->reset();
-
-            if ( createCollection == 0 &&
-                 isCrudOpType(opType) &&
-                 ctx.db()->getCollection(txn,ns) == NULL ) {
-                // uh, oh, we need to create collection
-                // try again
-                continue;
+            catch ( const WriteConflictException& wce ) {
+                log() << "WriteConflictException while doing oplog application on: " << ns
+                      << ", retrying.";
+                createCollection--;
             }
-
-            // For non-initial-sync, we convert updates to upserts
-            // to suppress errors when replaying oplog entries.
-            bool ok = !applyOperation_inlock(txn, ctx.db(), op, true, convertUpdateToUpsert);
-            opsAppliedStats.increment();
-            return ok;
         }
         invariant(!"impossible");
     }
@@ -292,7 +306,10 @@ namespace repl {
                 // for multiple prefetches if they are for the same database.
                 OperationContextImpl txn;
                 AutoGetCollectionForRead ctx(&txn, ns);
-                prefetchPagesForReplicatedOp(&txn, ctx.getDb(), op);
+                Database* db = ctx.getDb();
+                if (db) {
+                    prefetchPagesForReplicatedOp(&txn, db, op);
+                }
             }
             catch (const DBException& e) {
                 LOG(2) << "ignoring exception in prefetchOp(): " << e.what() << endl;
@@ -328,10 +345,12 @@ namespace repl {
     }
 
     // Doles out all the work to the writer pool threads and waits for them to complete
-    OpTime SyncTail::multiApply( std::deque<BSONObj>& ops) {
+    OpTime SyncTail::multiApply(OperationContext* txn, std::deque<BSONObj>& ops) {
 
-        // Use a ThreadPool to prefetch all the operations in a batch.
-        prefetchOps(ops);
+        if (getGlobalEnvironment()->getGlobalStorageEngine()->isMmapV1()) {
+            // Use a ThreadPool to prefetch all the operations in a batch.
+            prefetchOps(ops);
+        }
         
         std::vector< std::vector<BSONObj> > writerVectors(replWriterThreadCount);
         fillWriterVectors(ops, &writerVectors);
@@ -353,7 +372,7 @@ namespace repl {
         }
 
         applyOps(writerVectors);
-        return applyOpsToOplog(&ops);
+        return applyOpsToOplog(txn, &ops);
     }
 
 
@@ -370,7 +389,7 @@ namespace repl {
             uint32_t hash = 0;
             MurmurHash3_x86_32( ns, len, 0, &hash);
 
-            const char* opType = it->getField( "op" ).value();
+            const char* opType = it->getField( "op" ).valuestrsafe();
 
             if (getGlobalEnvironment()->getGlobalStorageEngine()->supportsDocLocking() &&
                 isCrudOpType(opType)) {
@@ -385,9 +404,8 @@ namespace repl {
                     break;
                 }
 
-                size_t idHash = hashBSONElement( id );
-                boost::hash_combine(idHash, hash);
-                hash = idHash;
+                const size_t idHash = hashBSONElement( id );
+                MurmurHash3_x86_32(&idHash, sizeof(idHash), hash, &hash);
             }
 
             (*writerVectors)[hash % writerVectors->size()].push_back(*it);
@@ -403,9 +421,8 @@ namespace repl {
         unsigned long long entriesApplied = 0;
         while (true) {
             OpQueue ops;
-            OperationContextImpl ctx;
 
-            while (!tryPopAndWaitForMore(&ops, getGlobalReplicationCoordinator())) {
+            while (!tryPopAndWaitForMore(txn, &ops, getGlobalReplicationCoordinator())) {
                 // nothing came back last time, so go again
                 if (ops.empty()) continue;
 
@@ -419,7 +436,7 @@ namespace repl {
                 }
                 else if (currentOpTime > endOpTime) {
                     severe() << "Applied past expected end " << endOpTime << " to " << currentOpTime
-                            << " without seeing it. Rollback?" << rsLog;
+                            << " without seeing it. Rollback?";
                     fassertFailedNoTrace(18693);
                 }
 
@@ -441,7 +458,7 @@ namespace repl {
             bytesApplied += ops.getSize();
             entriesApplied += ops.getDeque().size();
 
-            const OpTime lastOpTime = multiApply(ops.getDeque());
+            const OpTime lastOpTime = multiApply(txn, ops.getDeque());
 
             // if the last op applied was our end, return
             if (lastOpTime == endOpTime) {
@@ -455,6 +472,7 @@ namespace repl {
 
 namespace {
     void tryToGoLiveAsASecondary(OperationContext* txn, ReplicationCoordinator* replCoord) {
+        ScopedTransaction transaction(txn, MODE_S);
         Lock::GlobalRead readLock(txn->lockState());
 
         if (replCoord->getMaintenanceMode()) {
@@ -473,7 +491,11 @@ namespace {
             return;
         }
 
-        replCoord->setFollowerMode(MemberState::RS_SECONDARY);
+        bool worked = replCoord->setFollowerMode(MemberState::RS_SECONDARY);
+        if (!worked) {
+            warning() << "Failed to transition into " << MemberState(MemberState::RS_SECONDARY)
+                      << ". Current state: " << replCoord->getCurrentMemberState();
+        }
     }
 }
 
@@ -505,25 +527,6 @@ namespace {
                     BackgroundSync* bgsync = BackgroundSync::get();
                     if (bgsync->getInitialSyncRequestedFlag()) {
                         // got a resync command
-                        Lock::DBLock lk(txn.lockState(), "local", MODE_X);
-                        WriteUnitOfWork wunit(&txn);
-                        Client::Context ctx(&txn, "local");
-
-                        ctx.db()->dropCollection(&txn, "local.oplog.rs");
-
-                        // Note: the following order is important.
-                        // The bgsync thread uses an empty optime as a sentinel to know to wait
-                        // for initial sync (done in this thread after we return); thus, we must
-                        // ensure the lastAppliedOptime is empty before pausing the bgsync thread
-                        // via stop().
-                        // We must clear the sync source blacklist after calling stop()
-                        // because the bgsync thread, while running, may update the blacklist.
-                        replCoord->setMyLastOptime(&txn, OpTime());
-                        bgsync->stop();
-                        replCoord->clearSyncSourceBlacklist();
-
-                        wunit.commit();
-
                         return;
                     }
                     lastTimeChecked = now;
@@ -531,26 +534,6 @@ namespace {
                     // we have to check this before calling mgr, as we must be a secondary to
                     // become primary
                     tryToGoLiveAsASecondary(&txn, replCoord);
-
-                    // TODO(emilkie): This can be removed once we switch over from legacy;
-                    // this code is what moves 1-node sets to PRIMARY state.
-                    // normally msgCheckNewState gets called periodically, but in a single node
-                    // replset there are no heartbeat threads, so we do it here to be sure.  this is
-                    // relevant if the singleton member has done a stepDown() and needs to come back
-                    // up.
-                    if (theReplSet &&
-                            theReplSet->config().members.size() == 1 &&
-                            theReplSet->myConfig().potentiallyHot()) {
-                        Manager* mgr = theReplSet->mgr;
-                        // When would mgr be null?  During replsettest'ing, in which case we should
-                        // fall through and actually apply ops as if we were a real secondary.
-                        if (mgr) { 
-                            mgr->send(stdx::bind(&Manager::msgCheckNewState, theReplSet->mgr));
-                            sleepsecs(1);
-                            // There should never be ops to sync in a 1-member set, anyway
-                            return;
-                        }
-                    }
                 }
 
                 const int slaveDelaySecs = replCoord->getSlaveDelaySecs().total_seconds();
@@ -567,8 +550,9 @@ namespace {
                     }
                 }
                 // keep fetching more ops as long as we haven't filled up a full batch yet
-            } while (!tryPopAndWaitForMore(&ops, replCoord) && // tryPopAndWaitForMore returns true 
-                                                               // when we need to end a batch early
+            } while (!tryPopAndWaitForMore(&txn, &ops, replCoord) && // tryPopAndWaitForMore returns
+                                                                     // true when we need to end a
+                                                                     // batch early
                    (ops.getSize() < replBatchLimitBytes) &&
                    !inShutdown());
 
@@ -589,18 +573,7 @@ namespace {
             // if we should crash and restart before updating the oplog
             OpTime minValid = lastOp["ts"]._opTime();
             setMinValid(&txn, minValid);
-
-            multiApply(ops.getDeque());
-
-            // If we're just testing (no manager), don't keep looping if we exhausted the bgqueue
-            // TODO(spencer): Remove repltest.cpp dbtest or make this work with the new replication
-            // coordinator
-            if (theReplSet && !theReplSet->mgr) {
-                BSONObj op;
-                if (!peek(&op)) {
-                    return;
-                }
-            }
+            multiApply(&txn, ops.getDeque());
         }
     }
 
@@ -611,7 +584,9 @@ namespace {
     // This function also blocks 1 second waiting for new ops to appear in the bgsync
     // queue.  We can't block forever because there are maintenance things we need
     // to periodically check in the loop.
-    bool SyncTail::tryPopAndWaitForMore(SyncTail::OpQueue* ops, ReplicationCoordinator* replCoord) {
+    bool SyncTail::tryPopAndWaitForMore(OperationContext* txn,
+                                        SyncTail::OpQueue* ops,
+                                        ReplicationCoordinator* replCoord) {
         BSONObj op;
         // Check to see if there are ops waiting in the bgsync queue
         bool peek_success = peek(&op);
@@ -619,7 +594,7 @@ namespace {
         if (!peek_success) {
             // if we don't have anything in the queue, wait a bit for something to appear
             if (ops->empty()) {
-                replCoord->signalDrainComplete();
+                replCoord->signalDrainComplete(txn);
                 // block up to 1 second
                 _networkQueue->waitForMore();
                 return false;
@@ -670,24 +645,28 @@ namespace {
         return false;
     }
 
-    OpTime SyncTail::applyOpsToOplog(std::deque<BSONObj>* ops) {
+    OpTime SyncTail::applyOpsToOplog(OperationContext* txn, std::deque<BSONObj>* ops) {
         OpTime lastOpTime;
         {
-            OperationContextImpl txn; // XXX?
-            Lock::DBLock lk(txn.lockState(), "local", MODE_X);
-            WriteUnitOfWork wunit(&txn);
+            ScopedTransaction transaction(txn, MODE_IX);
+            Lock::DBLock lk(txn->lockState(), "local", MODE_X);
+            WriteUnitOfWork wunit(txn);
 
             while (!ops->empty()) {
                 const BSONObj& op = ops->front();
                 // this updates lastOpTimeApplied
-                lastOpTime = _logOpObjRS(&txn, op);
+                lastOpTime = _logOpObjRS(txn, op);
                 ops->pop_front();
              }
             wunit.commit();
         }
 
-        // Update write concern on primary
-        BackgroundSync::get()->notify();
+        // This call may result in us assuming PRIMARY role if we'd been waiting for our sync
+        // buffer to drain and it's now empty.  This will acquire a global lock to drop all
+        // temp collections, so we must release the above lock on the local database before
+        // doing so.
+        BackgroundSync::get()->notify(txn);
+
         return lastOpTime;
     }
 
@@ -711,7 +690,7 @@ namespace {
                 }
                 else {
                     warning() << "replSet slavedelay causing a long sleep of " << sleeptime
-                              << " seconds" << rsLog;
+                              << " seconds";
                     // sleep(hours) would prevent reconfigs from taking effect & such!
                     long long waitUntil = b + sleeptime;
                     while(time(0) < waitUntil) {
@@ -731,10 +710,8 @@ namespace {
     static void initializeWriterThread() {
         // Only do this once per thread
         if (!ClientBasic::getCurrent()) {
-            string threadName = str::stream() << "repl writer worker "
-                                              << replWriterWorkerId.addAndFetch(1);
-            Client::initThread( threadName.c_str() );
-            replLocalAuth();
+            Client::initThreadIfNotAlready();
+            cc().getAuthorizationSession()->grantInternalAuthorization();
         }
     }
 
@@ -756,9 +733,15 @@ namespace {
                 if (!st->syncApply(&txn, *it, convertUpdatesToUpserts)) {
                     fassertFailedNoTrace(16359);
                 }
-            } catch (const DBException& e) {
+            }
+            catch (const DBException& e) {
                 error() << "writer worker caught exception: " << causedBy(e)
-                        << " on: " << it->toString() << endl;
+                        << " on: " << it->toString();
+
+                if (inShutdown()) {
+                    return;
+                }
+
                 fassertFailedNoTrace(16360);
             }
         }
@@ -780,6 +763,7 @@ namespace {
                 if (!st->syncApply(&txn, *it)) {
                     bool status;
                     {
+                        ScopedTransaction transaction(&txn, MODE_X);
                         Lock::GlobalWrite lk(txn.lockState());
                         status = st->shouldRetry(&txn, *it);
                     }
@@ -796,7 +780,13 @@ namespace {
                 }
             }
             catch (const DBException& e) {
-                error() << "exception: " << causedBy(e) << " on: " << it->toString() << endl;
+                error() << "writer worker caught exception: " << causedBy(e)
+                        << " on: " << it->toString();
+
+                if (inShutdown()) {
+                    return;
+                }
+
                 fassertFailedNoTrace(16361);
             }
         }

@@ -43,6 +43,7 @@
 #include "mongo/db/repl/replica_set_config.h"
 #include "mongo/db/repl/replication_executor.h"
 #include "mongo/db/repl/update_position_args.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/platform/unordered_map.h"
 #include "mongo/platform/unordered_set.h"
 #include "mongo/util/net/hostandport.h"
@@ -81,7 +82,7 @@ namespace repl {
 
         virtual void shutdown();
 
-        virtual ReplSettings& getSettings();
+        virtual const ReplSettings& getSettings() const;
 
         virtual Mode getReplicationMode() const;
 
@@ -109,10 +110,6 @@ namespace repl {
                 const WriteConcernOptions& writeConcern);
 
         virtual ReplicationCoordinator::StatusAndDuration awaitReplicationOfLastOpForClient(
-                const OperationContext* txn,
-                const WriteConcernOptions& writeConcern);
-
-        virtual ReplicationCoordinator::StatusAndDuration awaitReplicationOfLastOpApplied(
                 const OperationContext* txn,
                 const WriteConcernOptions& writeConcern);
 
@@ -153,7 +150,7 @@ namespace repl {
 
         virtual bool isWaitingForApplierToDrain();
 
-        virtual void signalDrainComplete();
+        virtual void signalDrainComplete(OperationContext* txn);
 
         virtual void signalUpstreamUpdater();
 
@@ -214,7 +211,7 @@ namespace repl {
 
         virtual std::vector<HostAndPort> getOtherNodesInReplSet() const;
 
-        virtual BSONObj getGetLastErrorDefault();
+        virtual WriteConcernOptions getGetLastErrorDefault();
 
         virtual Status checkReplEnabledForCommand(BSONObjBuilder* result);
 
@@ -297,10 +294,10 @@ namespace repl {
         struct SlaveInfo {
             OpTime opTime; // Our last known OpTime that this slave has replicated to.
             HostAndPort hostAndPort; // Client address of the slave.
-            int memberID; // ID of the node in the replica set config, or -1 if we're not a replSet.
+            int memberId; // Id of the node in the replica set config, or -1 if we're not a replSet.
             OID rid; // RID of the node.
             bool self; // Whether this SlaveInfo stores the information about ourself
-            SlaveInfo() : memberID(-1), self(false) {}
+            SlaveInfo() : memberId(-1), self(false) {}
         };
 
         typedef std::vector<SlaveInfo> SlaveInfoVector;
@@ -358,6 +355,11 @@ namespace repl {
         PostMemberStateUpdateAction _setCurrentRSConfig_inlock(
                 const ReplicaSetConfig& newConfig,
                 int myIndex);
+
+        /**
+         * Helper to wake waiters in _replicationWaiterList that are doneWaitingForReplication.
+         */
+        void _wakeReadyWaiters_inlock();
 
         /**
          * Helper method for setting/unsetting maintenance mode.  Scheduled by setMaintenanceMode()
@@ -451,8 +453,10 @@ namespace repl {
         /**
          * Triggers all callbacks that are blocked waiting for new heartbeat data
          * to decide whether or not to finish a step down.
+         * Should only be called from executor callbacks.
          */
-        void _signalStepDownWaiters(const ReplicationExecutor::CallbackData& cbData);
+        void _signalStepDownWaitersFromCallback(const ReplicationExecutor::CallbackData& cbData);
+        void _signalStepDownWaiters();
 
         /**
          * Helper for stepDown run within a ReplicationExecutor callback.  This method assumes
@@ -461,6 +465,7 @@ namespace repl {
          */
         void _stepDownContinue(const ReplicationExecutor::CallbackData& cbData,
                                const ReplicationExecutor::EventHandle finishedEvent,
+                               OperationContext* txn,
                                Date_t waitUntil,
                                Date_t stepdownUntil,
                                bool force,
@@ -736,6 +741,9 @@ namespace repl {
         // (X)  Reads and writes must be performed in a callback in _replExecutor
         // (MX) Must hold _mutex and be in a callback in _replExecutor to write; must either hold
         //      _mutex or be in a callback in _replExecutor to read.
+        // (GX) Readable under a global intent lock.  Must either hold global lock in exclusive
+        //      mode (MODE_X) or both hold global lock in shared mode (MODE_S) and be in executor
+        //      context to write.
         // (I)  Independently synchronized, see member variable comment.
 
         // Protects member data of this ReplicationCoordinator.
@@ -751,10 +759,7 @@ namespace repl {
         unordered_set<HostAndPort> _seedList;                                             // (X)
 
         // Parsed command line arguments related to replication.
-        // TODO(spencer): Currently there is global mutable state
-        // in ReplSettings, but we should be able to get rid of that after the legacy repl
-        // coordinator is gone. At that point we can make this const.
-        ReplSettings _settings;                                                           // (R)
+        const ReplSettings _settings;                                                     // (R)
 
         // Pointer to the TopologyCoordinator owned by this ReplicationCoordinator.
         boost::scoped_ptr<TopologyCoordinator> _topCoord;                                 // (X)
@@ -789,7 +794,7 @@ namespace repl {
         bool _inShutdown;                                                                 // (M)
 
         // Election ID of the last election that resulted in this node becoming primary.
-        OID _electionID;                                                                  // (M)
+        OID _electionId;                                                                  // (M)
 
         // Vector containing known information about each member (such as replication
         // progress and member ID) in our replica set or each member replicating from
@@ -838,6 +843,18 @@ namespace repl {
 
         // Whether we slept last time we attempted an election but possibly tied with other nodes.
         bool _sleptLastElection;                                                          // (X)
+
+        // Flag that indicates whether writes to databases other than "local" are allowed.  Used to
+        // answer the canAcceptWritesForDatabase() question.  Always true for standalone nodes and
+        // masters in master-slave relationships.
+        bool _canAcceptNonLocalWrites;                                                    // (GX)
+
+        // Flag that indicates whether reads from databases other than "local" are allowed.  Unlike
+        // _canAcceptNonLocalWrites, above, this question is about admission control on secondaries,
+        // and we do not require that its observers be strongly synchronized.  Accidentally
+        // providing the prior value for a limited period of time is acceptable.  Also unlike
+        // _canAcceptNonLocalWrites, its value is only meaningful on replica set secondaries.
+        AtomicUInt32 _canServeNonLocalReads;                                              // (S)
     };
 
 } // namespace repl

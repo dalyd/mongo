@@ -28,7 +28,7 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kIndexing
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kIndex
 
 #include "mongo/platform/basic.h"
 
@@ -106,7 +106,7 @@ namespace mongo {
 
     boost::filesystem::path NamespaceIndex::path() const {
         boost::filesystem::path ret( _dir );
-        if (mmapv1GlobalOptions.directoryperdb)
+        if (storageGlobalParams.directoryperdb)
             ret /= _database;
         ret /= ( _database + ".ns" );
         return ret;
@@ -127,7 +127,7 @@ namespace mongo {
     }
 
     void NamespaceIndex::maybeMkdir() const {
-        if (!mmapv1GlobalOptions.directoryperdb)
+        if (!storageGlobalParams.directoryperdb)
             return;
         boost::filesystem::path dir( _dir );
         dir /= _database;

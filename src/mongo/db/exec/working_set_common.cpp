@@ -39,15 +39,36 @@ namespace mongo {
         // Already in our desired state.
         if (member->state == WorkingSetMember::OWNED_OBJ) { return true; }
 
-        // We can't do anything without a DiskLoc.
+        // We can't do anything without a RecordId.
         if (!member->hasLoc()) { return false; }
 
         // Do the fetch, invalidate the DL.
         member->obj = collection->docFor(txn, member->loc).getOwned();
 
         member->state = WorkingSetMember::OWNED_OBJ;
-        member->loc = DiskLoc();
+        member->loc = RecordId();
         return true;
+    }
+
+    // static
+    void WorkingSetCommon::completeFetch(OperationContext* txn,
+                                         WorkingSetMember* member,
+                                         const Collection* collection) {
+        // The RecordFetcher should already have been transferred out of the WSM and used.
+        invariant(!member->hasFetcher());
+
+        // If the diskloc was invalidated during fetch, then a "forced fetch" already converted this
+        // WSM into the owned object state. In this case, there is nothing more to do here.
+        if (WorkingSetMember::OWNED_OBJ == member->state) {
+            return;
+        }
+
+        // We should have a RecordId but need to retrieve the obj. Get the obj now and reset all WSM
+        // state appropriately.
+        invariant(member->hasLoc());
+        member->obj = collection->docFor(txn, member->loc);
+        member->keyData.clear();
+        member->state = WorkingSetMember::LOC_AND_UNOWNED_OBJ;
     }
 
     // static

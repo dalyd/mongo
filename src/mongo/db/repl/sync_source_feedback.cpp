@@ -42,9 +42,7 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/operation_context_impl.h"
 #include "mongo/db/repl/bgsync.h"
-#include "mongo/db/repl/member.h"
 #include "mongo/db/repl/repl_coordinator_global.h"
-#include "mongo/db/repl/rslog.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/util/log.h"
 #include "mongo/util/net/hostandport.h"
@@ -78,14 +76,16 @@ namespace repl {
     void SyncSourceFeedback::ensureMe(OperationContext* txn) {
         string myname = getHostName();
         {
+            ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock dlk(txn->lockState(), "local", MODE_X);
-            WriteUnitOfWork wunit(txn);
             Client::Context ctx(txn, "local");
 
             // local.me is an identifier for a server for getLastError w:2+
             if (!Helpers::getSingleton(txn, "local.me", _me) ||
                 !_me.hasField("host") ||
                 _me["host"].String() != myname) {
+
+                WriteUnitOfWork wunit(txn);
 
                 // clean out local.me
                 Helpers::emptyCollection(txn, "local.me");
@@ -96,8 +96,9 @@ namespace repl {
                 b.append("host", myname);
                 _me = b.obj();
                 Helpers::putSingleton(txn, "local.me", _me);
+
+                wunit.commit();
             }
-            wunit.commit();
             // _me is used outside of a read lock, so we must copy it out of the mmap
             _me = _me.getOwned();
         }
@@ -158,7 +159,7 @@ namespace repl {
         if (hasConnection()) {
             return true;
         }
-        log() << "replset setting syncSourceFeedback to " << host.toString() << rsLog;
+        log() << "replset setting syncSourceFeedback to " << host.toString();
         _connection.reset(new DBClientConnection(false, 0, OplogReader::tcp_timeout));
         string errmsg;
         try {

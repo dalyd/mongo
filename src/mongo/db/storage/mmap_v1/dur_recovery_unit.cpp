@@ -40,25 +40,7 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
 
-// Remove once we are ready to enable
-#define ROLLBACK_ENABLED 1
-
 namespace mongo {
-
-
-    /**
-     *  A MemoryWrite provides rollback by keeping a pre-image.
-     */
-    class MemoryWrite : public RecoveryUnit::Change {
-    public:
-        MemoryWrite(char* base, size_t len) : _base(base), _preimage(base, len) { }
-        virtual void commit();
-        virtual void rollback();
-
-    private:
-        char* _base;
-        std::string _preimage;  // TODO consider storing out-of-line
-    };
 
     DurRecoveryUnit::DurRecoveryUnit(OperationContext* txn)
         : _txn(txn),
@@ -66,13 +48,10 @@ namespace mongo {
     {}
 
     void DurRecoveryUnit::beginUnitOfWork() {
-#if ROLLBACK_ENABLED
-        _startOfUncommittedChangesForLevel.push_back(_changes.size());
-#endif
+        _startOfUncommittedChangesForLevel.push_back(Indexes(_changes.size(), _writes.size()));
     }
 
     void DurRecoveryUnit::commitUnitOfWork() {
-#if ROLLBACK_ENABLED
         invariant(inAUnitOfWork());
         invariant(!_mustRollback);
 
@@ -81,20 +60,19 @@ namespace mongo {
             // They will be added to the global damages list once the outermost UnitOfWork commits,
             // which it must now do.
             if (haveUncommitedChangesAtCurrentLevel()) {
-                _startOfUncommittedChangesForLevel.back() = _changes.size();
+                _startOfUncommittedChangesForLevel.back() =
+                    Indexes(_changes.size(), _writes.size());
             }
             return;
         }
 
-        publishChanges();
-#endif
+        commitChanges();
 
         // global journal flush opportunity
         getDur().commitIfNeeded(_txn);
     }
 
     void DurRecoveryUnit::endUnitOfWork() {
-#if ROLLBACK_ENABLED
         invariant(inAUnitOfWork());
 
         if (haveUncommitedChangesAtCurrentLevel()) {
@@ -102,7 +80,6 @@ namespace mongo {
         }
 
         _startOfUncommittedChangesForLevel.pop_back();
-#endif
     }
 
     void DurRecoveryUnit::commitAndRestart() {
@@ -110,40 +87,90 @@ namespace mongo {
         // no-op since we have no transaction
     }
 
-    void DurRecoveryUnit::publishChanges() {
+    void DurRecoveryUnit::commitChanges() {
         if (!inAUnitOfWork())
             return;
 
         invariant(!_mustRollback);
         invariant(inOutermostUnitOfWork());
+        invariant(_startOfUncommittedChangesForLevel.front().changeIndex == 0);
+        invariant(_startOfUncommittedChangesForLevel.front().writeIndex == 0);
 
-        for (Changes::iterator it = _changes.begin(), end = _changes.end(); it != end; ++it) {
+        if (getDur().isDurable())
+            pushChangesToDurSubSystem();
+
+        for (Changes::const_iterator it = _changes.begin(), end = _changes.end(); it != end; ++it) {
             (*it)->commit();
         }
 
         // We now reset to a "clean" state without any uncommited changes.
         _changes.clear();
-        invariant(_startOfUncommittedChangesForLevel.front() == 0);
+        _writes.clear();
+        _preimageBuffer.clear();
+    }
+
+    void DurRecoveryUnit::pushChangesToDurSubSystem() {
+        if (_writes.empty())
+            return;
+
+        typedef std::pair<void*, unsigned> Intent;
+        std::vector<Intent> intents;
+        intents.reserve(_writes.size());
+
+        // orders by addr so we can coalesce overlapping and adjacent writes
+        std::sort(_writes.begin(), _writes.end());
+
+        intents.push_back(std::make_pair(_writes.front().addr, _writes.front().len));
+        for (Writes::iterator it = (_writes.begin() + 1), end = _writes.end(); it != end; ++it) {
+            Intent& lastIntent = intents.back();
+            char* lastEnd = static_cast<char*>(lastIntent.first) + lastIntent.second;
+            if (it->addr <= lastEnd) {
+                // overlapping or adjacent, so extend.
+                ptrdiff_t extendedLen = (it->addr + it->len) - static_cast<char*>(lastIntent.first);
+                lastIntent.second = std::max(lastIntent.second, unsigned(extendedLen));
+            }
+            else {
+                // not overlapping, so create a new intent
+                intents.push_back(std::make_pair(it->addr, it->len));
+            }
+        }
+
+        getDur().declareWriteIntents(intents);
     }
 
     void DurRecoveryUnit::rollbackInnermostChanges() {
-        // TODO SERVER-15043 reduce logging at default verbosity after a burn-in period
+        // Using signed ints to avoid issues in loops below around index 0.
         invariant(_changes.size() <= size_t(std::numeric_limits<int>::max()));
-        const int rollbackTo = _startOfUncommittedChangesForLevel.back();
-        log() << "   ***** ROLLING BACK " << (_changes.size() - rollbackTo) << " changes";
-        for (int i = _changes.size() - 1; i >= rollbackTo; i--) {
-            const type_info& type = typeid(*_changes[i]);
-            if (type != typeid(MemoryWrite)) {
-                log() << "CUSTOM ROLLBACK " << demangleName(type);
-            }
+        invariant(_writes.size() <= size_t(std::numeric_limits<int>::max()));
+        const int changesRollbackTo = _startOfUncommittedChangesForLevel.back().changeIndex;
+        const int writesRollbackTo = _startOfUncommittedChangesForLevel.back().writeIndex;
 
+        // TODO SERVER-15043 reduce logging at default verbosity after a burn-in period
+        log() << "   ***** ROLLING BACK " << (_writes.size() - writesRollbackTo) << " disk writes"
+              << " and " << (_changes.size() - changesRollbackTo) << " custom changes";
+
+        // First rollback disk writes, then Changes. This matches behavior in other storage engines
+        // that either rollback a transaction or don't write a writebatch.
+
+        for (int i = _writes.size() - 1; i >= writesRollbackTo; i--) {
+            // TODO need to add these pages to our "dirty count" somehow.
+            _preimageBuffer.copy(_writes[i].addr, _writes[i].len, _writes[i].offset);
+        }
+
+        for (int i = _changes.size() - 1; i >= changesRollbackTo; i--) {
+            const type_info& type = typeid(*_changes[i]);
+            log() << "CUSTOM ROLLBACK " << demangleName(type);
             _changes[i]->rollback();
         }
-        _changes.erase(_changes.begin() + rollbackTo, _changes.end());
+
+        _writes.erase(_writes.begin() + writesRollbackTo, _writes.end());
+        _changes.erase(_changes.begin() + changesRollbackTo, _changes.end());
 
         if (inOutermostUnitOfWork()) {
             // We just rolled back so we are now "clean" and don't need to roll back anymore.
             invariant(_changes.empty());
+            invariant(_writes.empty());
+            _preimageBuffer.clear();
             _mustRollback = false;
         }
         else {
@@ -153,56 +180,29 @@ namespace mongo {
         }
     }
 
-    void DurRecoveryUnit::recordPreimage(char* data, size_t len) {
-        invariant(len > 0);
-
-        registerChange(new MemoryWrite(data, len));
-    }
-
     bool DurRecoveryUnit::awaitCommit() {
-#if ROLLBACK_ENABLED
         invariant(!inAUnitOfWork());
-#endif
         return getDur().awaitCommit();
     }
 
     void* DurRecoveryUnit::writingPtr(void* data, size_t len) {
-        invariant(len > 0);
-#if ROLLBACK_ENABLED
         invariant(inAUnitOfWork());
+
+        if (len == 0) return data; // Don't need to do anything for empty ranges.
+        invariant(len < size_t(numeric_limits<int>::max()));
 
         // Windows requires us to adjust the address space *before* we write to anything.
         MemoryMappedFile::makeWritable(data, len);
 
-        registerChange(new MemoryWrite(static_cast<char*>(data), len));
-        return data;
-#else
-        invariant(_txn->lockState()->isWriteLocked());
+        _writes.push_back(Write(static_cast<char*>(data), len, _preimageBuffer.size()));
+        _preimageBuffer.append(static_cast<char*>(data), len);
 
-        return getDur().writingPtr(data, len);
-#endif
+        return data;
     }
 
     void DurRecoveryUnit::registerChange(Change* change) {
-#if ROLLBACK_ENABLED
         invariant(inAUnitOfWork());
-        _changes.push_back(ChangePtr(change));
-#else
-        change->commit();
-        delete change;
-#endif
-    }
-
-    void MemoryWrite::commit() {
-        // TODO don't go through getDur() interface.
-        if (getDur().isDurable()) {
-            getDur().writingPtr(_base, _preimage.size());
-        }
-    }
-
-    void MemoryWrite::rollback() {
-        // TODO need to add these pages to our "dirty count" somehow.
-       _preimage.copy(_base, _preimage.size());
+        _changes.push_back(change);
     }
 
 }  // namespace mongo

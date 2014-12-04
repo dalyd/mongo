@@ -56,10 +56,10 @@ namespace QueryStageFetch {
             _client.dropCollection(ns());
         }
 
-        void getLocs(set<DiskLoc>* out, Collection* coll) {
+        void getLocs(set<RecordId>* out, Collection* coll) {
             RecordIterator* it = coll->getIterator(&_txn);
             while (!it->isEOF()) {
-                DiskLoc nextLoc = it->getNext();
+                RecordId nextLoc = it->getNext();
                 out->insert(nextLoc);
             }
             delete it;
@@ -100,7 +100,7 @@ namespace QueryStageFetch {
 
             // Add an object to the DB.
             insert(BSON("foo" << 5));
-            set<DiskLoc> locs;
+            set<RecordId> locs;
             getLocs(&locs, coll);
             ASSERT_EQUALS(size_t(1), locs.size());
 
@@ -117,7 +117,7 @@ namespace QueryStageFetch {
                 mockStage->pushBack(mockMember);
 
                 mockMember.state = WorkingSetMember::OWNED_OBJ;
-                mockMember.loc = DiskLoc();
+                mockMember.loc = RecordId();
                 mockMember.obj = BSON("foo" << 6);
                 ASSERT_TRUE(mockMember.obj.isOwned());
                 mockStage->pushBack(mockMember);
@@ -147,6 +147,7 @@ namespace QueryStageFetch {
     class FetchStageFilter : public QueryStageFetchBase {
     public:
         void run() {
+            ScopedTransaction transaction(&_txn, MODE_IX);
             Lock::DBLock lk(_txn.lockState(), nsToDatabaseSubstring(ns()), MODE_X);
             Client::Context ctx(&_txn, ns());
             Database* db = ctx.db();
@@ -161,7 +162,7 @@ namespace QueryStageFetch {
 
             // Add an object to the DB.
             insert(BSON("foo" << 5));
-            set<DiskLoc> locs;
+            set<RecordId> locs;
             getLocs(&locs, coll);
             ASSERT_EQUALS(size_t(1), locs.size());
 

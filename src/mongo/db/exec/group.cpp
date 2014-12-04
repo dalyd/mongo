@@ -196,6 +196,11 @@ namespace mongo {
             ++_commonStats.needTime;
             return state;
         }
+        else if (PlanStage::NEED_FETCH == state) {
+            ++_commonStats.needFetch;
+            *out = id;
+            return state;
+        }
         else if (PlanStage::FAILURE == state) {
             *out = id;
             // If a stage fails, it may create a status WSM to indicate why it failed, in which
@@ -252,19 +257,21 @@ namespace mongo {
     }
 
     void GroupStage::saveState() {
+        _txn = NULL;
         ++_commonStats.yields;
         _child->saveState();
     }
 
     void GroupStage::restoreState(OperationContext* opCtx) {
+        invariant(_txn == NULL);
         _txn = opCtx;
         ++_commonStats.unyields;
         _child->restoreState(opCtx);
     }
 
-    void GroupStage::invalidate(const DiskLoc& dl, InvalidationType type) {
+    void GroupStage::invalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
         ++_commonStats.invalidates;
-        _child->invalidate(dl, type);
+        _child->invalidate(txn, dl, type);
     }
 
     vector<PlanStage*> GroupStage::getChildren() const {

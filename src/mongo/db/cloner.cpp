@@ -111,6 +111,7 @@ namespace mongo {
             invariant(from_collection.coll() != "system.indexes");
 
             // XXX: can probably take dblock instead
+            ScopedTransaction transaction(txn, MODE_X);
             Lock::GlobalWrite lk(txn->lockState());
 
             // Make sure database still exists after we resume from the temp release
@@ -170,7 +171,7 @@ namespace mongo {
 
                 BSONObj js = tmp;
 
-                StatusWith<DiskLoc> loc = collection->insertDocument( txn, js, true );
+                StatusWith<RecordId> loc = collection->insertDocument( txn, js, true );
                 if ( !loc.isOK() ) {
                     error() << "error: exception cloning object in " << from_collection
                             << ' ' << loc.toString() << " obj:" << js;
@@ -317,6 +318,7 @@ namespace mongo {
         const NamespaceString nss(ns);
         const string dbname = nss.db().toString();
 
+        ScopedTransaction transaction(txn, MODE_IX);
         Lock::DBLock dbWrite(txn->lockState(), dbname, MODE_X);
 
         Database* db = dbHolder().openDb(txn, dbname);
@@ -538,7 +540,7 @@ namespace mongo {
                     // We need to drop objects with duplicate _ids because we didn't do a true
                     // snapshot and this is before applying oplog operations that occur during the
                     // initial sync.
-                    set<DiskLoc> dups;
+                    set<RecordId> dups;
 
                     MultiIndexBlock indexer(txn, c);
                     if (opts.mayBeInterrupted)
@@ -547,7 +549,7 @@ namespace mongo {
                     uassertStatusOK(indexer.init(c->getIndexCatalog()->getDefaultIdIndexSpec()));
                     uassertStatusOK(indexer.insertAllDocumentsInCollection(&dups));
 
-                    for (set<DiskLoc>::const_iterator it = dups.begin(); it != dups.end(); ++it) {
+                    for (set<RecordId>::const_iterator it = dups.begin(); it != dups.end(); ++it) {
                         WriteUnitOfWork wunit(txn);
                         BSONObj id;
 

@@ -42,7 +42,18 @@ namespace mongo {
     }
 
     void GlobalEnvironmentNoop::registerStorageEngine(const std::string& name,
-                                                      const StorageEngine::Factory* factory) { }
+                                                      const StorageEngine::Factory* factory) {
+        // Takes ownership of 'factory' and deletes it because we don't need it.
+        delete factory;
+    }
+
+    bool GlobalEnvironmentNoop::isRegisteredStorageEngine(const std::string& name) {
+        return false;
+    }
+
+    StorageFactoriesIterator* GlobalEnvironmentNoop::makeStorageFactoriesIterator() {
+        return NULL;
+    }
 
     void GlobalEnvironmentNoop::setKillAllOperations() { }
 
@@ -56,19 +67,9 @@ namespace mongo {
         return false;
     }
 
+    void GlobalEnvironmentNoop::killAllUserOperations(const OperationContext* txn) {}
+
     void GlobalEnvironmentNoop::registerKillOpListener(KillOpListenerInterface* listener) {
-    }
-
-    void GlobalEnvironmentNoop::registerOperationContext(OperationContext* txn) {
-
-    }
-
-    void GlobalEnvironmentNoop::unregisterOperationContext(OperationContext* txn) {
-
-    }
-
-    void GlobalEnvironmentNoop::forEachOperationContext(ProcessOperationContext* procOpCtx) {
-
     }
 
     OperationContext* GlobalEnvironmentNoop::newOpCtx() {

@@ -56,7 +56,6 @@
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/repl_coordinator_global.h"
-#include "mongo/db/repl/write_concern.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/operation_context_impl.h"
 #include "mongo/db/storage_options.h"
@@ -95,35 +94,63 @@ namespace repl {
         localDB = NULL;
         localOplogMainCollection = NULL;
         localOplogRSCollection = NULL;
-        resetSlaveCache();
     }
 
     // so we can fail the same way
-    void checkOplogInsert( StatusWith<DiskLoc> result ) {
+    void checkOplogInsert( StatusWith<RecordId> result ) {
         massert( 17322,
                  str::stream() << "write to oplog failed: " << result.getStatus().toString(),
                  result.isOK() );
     }
 
-    static void _logOpUninitialized(OperationContext* txn,
-                                    const char *opstr,
-                                    const char *ns,
-                                    const char *logNS,
-                                    const BSONObj& obj,
-                                    BSONObj *o2,
-                                    bool *bb,
-                                    bool fromMigrate ) {
-        uassert(13288, "replSet error write op to db before replSet initialized", str::startsWith(ns, "local.") || *opstr == 'n');
+
+    /**
+     * @param hashNewOut optional - set to a new hash value if needed
+     */
+    std::pair<OpTime,long long> getNextOpTime(OperationContext* txn,
+                                              Collection* oplog,
+                                              const char* ns,
+                                              ReplicationCoordinator* replCoord,
+                                              const char* opstr ) {
+        mutex::scoped_lock lk(newOpMutex);
+        OpTime ts = getNextGlobalOptime();
+        newOptimeNotifier.notify_all();
+
+        fassert(28560, oplog->getRecordStore()->oplogDiskLocRegister(txn, ts));
+
+        long long hashNew;
+
+        if (replCoord) {
+
+            hashNew = BackgroundSync::get()->getLastAppliedHash();
+
+            // Check to make sure logOp() is legal at this point.
+            if (*opstr == 'n') {
+                // 'n' operations are always logged
+                invariant(*ns == '\0');
+
+                // 'n' operations do not advance the hash, since they are not rolled back
+            }
+            else {
+                // Advance the hash
+                hashNew = (hashNew * 131 + ts.asLL()) * 17 + replCoord->getMyId();
+
+                BackgroundSync::get()->setLastAppliedHash(hashNew);
+            }
+        }
+        else {
+            hashNew = 0;
+        }
+
+        return std::pair<OpTime,long long>(ts, hashNew);
     }
 
     /** write an op to the oplog that is already built.
         todo : make _logOpRS() call this so we don't repeat ourself?
         */
     OpTime _logOpObjRS(OperationContext* txn, const BSONObj& op) {
+        ScopedTransaction transaction(txn, MODE_IX);
         Lock::DBLock lk(txn->lockState(), "local", MODE_X);
-        // XXX soon this needs to be part of an outer WUOW not its own.
-        // We can't do this yet due to locking limitations.
-        WriteUnitOfWork wunit(txn);
 
         const OpTime ts = op["ts"]._opTime();
         long long hash = op["h"].numberLong();
@@ -140,6 +167,9 @@ namespace repl {
                         localOplogRSCollection);
             }
             Client::Context ctx(txn, rsoplog, localDB);
+            // TODO(geert): soon this needs to be part of an outer WUOW not its own.
+            // We can't do this yet due to locking limitations.
+            WriteUnitOfWork wunit(txn);
             checkOplogInsert(localOplogRSCollection->insertDocument(txn, op, false));
 
             ReplicationCoordinator* replCoord = getGlobalReplicationCoordinator();
@@ -149,6 +179,7 @@ namespace repl {
                          << myLastOptime << " newest timestamp: " << ts;
                 fassertFailedNoTrace(18905);
             }
+            wunit.commit();
             
             BackgroundSync* bgsync = BackgroundSync::get();
             // Keep this up-to-date, in case we step up to primary.
@@ -160,7 +191,6 @@ namespace repl {
         }
 
         setNewOptime(ts);
-        wunit.commit();
         return ts;
     }
 
@@ -224,10 +254,6 @@ namespace repl {
 
     */
 
-    // global is safe as we are in write lock. we put the static outside the function to avoid the implicit mutex 
-    // the compiler would use if inside the function.  the reason this is static is to avoid a malloc/free for this
-    // on every logop call.
-    static BufBuilder logopbufbuilder(8*1024);
     static void _logOpRS(OperationContext* txn,
                          const char *opstr,
                          const char *ns,
@@ -236,51 +262,50 @@ namespace repl {
                          BSONObj *o2,
                          bool *bb,
                          bool fromMigrate ) {
-        Lock::DBLock lk1(txn->lockState(), "local", MODE_X);
-        WriteUnitOfWork wunit(txn);
-
         if ( strncmp(ns, "local.", 6) == 0 ) {
             return;
         }
+
+        ScopedTransaction transaction(txn, MODE_IX);
+        Lock::DBLock lk(txn->lockState(), "local", MODE_IX);
+        Lock::CollectionLock lk2(txn->lockState(), rsoplog, MODE_IX);
+
+        DEV verify( logNS == 0 ); // check this was never a master/slave master
+
+        if ( localOplogRSCollection == 0 ) {
+            Client::Context ctx(txn, rsoplog);
+            localDB = ctx.db();
+            invariant( localDB );
+            localOplogRSCollection = localDB->getCollection( txn, rsoplog );
+            massert(13347, "local.oplog.rs missing. did you drop it? if so restart server", localOplogRSCollection);
+        }
+
         ReplicationCoordinator* replCoord = getGlobalReplicationCoordinator();
-
-        mutex::scoped_lock lk2(newOpMutex);
-
-        OpTime ts(getNextGlobalOptime());
-        newOptimeNotifier.notify_all();
-
-        long long hashNew = BackgroundSync::get()->getLastAppliedHash();
-
-        // Check to make sure logOp() is legal at this point.
-        if (*opstr == 'n') {
-            // 'n' operations are always logged
-            invariant(*ns == '\0');
-
-            // 'n' operations do not advance the hash, since they are not rolled back
-        }
-        else {
-            if (!replCoord->canAcceptWritesForDatabase(nsToDatabaseSubstring(ns))) {
-                severe() << "replSet error : logOp() but can't accept write to collection " << ns;
-                fassertFailed(17405);
-            }
-
-            // Advance the hash
-            hashNew = (hashNew * 131 + ts.asLL()) * 17 + replCoord->getMyId();
+        if (ns && ns[0] && !replCoord->canAcceptWritesForDatabase(nsToDatabaseSubstring(ns))) {
+            severe() << "replSet error : logOp() but can't accept write to collection " << ns;
+            fassertFailed(17405);
         }
 
+        Client::Context ctx(txn, rsoplog, localDB);
+        WriteUnitOfWork wunit(txn);
+
+        std::pair<OpTime,long long> slot = getNextOpTime(txn,
+                                                         localOplogRSCollection,
+                                                         ns,
+                                                         replCoord,
+                                                         opstr);
 
         /* we jump through a bunch of hoops here to avoid copying the obj buffer twice --
            instead we do a single copy to the destination position in the memory mapped file.
         */
 
-        logopbufbuilder.reset();
-        BSONObjBuilder b(logopbufbuilder);
-        b.appendTimestamp("ts", ts.asDate());
-        b.append("h", hashNew);
+        BSONObjBuilder b(256);
+        b.appendTimestamp("ts", slot.first.asDate());
+        b.append("h", slot.second);
         b.append("v", OPLOG_VERSION);
         b.append("op", opstr);
         b.append("ns", ns);
-        if (fromMigrate) 
+        if (fromMigrate)
             b.appendBool("fromMigrate", true);
         if ( bb )
             b.appendBool("b", *bb);
@@ -288,23 +313,11 @@ namespace repl {
             b.append("o2", *o2);
         BSONObj partial = b.done();
 
-        DEV verify( logNS == 0 ); // check this was never a master/slave master
-
-        if ( localOplogRSCollection == 0 ) {
-            Client::Context ctx(txn, rsoplog);
-            localDB = ctx.db();
-            verify( localDB );
-            localOplogRSCollection = localDB->getCollection( txn, rsoplog );
-            massert(13347, "local.oplog.rs missing. did you drop it? if so restart server", localOplogRSCollection);
-        }
-
-        Client::Context ctx(txn, rsoplog, localDB);
         OplogDocWriter writer( partial, obj );
         checkOplogInsert( localOplogRSCollection->insertDocument( txn, &writer, false ) );
 
-        BackgroundSync::get()->setLastAppliedHash(hashNew);
-        ctx.getClient()->setLastOp( ts );
-        replCoord->setMyLastOptime(txn, ts);
+        ctx.getClient()->setLastOp( slot.first );
+        replCoord->setMyLastOptime(txn, slot.first);
 
         wunit.commit();
 
@@ -318,26 +331,44 @@ namespace repl {
                           BSONObj *o2,
                           bool *bb,
                           bool fromMigrate ) {
-        Lock::DBLock lk(txn->lockState(), "local", MODE_X);
-        WriteUnitOfWork wunit(txn);
-        static BufBuilder bufbuilder(8*1024); // todo there is likely a mutex on this constructor
+
 
         if ( strncmp(ns, "local.", 6) == 0 ) {
             return;
         }
 
-        mutex::scoped_lock lk2(newOpMutex);
+        ScopedTransaction transaction(txn, MODE_IX);
+        Lock::DBLock lk(txn->lockState(), "local", MODE_IX);
 
-        OpTime ts(getNextGlobalOptime());
-        newOptimeNotifier.notify_all();
+        if( logNS == 0 ) {
+            logNS = "local.oplog.$main";
+        }
+
+        Lock::CollectionLock lk2(txn->lockState(), logNS, MODE_IX);
+
+        if (localOplogMainCollection == 0) {
+            Client::Context ctx(txn, logNS);
+            localDB = ctx.db();
+            invariant(localDB);
+            localOplogMainCollection = localDB->getCollection(txn, logNS);
+            invariant(localOplogMainCollection);
+        }
+
+        Client::Context ctx(txn, logNS, localDB);
+        WriteUnitOfWork wunit(txn);
+
+        std::pair<OpTime,long long> slot = getNextOpTime(txn,
+                                                         localOplogMainCollection,
+                                                         ns,
+                                                         NULL,
+                                                         opstr);
 
         /* we jump through a bunch of hoops here to avoid copying the obj buffer twice --
            instead we do a single copy to the destination position in the memory mapped file.
         */
 
-        bufbuilder.reset();
-        BSONObjBuilder b(bufbuilder);
-        b.appendTimestamp("ts", ts.asDate());
+        BSONObjBuilder b(256);
+        b.appendTimestamp("ts", slot.first.asDate());
         b.append("op", opstr);
         b.append("ns", ns);
         if (fromMigrate) 
@@ -348,26 +379,13 @@ namespace repl {
             b.append("o2", *o2);
         BSONObj partial = b.done(); // partial is everything except the o:... part.
 
-        if( logNS == 0 ) {
-            logNS = "local.oplog.$main";
-        }
-
-        if ( localOplogMainCollection == 0 ) {
-            Client::Context ctx(txn, logNS);
-            localDB = ctx.db();
-            verify( localDB );
-            localOplogMainCollection = localDB->getCollection(txn, logNS);
-            verify( localOplogMainCollection );
-        }
-
-        Client::Context ctx(txn, logNS , localDB);
         OplogDocWriter writer( partial, obj );
         checkOplogInsert( localOplogMainCollection->insertDocument( txn, &writer, false ) );
 
-        ctx.getClient()->setLastOp( ts );
+        ctx.getClient()->setLastOp( slot.first );
 
         ReplicationCoordinator* replCoord = getGlobalReplicationCoordinator();
-        replCoord->setMyLastOptime(txn, ts);
+        replCoord->setMyLastOptime(txn, slot.first);
         wunit.commit();
     }
 
@@ -378,10 +396,7 @@ namespace repl {
                           const BSONObj& obj,
                           BSONObj *o2,
                           bool *bb,
-                          bool fromMigrate ) = _logOpUninitialized;
-    void newReplUp() {
-        _logOp = _logOpRS;
-    }
+                          bool fromMigrate ) = _logOpRS;
 
     void oldRepl() { _logOp = _logOpOld; }
 
@@ -447,8 +462,8 @@ namespace repl {
     }
 
     void createOplog(OperationContext* txn) {
+        ScopedTransaction transaction(txn, MODE_X);
         Lock::GlobalWrite lk(txn->lockState());
-        WriteUnitOfWork uow( txn );
 
         const char * ns = "local.oplog.$main";
 
@@ -478,7 +493,6 @@ namespace repl {
 
             if ( !rs )
                 initOpTimeFromOplog(txn, ns);
-            uow.commit();
             return;
         }
 
@@ -517,6 +531,7 @@ namespace repl {
         options.cappedSize = sz;
         options.autoIndexId = CollectionOptions::NO;
 
+        WriteUnitOfWork uow( txn );
         invariant(ctx.db()->createCollection(txn, ns, options));
         if( !rs )
             logOp(txn, "n", "", BSONObj() );
@@ -597,7 +612,7 @@ namespace repl {
                     Timer t;
 
                     const NamespaceString requestNs(ns);
-                    UpdateRequest request(txn, requestNs);
+                    UpdateRequest request(requestNs);
 
                     request.setQuery(o);
                     request.setUpdates(o);
@@ -606,7 +621,7 @@ namespace repl {
                     UpdateLifecycleImpl updateLifecycle(true, requestNs);
                     request.setLifecycle(&updateLifecycle);
 
-                    update(db, request, &debug);
+                    update(txn, db, request, &debug);
 
                     if( t.millis() >= 2 ) {
                         RARELY OCCASIONALLY log() << "warning, repl doing slow updates (no _id field) for " << ns << endl;
@@ -620,7 +635,7 @@ namespace repl {
                     b.append(_id);
 
                     const NamespaceString requestNs(ns);
-                    UpdateRequest request(txn, requestNs);
+                    UpdateRequest request(requestNs);
 
                     request.setQuery(b.done());
                     request.setUpdates(o);
@@ -629,7 +644,7 @@ namespace repl {
                     UpdateLifecycleImpl updateLifecycle(true, requestNs);
                     request.setLifecycle(&updateLifecycle);
 
-                    update(db, request, &debug);
+                    update(txn, db, request, &debug);
                 }
             }
         }
@@ -641,7 +656,7 @@ namespace repl {
             const bool upsert = valueB || convertUpdateToUpsert;
 
             const NamespaceString requestNs(ns);
-            UpdateRequest request(txn, requestNs);
+            UpdateRequest request(requestNs);
 
             request.setQuery(updateCriteria);
             request.setUpdates(o);
@@ -650,7 +665,7 @@ namespace repl {
             UpdateLifecycleImpl updateLifecycle(true, requestNs);
             request.setLifecycle(&updateLifecycle);
 
-            UpdateResult ur = update(db, request, &debug);
+            UpdateResult ur = update(txn, db, request, &debug);
 
             if( ur.numMatched == 0 ) {
                 if( ur.modifiers ) {

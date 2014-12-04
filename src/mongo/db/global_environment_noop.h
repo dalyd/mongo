@@ -39,7 +39,13 @@ namespace mongo {
         void registerStorageEngine(const std::string& name,
                                    const StorageEngine::Factory* factory);
 
+        bool isRegisteredStorageEngine(const std::string& name);
+
+        StorageFactoriesIterator* makeStorageFactoriesIterator();
+
         bool killOperation(unsigned int opId);
+
+        void killAllUserOperations(const OperationContext* txn);
 
         void setKillAllOperations();
 
@@ -48,12 +54,6 @@ namespace mongo {
         bool getKillAllOperations();
 
         void registerKillOpListener(KillOpListenerInterface* listener);
-
-        void registerOperationContext(OperationContext* txn);
-
-        void unregisterOperationContext(OperationContext* txn);
-
-        void forEachOperationContext(ProcessOperationContext* procOpCtx);
 
         OperationContext* newOpCtx();
     };

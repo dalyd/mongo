@@ -28,7 +28,7 @@
 *    it in the license file.
 */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommands
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -37,6 +37,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/projection.h"
@@ -72,7 +73,13 @@ namespace mongo {
         bool runNoDirectClient( OperationContext* txn, const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl) {
             verify( cmdObj["sort"].eoo() );
 
-            const string ns = dbname + '.' + cmdObj.firstElement().valuestr();
+            const std::string coll = cmdObj.firstElement().valuestrsafe();
+            if (coll.empty()) {
+                errmsg = "no collection name specified";
+                return false;
+            }
+
+            const std::string ns = dbname + '.' + coll;
 
             BSONObj query = cmdObj.getObjectField("query");
             BSONObj fields = cmdObj.getObjectField("fields");
@@ -97,28 +104,43 @@ namespace mongo {
                 return false;
             }
 
-            bool ok = runNoDirectClient( txn, ns,
-                                         query, fields, update,
-                                         upsert, returnNew, remove,
-                                         result, errmsg );
+            bool ok = false;
+            int attempt = 0;
+            while ( 1 ) {
+                try {
+                    errmsg = "";
+                    // we can always retry because we only ever modify one document
+                    ok = runNoDirectClient( txn, ns,
+                                            query, fields, update,
+                                            upsert, returnNew, remove,
+                                            result, errmsg );
+                    break;
+                }
+                catch ( const WriteConflictException& ex ) {
+                    if ( attempt++ > 1 ) {
+                        log() << "got WriteConflictException on findAndModify for " << ns
+                              <<  " retrying attempt: " << attempt;
+                    }
+                }
+            }
 
             if ( !ok && errmsg == "no-collection" ) {
-                {
-                    Lock::DBLock lk(txn->lockState(), dbname, MODE_X);
-                    Client::Context ctx(txn, ns, false /* don't check version */);
-                    Database* db = ctx.db();
-                    if ( db->getCollection( txn, ns ) ) {
-                        // someone else beat us to it, that's ok
-                        // we might race while we unlock if someone drops
-                        // but that's ok, we'll just do nothing and error out
-                    }
-                    else {
-                        WriteUnitOfWork wuow(txn);
-                        uassertStatusOK( userCreateNS( txn, db,
-                                                       ns, BSONObj(),
-                                                       !fromRepl ) );
-                        wuow.commit();
-                    }
+                // Take X lock so we can create collection, then re-run operation.
+                ScopedTransaction transaction(txn, MODE_IX);
+                Lock::DBLock lk(txn->lockState(), dbname, MODE_X);
+                Client::Context ctx(txn, ns, false /* don't check version */);
+                Database* db = ctx.db();
+                if ( db->getCollection( txn, ns ) ) {
+                    // someone else beat us to it, that's ok
+                    // we might race while we unlock if someone drops
+                    // but that's ok, we'll just do nothing and error out
+                }
+                else {
+                    WriteUnitOfWork wuow(txn);
+                    uassertStatusOK( userCreateNS( txn, db,
+                                                   ns, BSONObj(),
+                                                   !fromRepl ) );
+                    wuow.commit();
                 }
                 errmsg = "";
                 ok = runNoDirectClient( txn, ns,
@@ -286,7 +308,7 @@ namespace mongo {
                     }
                     
                     const NamespaceString requestNs(ns);
-                    UpdateRequest request(txn, requestNs);
+                    UpdateRequest request(requestNs);
 
                     request.setQuery(queryModified);
                     request.setUpdates(update);
@@ -299,7 +321,8 @@ namespace mongo {
                     // the shard version below, but for now no
                     UpdateLifecycleImpl updateLifecycle(false, requestNs);
                     request.setLifecycle(&updateLifecycle);
-                    UpdateResult res = mongo::update(cx.db(),
+                    UpdateResult res = mongo::update(txn,
+                                                     cx.db(),
                                                      request,
                                                      &txn->getCurOp()->debug());
 
@@ -353,7 +376,13 @@ namespace mongo {
                 return runNoDirectClient(txn, dbname, cmdObj, x, errmsg, result, y);
             }
 
-            const string ns = dbname + '.' + cmdObj.firstElement().valuestr();
+            const std::string coll = cmdObj.firstElement().valuestrsafe();
+            if (coll.empty()) {
+                errmsg = "no collection name specified";
+                return false;
+            }
+
+            const std::string ns = dbname + '.' + coll;
 
             BSONObj origQuery = cmdObj.getObjectField("query"); // defaults to {}
             Query q (origQuery);
@@ -374,6 +403,7 @@ namespace mongo {
                 }
             }
 
+            ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
             Client::Context ctx(txn, ns);
 

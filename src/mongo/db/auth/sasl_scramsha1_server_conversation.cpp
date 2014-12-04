@@ -155,8 +155,19 @@ namespace mongo {
         }
 
         _creds = userObj->getCredentials();
+        UserName userName = userObj->getName();
+
         _saslAuthSession->getAuthorizationSession()->getAuthorizationManager().
                 releaseUser(userObj);
+
+        // Check for authentication attempts of the __system user on
+        // systems started without a keyfile.
+        if (userName == internalSecurity.user->getName() &&
+            _creds.scram.salt.empty()) {
+            return StatusWith<bool>(ErrorCodes::AuthenticationFailed,
+                                    "It is not possible to authenticate as the __system user "
+                                    "on servers started without a --keyFile parameter");
+        }
 
         // Generate SCRAM credentials on the fly for mixed MONGODB-CR/SCRAM mode.
         if (_creds.scram.salt.empty() && !_creds.password.empty()) {
@@ -286,7 +297,7 @@ namespace mongo {
         if (memcmp(decodedStoredKey.c_str(), computedStoredKey, scram::hashSize) != 0) {
             return StatusWith<bool>(ErrorCodes::AuthenticationFailed,
                 mongoutils::str::stream() <<
-                    "SCRAM-SHA-1 auhentication failed, storedKey mismatch");
+                    "SCRAM-SHA-1 authentication failed, storedKey mismatch");
         }
 
         // ServerSignature := HMAC(ServerKey, AuthMessage)

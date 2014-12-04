@@ -35,8 +35,7 @@ namespace mongo {
 
     class LockerForTests : public LockerImpl<false> {
     public:
-
-        LockerForTests(LockerId lockerId) : LockerImpl<false>(lockerId) {
+        explicit LockerForTests(LockerId lockerId) : LockerImpl<false>(lockerId) {
             lockGlobal(MODE_S);
         }
 
@@ -52,7 +51,7 @@ namespace mongo {
 
         }
 
-        virtual void notify(const ResourceId& resId, LockResult result) {
+        virtual void notify(ResourceId resId, LockResult result) {
             numNotifies++;
             lastResId = resId;
             lastResult = result;
@@ -63,6 +62,14 @@ namespace mongo {
 
         ResourceId lastResId;
         LockResult lastResult;
+    };
+
+
+    struct LockRequestCombo : public LockRequest, TrackingLockGrantNotification {
+    public:
+        explicit LockRequestCombo (Locker* locker) {
+            initNew(locker, this);
+        }
     };
 
 } // namespace mongo

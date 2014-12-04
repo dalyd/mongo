@@ -30,7 +30,7 @@
 
 #pragma once
 
-#include "mongo/db/diskloc.h"
+#include "mongo/db/storage/mmap_v1/diskloc.h"
 #include "mongo/db/storage/record_store.h"
 
 namespace mongo {
@@ -139,8 +139,8 @@ namespace mongo {
         void deleteRecord( OperationContext* txn,
                            const DiskLoc& dl );
 
-        virtual bool recordLikelyInPhysicalMem( OperationContext* txn,
-                                                const DiskLoc& loc ) const;
+        virtual RecordFetcher* recordNeedsFetch( OperationContext* txn,
+                                                 const DiskLoc& loc ) const;
 
         StatusWith<DiskLoc> insertRecord( OperationContext* txn,
                                           const char* data,

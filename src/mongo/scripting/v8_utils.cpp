@@ -32,6 +32,8 @@
 #include "mongo/scripting/v8_utils.h"
 
 #include <boost/smart_ptr.hpp>
+#include <boost/thread/condition_variable.hpp>
+#include <boost/thread/mutex.hpp>
 #include <boost/thread/thread.hpp>
 #include <boost/thread/xtime.hpp>
 #include <iostream>
@@ -101,6 +103,7 @@ namespace mongo {
         JSThreadConfig(V8Scope* scope, const v8::Arguments& args, bool newScope = false) :
             _started(),
             _done(),
+            _errored(),
             _newScope(newScope) {
             jsassert(args.Length() > 0, "need at least one argument");
             jsassert(args[0]->IsFunction(), "first argument must be a function");
@@ -126,6 +129,16 @@ namespace mongo {
             jsassert(_started && !_done, "Thread not running");
             _thread->join();
             _done = true;
+        }
+
+        /**
+         * Returns true if the JSThread terminated as a result of an error
+         * during its execution, and false otherwise. This operation does
+         * not block, nor does it require join() to have been called.
+         */
+        bool hasFailed() const {
+            jsassert(_started, "Thread not started");
+            return _errored;
         }
 
         BSONObj returnData() {
@@ -168,8 +181,7 @@ namespace mongo {
                         string e = _config._scope->v8ExceptionToSTLString(&try_catch);
                         log() << "js thread raised js exception: " << e << endl;
                         ret = v8::Undefined();
-                        // TODO propagate exceptions (or at least the fact that an exception was
-                        // thrown) to the calling js on either join() or returnData().
+                        _config._errored = true;
                     }
                     // ret is translated to BSON to switch isolate
                     BSONObjBuilder b;
@@ -179,14 +191,17 @@ namespace mongo {
                 catch (const DBException& e) {
                     // Keeping behavior the same as for js exceptions.
                     log() << "js thread threw c++ exception: " << e.toString();
+                    _config._errored = true;
                     _config._returnData = BSON("ret" << BSONUndefined);
                 }
                 catch (const std::exception& e) {
                     log() << "js thread threw c++ exception: " << e.what();
+                    _config._errored = true;
                     _config._returnData = BSON("ret" << BSONUndefined);
                 }
                 catch (...) {
                     log() << "js thread threw c++ non-exception";
+                    _config._errored = true;
                     _config._returnData = BSON("ret" << BSONUndefined);
                 }
             }
@@ -197,12 +212,101 @@ namespace mongo {
 
         bool _started;
         bool _done;
+        bool _errored;
         bool _newScope;
         BSONObj _args;
         scoped_ptr<boost::thread> _thread;
         scoped_ptr<V8Scope> _scope;
         BSONObj _returnData;
     };
+
+    class CountDownLatchHolder {
+    private:
+        struct Latch {
+            Latch(int32_t count) : count(count) {}
+            boost::condition_variable cv;
+            boost::mutex mutex;
+            int32_t count;
+        };
+
+        boost::shared_ptr<Latch> get(string desc) {
+            boost::lock_guard<boost::mutex> lock(mutex);
+            Map::iterator iter = _latches.find(desc);
+            jsassert(iter != _latches.end(), "not a valid CountDownLatch descriptor");
+            return iter->second;
+        }
+
+        typedef map< string, boost::shared_ptr<Latch> > Map;
+        Map _latches;
+        boost::mutex _mutex;
+        int32_t _counter;
+    public:
+        CountDownLatchHolder() : _counter(0) {}
+        string make(int32_t count) {
+            boost::lock_guard<boost::mutex> lock(_mutex);
+            int32_t id = ++_counter;
+            string desc;
+            {
+                stringstream ss;
+                ss << "latch" << id;
+                desc = ss.str();
+            }
+            _latches.insert(make_pair(desc, boost::make_shared<Latch>(count)));
+            return desc;
+        }
+        void await(string desc) {
+            boost::shared_ptr<Latch> latch = get(desc);
+            boost::unique_lock<boost::mutex> lock(latch->mutex);
+            while (latch->count != 0) {
+                latch->cv.wait(lock);
+            }
+        }
+        void countDown(string desc) {
+            boost::shared_ptr<Latch> latch = get(desc);
+            boost::unique_lock<boost::mutex> lock(latch->mutex);
+            if (latch->count > 0) {
+                latch->count--;
+            }
+            if (latch->count == 0) {
+                latch->cv.notify_all();
+            }
+        }
+        int32_t getCount(string desc) {
+            boost::shared_ptr<Latch> latch = get(desc);
+            boost::unique_lock<boost::mutex> lock(latch->mutex);
+            return latch->count;
+        }
+    };
+    namespace {
+        CountDownLatchHolder globalCountDownLatchHolder;
+    }
+
+    v8::Handle<v8::Value> CountDownLatchNew(V8Scope* scope, const v8::Arguments& args) {
+        jsassert(args.Length() == 1, "need exactly one argument");
+        jsassert(args[0]->IsInt32(), "argument must be an int32");
+        int32_t count = v8::Local<v8::Integer>::Cast(args[0])->Value();
+        return v8::String::New(globalCountDownLatchHolder.make(count).c_str());
+    }
+
+    v8::Handle<v8::Value> CountDownLatchAwait(V8Scope* scope, const v8::Arguments& args) {
+        jsassert(args.Length() == 1, "need exactly one argument");
+        jsassert(args[0]->IsString(), "argument must be a string");
+        globalCountDownLatchHolder.await(toSTLString(args[0]));
+        return v8::Undefined();
+    }
+
+    v8::Handle<v8::Value> CountDownLatchCountDown(V8Scope* scope, const v8::Arguments& args) {
+        jsassert(args.Length() == 1, "need exactly one argument");
+        jsassert(args[0]->IsString(), "argument must be a string");
+        globalCountDownLatchHolder.countDown(toSTLString(args[0]));
+        return v8::Undefined();
+    }
+
+    v8::Handle<v8::Value> CountDownLatchGetCount(V8Scope* scope, const v8::Arguments& args) {
+        jsassert(args.Length() == 1, "need exactly one argument");
+        jsassert(args[0]->IsString(), "argument must be a string");
+        return v8::Int32::New(globalCountDownLatchHolder.getCount(toSTLString(args[0])));
+    }
 
     v8::Handle<v8::Value> ThreadInit(V8Scope* scope, const v8::Arguments& args) {
         v8::Handle<v8::Object> it = args.This();
@@ -241,6 +345,12 @@ namespace mongo {
         return v8::Undefined();
     }
 
+    // Indicates to the caller that the thread terminated as a result of an error.
+    v8::Handle<v8::Value> ThreadHasFailed(V8Scope* scope, const v8::Arguments& args) {
+        bool hasFailed = thisConfig(scope, args)->hasFailed();
+        return v8::Boolean::New(hasFailed);
+    }
+
     v8::Handle<v8::Value> ThreadReturnData(V8Scope* scope, const v8::Arguments& args) {
         BSONObj data = thisConfig(scope, args)->returnData();
         return scope->mongoToV8Element(data.firstElement(), true);
@@ -256,6 +366,7 @@ namespace mongo {
         scope->injectV8Function("init", ThreadInit, o);
         scope->injectV8Function("start", ThreadStart, o);
         scope->injectV8Function("join", ThreadJoin, o);
+        scope->injectV8Function("hasFailed", ThreadHasFailed, o);
         scope->injectV8Function("returnData", ThreadReturnData, o);
         return handle_scope.Close(v8::Handle<v8::Value>());
     }
@@ -276,6 +387,13 @@ namespace mongo {
                      v8::Handle<v8::Context>& context) {
         scope->injectV8Function("_threadInject", ThreadInject, global);
         scope->injectV8Function("_scopedThreadInject", ScopedThreadInject, global);
+
+        scope->setObject("CountDownLatch", BSONObj(), false);
+        v8::Handle<v8::Object> cdl = scope->get("CountDownLatch").As<v8::Object>();
+        scope->injectV8Function("_new", CountDownLatchNew, cdl);
+        scope->injectV8Function("_await", CountDownLatchAwait, cdl);
+        scope->injectV8Function("_countDown", CountDownLatchCountDown, cdl);
+        scope->injectV8Function("_getCount", CountDownLatchGetCount, cdl);
     }
 
     v8::Handle<v8::Value> v8AssertionException(const char* errorMessage) {

@@ -67,8 +67,7 @@ namespace QueryStageTests {
         }
 
         void addIndex(const BSONObj& obj) {
-            Client::WriteContext ctx(&_txn, ns());
-            _client.ensureIndex(ns(), obj);
+            ASSERT_OK(dbtests::createIndex(&_txn, ns(), obj));
         }
 
         int countResults(const IndexScanParams& params, BSONObj filterObj = BSONObj()) {
@@ -91,7 +90,7 @@ namespace QueryStageTests {
             boost::scoped_ptr<PlanExecutor> exec(rawExec);
 
             int count = 0;
-            for (DiskLoc dl; PlanExecutor::ADVANCED == exec->getNext(NULL, &dl); ) {
+            for (RecordId dl; PlanExecutor::ADVANCED == exec->getNext(NULL, &dl); ) {
                 ++count;
             }
 

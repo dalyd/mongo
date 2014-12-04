@@ -147,7 +147,7 @@ namespace mongo {
 
             string todb = cmdObj.getStringField("todb");
             if ( fromhost.empty() || todb.empty() || cloneOptions.fromDB.empty() ) {
-                errmsg = "parms missing - {copydb: 1, fromhost: <connection string>, "
+                errmsg = "params missing - {copydb: 1, fromhost: <connection string>, "
                          "fromdb: <db>, todb: <db>}";
                 return false;
             }
@@ -215,10 +215,12 @@ namespace mongo {
 
             if (fromSelf) {
                 // SERVER-4328 todo lock just the two db's not everything for the fromself case
+                ScopedTransaction transaction(txn, MODE_X);
                 Lock::GlobalWrite lk(txn->lockState());
                 return cloner.go(txn, todb, fromhost, cloneOptions, NULL, errmsg);
             }
 
+            ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock lk (txn->lockState(), todb, MODE_X);
             return cloner.go(txn, todb, fromhost, cloneOptions, NULL, errmsg);
         }

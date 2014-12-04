@@ -124,7 +124,7 @@ namespace QueryStageUpdate {
 
         void getLocs(Collection* collection,
                      CollectionScanParams::Direction direction,
-                     vector<DiskLoc>* out) {
+                     vector<RecordId>* out) {
             WorkingSet ws;
 
             CollectionScanParams params;
@@ -185,12 +185,12 @@ namespace QueryStageUpdate {
                 CurOp& curOp = *c.curop();
                 OpDebug* opDebug = &curOp.debug();
                 UpdateDriver driver( (UpdateDriver::Options()) );
-                Database* db = ctx.ctx().db();
+                Collection* collection = ctx.getCollection();
 
                 // Collection should be empty.
                 ASSERT_EQUALS(0U, count(BSONObj()));
 
-                UpdateRequest request(&_txn, nsString());
+                UpdateRequest request(nsString());
                 UpdateLifecycleImpl updateLifecycle(false, nsString());
                 request.setLifecycle(&updateLifecycle);
 
@@ -213,7 +213,7 @@ namespace QueryStageUpdate {
                 auto_ptr<EOFStage> eofStage(new EOFStage());
 
                 scoped_ptr<UpdateStage> updateStage(
-                    new UpdateStage(params, ws.get(), db, eofStage.release()));
+                    new UpdateStage(&_txn, params, ws.get(), collection, eofStage.release()));
 
                 runUpdate(updateStage.get());
             }
@@ -257,11 +257,11 @@ namespace QueryStageUpdate {
                 Database* db = ctx.ctx().db();
                 Collection* coll = db->getCollection(&_txn, ns());
 
-                // Get the DiskLocs that would be returned by an in-order scan.
-                vector<DiskLoc> locs;
+                // Get the RecordIds that would be returned by an in-order scan.
+                vector<RecordId> locs;
                 getLocs(coll, CollectionScanParams::FORWARD, &locs);
 
-                UpdateRequest request(&_txn, nsString());
+                UpdateRequest request(nsString());
                 UpdateLifecycleImpl updateLifecycle(false, nsString());
                 request.setLifecycle(&updateLifecycle);
 
@@ -292,7 +292,7 @@ namespace QueryStageUpdate {
                     new CollectionScan(&_txn, collScanParams, ws.get(), cq->root()));
 
                 scoped_ptr<UpdateStage> updateStage(
-                    new UpdateStage(updateParams, ws.get(), db, cs.release()));
+                    new UpdateStage(&_txn, updateParams, ws.get(), coll, cs.release()));
 
                 const UpdateStats* stats =
                     static_cast<const UpdateStats*>(updateStage->getSpecificStats());
@@ -307,7 +307,7 @@ namespace QueryStageUpdate {
 
                 // Remove locs[targetDocIndex];
                 updateStage->saveState();
-                updateStage->invalidate(locs[targetDocIndex], INVALIDATION_DELETION);
+                updateStage->invalidate(&_txn, locs[targetDocIndex], INVALIDATION_DELETION);
                 BSONObj targetDoc = coll->docFor(&_txn, locs[targetDocIndex]);
                 ASSERT(!targetDoc.isEmpty());
                 remove(targetDoc);

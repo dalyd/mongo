@@ -111,21 +111,41 @@ DB.prototype._adminCommand = DB.prototype.adminCommand; // alias old name
 */
 DB.prototype.createCollection = function(name, opt) {
     var options = opt || {};
+
+    // We have special handling for the 'flags' field, and provide sugar for specific flags. If the
+    // user specifies any flags we send the field in the command. Otherwise, we leave it blank and
+    // use the server's defaults.
+    var sendFlags = false;
+    var flags = 0;
+    if (options.usePowerOf2Sizes != undefined) {
+        print("WARNING: The 'usePowerOf2Sizes' flag is ignored in 2.8 and higher as all MMAPv1 "
+            + "collections use fixed allocation sizes unless the 'noPadding' flag is specified");
+
+        sendFlags = true;
+        if (options.usePowerOf2Sizes) {
+            flags |= 1; // Flag_UsePowerOf2Sizes
+        }
+        delete options.usePowerOf2Sizes;
+    }
+    if (options.noPadding != undefined) {
+        sendFlags = true;
+        if (options.noPadding) {
+            flags |= 2; // Flag_NoPadding
+        }
+        delete options.noPadding;
+    }
+
+    // New flags must be added above here.
+    if (sendFlags) {
+        if (options.flags != undefined)
+            throw Error("Can't set 'flags' with either 'usePowerOf2Sizes' or 'noPadding'");
+        options.flags = flags;
+    }
+
     var cmd = { create: name };
-    if (options.max != undefined)
-        cmd.max = options.max;
-    if (options.autoIndexId != undefined)
-        cmd.autoIndexId = options.autoIndexId;
-    if (options.capped != undefined)
-        cmd.capped = options.capped;
-    if (options.size != undefined)
-        cmd.size = options.size;
-    if (options.usePowerOf2Sizes != undefined) 
-        cmd.flags = options.usePowerOf2Sizes ? 1 : 0;
-    if (options.storageEngine != undefined)
-        cmd.storageEngine = options.storageEngine;
-    var res = this._dbCommand(cmd);
-    return res;
+    Object.extend(cmd, options);
+
+    return this._dbCommand(cmd);
 }
 
 /**
@@ -261,12 +281,14 @@ DB.prototype.cloneCollection = function(from, collection, query) {
   * @return Object returned has member ok set to true if operation succeeds, false otherwise.
   * See also: db.clone()
 */
-DB.prototype.copyDatabase = function(fromdb, todb, fromhost, username, password) { 
+DB.prototype.copyDatabase = function(fromdb, todb, fromhost, username, password, mechanism) {
     assert( isString(fromdb) && fromdb.length );
     assert( isString(todb) && todb.length );
     fromhost = fromhost || "";
 
-    var mechanism = this._getDefaultAuthenticationMechanism();
+    if (!mechanism) {
+        mechanism = this._getDefaultAuthenticationMechanism();
+    }
     assert(mechanism == "SCRAM-SHA-1" || mechanism == "MONGODB-CR");
 
     // Check for no auth or copying from localhost
@@ -1137,7 +1159,8 @@ DB.prototype._getDefaultAuthenticationMechanism = function() {
         return this._defaultAuthenticationMechanism;
 
     // Use MONGODB-CR for v2.6 and earlier.
-    if (this.isMaster().maxWireVersion < 3) {
+    maxWireVersion = this.isMaster().maxWireVersion;
+    if (maxWireVersion == undefined || maxWireVersion < 3) {
         return "MONGODB-CR";
     }
     return "SCRAM-SHA-1";

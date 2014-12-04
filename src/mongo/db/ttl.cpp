@@ -28,7 +28,7 @@
 *    it in the license file.
 */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kIndexing
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kIndex
 
 #include "mongo/platform/basic.h"
 
@@ -137,6 +137,7 @@ namespace mongo {
                                  vector<BSONObj>* indexes ) {
 
             invariant( indexes && indexes->empty() );
+            ScopedTransaction transaction( txn, MODE_IS );
             Lock::DBLock dbLock( txn->lockState(), dbName, MODE_IS );
 
             Database* db = dbHolder().get( txn, dbName );

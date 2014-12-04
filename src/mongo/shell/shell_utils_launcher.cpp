@@ -29,7 +29,7 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
 
-#include "mongo/pch.h"
+#include "mongo/platform/basic.h"
 
 #include "mongo/shell/shell_utils_launcher.h"
 
@@ -271,9 +271,10 @@ namespace mongo {
 
             {
                 stringstream ss;
-                ss << "shell: started program";
-                for (unsigned i=0; i < _argv.size(); i++)
+                ss << "shell: started program (sh" << _pid << "): ";
+                for (unsigned i = 0; i < _argv.size(); i++) {
                     ss << " " << _argv[i];
+                }
                 log() << ss.str() << endl;
             }
 
@@ -543,9 +544,10 @@ namespace mongo {
 
         BSONObj WaitProgram( const BSONObj& a, void* data ) {
             ProcessId pid = ProcessId::fromNative(singleArg( a ).numberInt());
-            BSONObj x = BSON( "" << wait_for_pid( pid ) );
+            int exit_code = -123456; // sentinel value
+            wait_for_pid( pid, true, &exit_code );
             registry.deletePid( pid );
-            return x;
+            return BSON( string("") << exit_code);
         }
 
         BSONObj StartMongoProgram( const BSONObj &a, void* data ) {
@@ -604,7 +606,7 @@ namespace mongo {
             boost::filesystem::directory_iterator i( from );
             while( i != end ) {
                 boost::filesystem::path p = *i;
-                if ( p.leaf() != "mongod.lock" ) {
+                if ( p.leaf() != "mongod.lock" && p.leaf() != "WiredTiger.lock" ) {
                     if ( boost::filesystem::is_directory( p ) ) {
                         boost::filesystem::path newDir = to / p.leaf();
                         boost::filesystem::create_directory( newDir );

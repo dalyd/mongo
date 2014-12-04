@@ -103,7 +103,7 @@ namespace QueryStageCollectionScan {
 
         void getLocs(Collection* collection,
                      CollectionScanParams::Direction direction,
-                     vector<DiskLoc>* out) {
+                     vector<RecordId>* out) {
             WorkingSet ws;
 
             CollectionScanParams params;
@@ -261,8 +261,8 @@ namespace QueryStageCollectionScan {
 
             Collection* coll = ctx.getCollection();
 
-            // Get the DiskLocs that would be returned by an in-order scan.
-            vector<DiskLoc> locs;
+            // Get the RecordIds that would be returned by an in-order scan.
+            vector<RecordId> locs;
             getLocs(coll, CollectionScanParams::FORWARD, &locs);
 
             // Configure the scan.
@@ -288,7 +288,7 @@ namespace QueryStageCollectionScan {
 
             // Remove locs[count].
             scan->saveState();
-            scan->invalidate(locs[count], INVALIDATION_DELETION);
+            scan->invalidate(&_txn, locs[count], INVALIDATION_DELETION);
             remove(coll->docFor(&_txn, locs[count]));
             scan->restoreState(&_txn);
 
@@ -322,8 +322,8 @@ namespace QueryStageCollectionScan {
             Client::WriteContext ctx(&_txn, ns());
             Collection* coll = ctx.getCollection();
 
-            // Get the DiskLocs that would be returned by an in-order scan.
-            vector<DiskLoc> locs;
+            // Get the RecordIds that would be returned by an in-order scan.
+            vector<RecordId> locs;
             getLocs(coll, CollectionScanParams::BACKWARD, &locs);
 
             // Configure the scan.
@@ -349,7 +349,7 @@ namespace QueryStageCollectionScan {
 
             // Remove locs[count].
             scan->saveState();
-            scan->invalidate(locs[count], INVALIDATION_DELETION);
+            scan->invalidate(&_txn, locs[count], INVALIDATION_DELETION);
             remove(coll->docFor(&_txn, locs[count]));
             scan->restoreState(&_txn);
 

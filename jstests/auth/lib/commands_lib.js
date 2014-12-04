@@ -734,6 +734,27 @@ var authCommandsLib = {
             ]
         },
         {
+            testname: "currentOpCtx",
+            command: {currentOpCtx: 1},
+            skipSharded: true,
+            testcases: [
+                {
+                    runOnDb: firstDbName,
+                    roles: roles_monitoring,
+                    privileges: [
+                        { resource: {cluster: true}, actions: ["inprog"] }
+                    ]
+                },
+                {
+                    runOnDb: secondDbName,
+                    roles: roles_monitoring,
+                    privileges: [
+                        { resource: {cluster: true}, actions: ["inprog"] }
+                    ]
+                }
+            ]
+        },
+        {
             testname: "cursorInfo",
             command: {cursorInfo: 1},
             testcases: [

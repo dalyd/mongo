@@ -28,17 +28,20 @@
 
 #pragma once
 
-#include <set>
 #include <vector>
 
 #include "mongo/db/global_environment_experiment.h"
+#include "mongo/platform/unordered_set.h"
 #include "mongo/util/concurrency/mutex.h"
-
 
 namespace mongo {
 
+    class Client;
+
     class GlobalEnvironmentMongoD : public GlobalEnvironmentExperiment {
     public:
+        typedef std::map<std::string, const StorageEngine::Factory*> FactoryMap;
+
         GlobalEnvironmentMongoD();
 
         ~GlobalEnvironmentMongoD();
@@ -50,6 +53,10 @@ namespace mongo {
         void registerStorageEngine(const std::string& name,
                                    const StorageEngine::Factory* factory);
 
+        bool isRegisteredStorageEngine(const std::string& name);
+
+        StorageFactoriesIterator* makeStorageFactoriesIterator();
+
         void setKillAllOperations();
 
         void unsetKillAllOperations();
@@ -58,23 +65,18 @@ namespace mongo {
 
         bool killOperation(unsigned int opId);
 
+        void killAllUserOperations(const OperationContext* txn);
+
         void registerKillOpListener(KillOpListenerInterface* listener);
-
-        void registerOperationContext(OperationContext* txn);
-
-        void unregisterOperationContext(OperationContext* txn);
-
-        void forEachOperationContext(ProcessOperationContext* procOpCtx);
 
         OperationContext* newOpCtx();
 
+
     private:
+
+        bool _killOperationsAssociatedWithClientAndOpId_inlock(Client* client, unsigned int opId);
+
         bool _globalKill;
-
-        typedef std::set<OperationContext*> OperationContextSet;
-
-        mongo::mutex _registeredOpContextsMutex;
-        OperationContextSet _registeredOpContexts;
 
         // protected by Client::clientsMutex
         std::vector<KillOpListenerInterface*> _killOpListeners;
@@ -83,7 +85,24 @@ namespace mongo {
         StorageEngine* _storageEngine;
 
         // All possible storage engines are registered here through MONGO_INIT.
-        std::map<std::string, const StorageEngine::Factory*> _storageFactories;
+        FactoryMap _storageFactories;
+    };
+
+    class StorageFactoriesIteratorMongoD : public StorageFactoriesIterator {
+    public:
+
+        typedef GlobalEnvironmentMongoD::FactoryMap::const_iterator FactoryMapIterator;
+        StorageFactoriesIteratorMongoD(const FactoryMapIterator& begin,
+                                       const FactoryMapIterator& end);
+
+        virtual ~StorageFactoriesIteratorMongoD();
+        virtual bool more() const;
+        virtual const StorageEngine::Factory* const & next();
+        virtual const StorageEngine::Factory* const & get() const;
+
+    private:
+        FactoryMapIterator _curr;
+        FactoryMapIterator _end;
     };
 
 }  // namespace mongo

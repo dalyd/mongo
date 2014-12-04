@@ -27,7 +27,7 @@
  *    then also delete it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommands
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
@@ -153,17 +153,18 @@ namespace mongo {
     void BackgroundJob::jobBody() {
 
         const string threadName = name();
-        if( ! threadName.empty() )
-            setThreadName( threadName.c_str() );
+        if (!threadName.empty()) {
+            setThreadName(threadName.c_str());
+        }
 
         LOG(1) << "BackgroundJob starting: " << threadName << endl;
 
         try {
             run();
         }
-        catch ( std::exception& e ) {
+        catch (const std::exception& e) {
             error() << "backgroundjob " << threadName << " exception: " << e.what();
-            throw e;
+            throw;
         }
 
         // We must cache this value so that we can use it after we leave the following scope.
