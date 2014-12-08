@@ -42,8 +42,6 @@
 #include <boost/thread/thread.hpp>
 #include <iomanip>
 #include <fstream>
-#include <sstream>
-#include <string>
 
 #include "mongo/db/db.h"
 #include "mongo/db/dbdirectclient.h"
