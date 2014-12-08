@@ -1438,36 +1438,36 @@ namespace PerfTests {
             }
             else {
                 add< Dummy >();
-//                 add< ChecksumTest >();
-//                 add< Compress >();
-//                 add< TLS >();
-// #if defined(_WIN32)
-//                 add< TLS2 >();
-// #endif
-//                 add< New8 >();
-//                 add< New128 >();
-//                 add< Throw< thr1 > >();
-//                 add< Throw< thr2 > >();
-//                 add< Throw< thr3 > >();
+                add< ChecksumTest >();
+                add< Compress >();
+                add< TLS >();
+#if defined(_WIN32)
+                add< TLS2 >();
+#endif
+                add< New8 >();
+                add< New128 >();
+                add< Throw< thr1 > >();
+                add< Throw< thr2 > >();
+                add< Throw< thr3 > >();
 
-// #if !defined(__clang__) || !defined(MONGO_OPTIMIZED_BUILD)
-//                 // clang-3.2 (and earlier?) miscompiles this test when optimization is on (see
-//                 // SERVER-9767 and SERVER-11183 for additional details, including a link to the
-//                 // LLVM ticket and LLVM fix).
-//                 //
-//                 // Ideally, the test above would also say
-//                 // || (__clang_major__ > 3) || ((__clang_major__ == 3) && (__clang_minor__ > 2))
-//                 // so that the test would still run on known good vesrions of clang; see
-//                 // comments in SERVER-11183 for why that doesn't work.
-//                 //
-//                 // TODO: Remove this when we no longer need to support clang-3.2. We should
-//                 // also consider requiring clang > 3.2 in our configure tests once XCode 5 is
-//                 // ubiquitious.
-//                 add< Throw< thr4 > >();
-// #endif
+#if !defined(__clang__) || !defined(MONGO_OPTIMIZED_BUILD)
+                // clang-3.2 (and earlier?) miscompiles this test when optimization is on (see
+                // SERVER-9767 and SERVER-11183 for additional details, including a link to the
+                // LLVM ticket and LLVM fix).
+                //
+                // Ideally, the test above would also say
+                // || (__clang_major__ > 3) || ((__clang_major__ == 3) && (__clang_minor__ > 2))
+                // so that the test would still run on known good vesrions of clang; see
+                // comments in SERVER-11183 for why that doesn't work.
+                //
+                // TODO: Remove this when we no longer need to support clang-3.2. We should
+                // also consider requiring clang > 3.2 in our configure tests once XCode 5 is
+                // ubiquitious.
+                add< Throw< thr4 > >();
+#endif
 
-//                 add< Timer >();
-//                 add< Sleep0Ms >();
+                add< Timer >();
+                add< Sleep0Ms >();
 #if defined(__USE_XOPEN2K)
                 add< Yield >();
 #endif
@@ -1492,34 +1492,34 @@ namespace PerfTests {
 #ifdef RUNCOMPARESWAP
                 add< casspeed >();
 #endif
-//                 add< CTM >();
-//                 add< CTMicros >();
-//                 add< KeyTest >();
-//                 add< Bldr >();
-//                 add< StkBldr >();
-//                 add< BSONIter >();
-//                 add< BSONGetFields1 >();
-//                 add< BSONGetFields2 >();
-//                 //add< TaskQueueTest >();
-//                 add< InsertDup >();
-//                 add< Insert1 >();
-//                 add< InsertRandom >();
-//                 add< MoreIndexes<InsertRandom> >();
-//                 add< Update1 >();
-//                 add< MoreIndexes<Update1> >();
-//                 add< InsertBig >();
-//                 add< FailPointTest<false, false> >();
-//                 add< FailPointTest<true, false> >();
-//                 add< FailPointTest<true, true> >();
+                add< CTM >();
+                add< CTMicros >();
+                add< KeyTest >();
+                add< Bldr >();
+                add< StkBldr >();
+                add< BSONIter >();
+                add< BSONGetFields1 >();
+                add< BSONGetFields2 >();
+                //add< TaskQueueTest >();
+                add< InsertDup >();
+                add< Insert1 >();
+                add< InsertRandom >();
+                add< MoreIndexes<InsertRandom> >();
+                add< Update1 >();
+                add< MoreIndexes<Update1> >();
+                add< InsertBig >();
+                add< FailPointTest<false, false> >();
+                add< FailPointTest<true, false> >();
+                add< FailPointTest<true, true> >();
 
-//                 add< ReturnOKStatus >();
-//                 add< ReturnNotOKStatus >();
-//                 add< CopyOKStatus >();
-//                 add< CopyNotOKStatus >();
-// #if __cplusplus >= 201103L
-//                 add< MoveOKStatus >();
-//                 add< MoveNotOKStatus >();
-// #endif
+                add< ReturnOKStatus >();
+                add< ReturnNotOKStatus >();
+                add< CopyOKStatus >();
+                add< CopyNotOKStatus >();
+#if __cplusplus >= 201103L
+                add< MoveOKStatus >();
+                add< MoveNotOKStatus >();
+#endif
             }
         }
     } myall;
