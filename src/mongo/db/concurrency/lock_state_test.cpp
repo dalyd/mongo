@@ -59,22 +59,6 @@ namespace {
         locker.unlockAll();
     }
    
-    TEST(LockerImpl, BasicLockSpeed) {
-        LockerImpl locker(1);
-        int test_time;
-        mongo::Timer t;
-        
-        const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
-        t.reset();
-        for (int i = 0; i < 10000; i++) {
-            locker.lock(resId, MODE_X);
-            locker.unlock(resId);
-        }
-        test_time = t.micros();
-        log() << "\t 1000 lock iterations tool " << test_time << " microseconds" << std::endl;
-      
-    }
-  
     TEST(LockerImpl, ReLockNoConflict) {
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
