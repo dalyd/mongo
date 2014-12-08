@@ -648,9 +648,9 @@ namespace PerfTests {
         boost::thread_specific_ptr<int> id;
         LockMode lockMode; // Need to initialize this
         LockMode glockMode; // Need to initialize this
-        int sharedid = 1;
+        int sharedid;
         boost::mutex lock; 
-        locker_test() {lockMode = MODE_X; glockMode = MODE_IX;}
+        locker_test() :sharedid(1) {lockMode = MODE_X; glockMode = MODE_IX;}
         virtual string name() { 
             stringstream mode;
             mode << lockMode;
