@@ -58,7 +58,7 @@ namespace {
 
         locker.unlockAll();
     }
-   
+
     TEST(LockerImpl, ReLockNoConflict) {
         const ResourceId resId(RESOURCE_COLLECTION, std::string("TestDB.collection"));
 
