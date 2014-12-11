@@ -841,6 +841,7 @@ env.CppUnitTest("fail_point_test", [ "util/fail_point_test.cpp" ],
 
 if has_option( 'use-cpu-profiler' ):
     serverOnlyFiles.append( 'db/commands/cpuprofile.cpp' )
+    serverOnlyFiles.append( 'db/commands/memprofile.cpp' )
     env.Append(LIBS=['unwind'])
 
 env.Library("defaultversion", "s/default_version.cpp")
