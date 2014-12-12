@@ -157,7 +157,8 @@ namespace mongo {
             ScopedTransaction transaction(txn, MODE_IX);
             Lock::DBLock dbXLock(txn->lockState(), db, MODE_X);
             Client::Context ctx(txn, db);
-
+            std::string profileFilename = cmdObj[commandName]["profileFilename"].String();
+	    ::HeapProfilerDump(profileFilename.c_str());
             ::HeapProfilerStop();
             return true;
         }
