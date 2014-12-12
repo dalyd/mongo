@@ -25,6 +25,7 @@
 "connPoolSync",
 "convertToCapped",
 "cpuProfiler",
+"memProfiler",
 "createCollection",
 "createDatabase",  # Not used for permissions checks, but to id the event in logs.
 "createIndex",  # Not used for permissions checks, but to id the event in logs.

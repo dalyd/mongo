@@ -202,6 +202,7 @@ namespace {
             << ActionType::applicationMessage // clusterManager gets this also
             << ActionType::connPoolSync
             << ActionType::cpuProfiler
+            << ActionType::memProfiler
             << ActionType::logRotate
             << ActionType::setParameter
             << ActionType::shutdown

@@ -47,7 +47,7 @@
  *     scons --release --use-cpu-profiler 
  */
 
-#include "third_party/gperftools-2.2/src/gperftools/profiler.h"
+#include "third_party/gperftools-2.2/src/gperftools/heap-profiler.h"
 
 #include <string>
 #include <vector>
@@ -139,7 +139,8 @@ namespace mongo {
             Client::Context ctx(txn, db);
 
             std::string profileFilename = cmdObj[commandName]["profileFilename"].String();
-            if ( ! ::HeapProfilerStart( profileFilename.c_str() ) ) {
+            ::HeapProfilerStart( profileFilename.c_str() );
+            if ( ! ::IsHeapProfilerRunning() ) {
                 errmsg = "Failed to start profiler";
                 return false;
             }
