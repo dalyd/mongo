@@ -40,6 +40,11 @@ else:
 if has_option( 'use-cpu-profiler' ):
     files += [
         'src/profiler.cc',
+        'src/heap-profiler.cc',
+        'src/heap-profile-table.cc',
+        'src/memory_region_map.cc',
+        'src/raw_printer.cc',
+        'src/base/low_level_alloc.cc',
         'src/profiledata.cc',
         'src/profile-handler.cc'
         ]
