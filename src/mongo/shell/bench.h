@@ -54,7 +54,9 @@ enum class OpType {
     REMOVE,
     CREATEINDEX,
     DROPINDEX,
-    LET
+    LET,
+    SLEEP,
+    CPULOAD
 };
 
 /**

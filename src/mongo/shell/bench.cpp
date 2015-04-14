@@ -89,7 +89,9 @@ const std::map<OpType, std::string> opTypeName{{OpType::NONE, "none"},
                                                {OpType::REMOVE, "remove"},
                                                {OpType::CREATEINDEX, "createIndex"},
                                                {OpType::DROPINDEX, "dropIndex"},
-                                               {OpType::LET, "let"}};
+                                               {OpType::LET, "let"},
+                                               {OpType::SLEEP, "sleepMicros"},
+                                               {OpType::CPULOAD, "cpuload"}};
 
 BenchRunEventCounter::BenchRunEventCounter() {
     reset();
@@ -704,10 +706,25 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                 scope->init(&scopeObj);
                 invariant(scopeFunc);
             }
-
             try {
                 switch (op.op) {
                     case OpType::NOP:
+                        break;
+                    case OpType::SLEEP:
+                        // sleep for some amount of time. If nothing set use 1 ms
+                        long long sleep = e["micros"].eoo() ? 1000 : e["micros"].Long();
+                        sleepmicros(sleep);
+                        break;
+                    case OpType::CPULOAD:
+                        // sleep for some amount of time. If nothing set use 1 ms
+                        double factor = e["factor"].eoo() ? 1 : e["factor"].number();
+                        long long limit = 10000 * factor;
+                        volatile uint64_t result = 0;
+                        uint64_t x = 100;
+                        for (long long i = 0; i < limit; i++) {
+                            x *= 13;
+                        }
+                        result = x;
                         break;
                     case OpType::FINDONE: {
                         BSONObj fixedQuery = fixQuery(op.query, bsonTemplateEvaluator);
@@ -1224,112 +1241,115 @@ BenchRunner* BenchRunner::createWithConfig(const BSONObj& configArgs) {
     return new BenchRunner(config);
 }
 
-BenchRunner* BenchRunner::get(OID oid) {
-    stdx::lock_guard<stdx::mutex> lk(_staticMutex);
-    return _activeRuns[oid];
-}
-
-void BenchRunner::populateStats(BenchRunStats* stats) {
-    _brState.assertFinished();
-    stats->reset();
-    for (size_t i = 0; i < _workers.size(); ++i)
-        stats->updateFrom(_workers[i]->stats());
-}
-
-static void appendAverageMicrosIfAvailable(BSONObjBuilder& buf,
-                                           const std::string& name,
-                                           const BenchRunEventCounter& counter) {
-    if (counter.getNumEvents() > 0)
-        buf.append(name,
-                   static_cast<double>(counter.getTotalTimeMicros()) / counter.getNumEvents());
+void BenchRunner::getThreadOps(BSONArrayBuilder& threadops) {
+    const std::string name = "threadops";
+    for (size_t i = 0; i < _workers.size(); ++i) {
+        threadops.append((long long)_workers[i]->stats().opCounter.getNumEvents());
+    }
 }
 
 BSONObj BenchRunner::finish(BenchRunner* runner) {
-    runner->stop();
 
-    BenchRunStats stats;
-    runner->populateStats(&stats);
+    void BenchRunner::populateStats(BenchRunStats * stats) {
+        _brState.assertFinished();
+        stats->reset();
+        for (size_t i = 0; i < _workers.size(); ++i)
+            stats->updateFrom(_workers[i]->stats());
+    }
 
-    // vector<BSONOBj> errors = runner->config.errors;
-    bool error = stats.error;
+    static void appendAverageMicrosIfAvailable(
+        BSONObjBuilder & buf, const std::string& name, const BenchRunEventCounter& counter) {
+        if (counter.getNumEvents() > 0)
+            buf.append(name,
+                       static_cast<double>(counter.getTotalTimeMicros()) / counter.getNumEvents());
+    }
 
-    if (error)
-        return BSON("err" << 1);
+    BSONObj BenchRunner::finish(BenchRunner * runner) {
+        runner->stop();
 
-    BSONObjBuilder buf;
-    buf.append("note", "values per second");
-    buf.append("errCount", static_cast<long long>(stats.errCount));
-    buf.append("trapped", "error: not implemented");
-    appendAverageMicrosIfAvailable(buf, "findOneLatencyAverageMicros", stats.findOneCounter);
-    appendAverageMicrosIfAvailable(buf, "insertLatencyAverageMicros", stats.insertCounter);
-    appendAverageMicrosIfAvailable(buf, "deleteLatencyAverageMicros", stats.deleteCounter);
-    appendAverageMicrosIfAvailable(buf, "updateLatencyAverageMicros", stats.updateCounter);
-    appendAverageMicrosIfAvailable(buf, "queryLatencyAverageMicros", stats.queryCounter);
-    appendAverageMicrosIfAvailable(buf, "commandsLatencyAverageMicros", stats.commandCounter);
+        BenchRunStats stats;
+        runner->populateStats(&stats);
 
-    buf.append("totalOps", static_cast<long long>(stats.opCount));
+        // vector<BSONOBj> errors = runner->config.errors;
+        bool error = stats.error;
 
-    auto appendPerSec = [&buf, runner](StringData name, double total) {
-        buf.append(name, total / (runner->_microsElapsed / 1000000.0));
-    };
+        if (error)
+            return BSON("err" << 1);
 
-    appendPerSec("totalOps/s", stats.opCount);
-    appendPerSec("findOne", stats.findOneCounter.getNumEvents());
-    appendPerSec("insert", stats.insertCounter.getNumEvents());
-    appendPerSec("delete", stats.deleteCounter.getNumEvents());
-    appendPerSec("update", stats.updateCounter.getNumEvents());
-    appendPerSec("query", stats.queryCounter.getNumEvents());
-    appendPerSec("command", stats.commandCounter.getNumEvents());
+        BSONObjBuilder buf;
+        buf.append("note", "values per second");
+        buf.append("errCount", static_cast<long long>(stats.errCount));
+        buf.append("trapped", "error: not implemented");
+        appendAverageMicrosIfAvailable(buf, "findOneLatencyAverageMicros", stats.findOneCounter);
+        appendAverageMicrosIfAvailable(buf, "insertLatencyAverageMicros", stats.insertCounter);
+        appendAverageMicrosIfAvailable(buf, "deleteLatencyAverageMicros", stats.deleteCounter);
+        appendAverageMicrosIfAvailable(buf, "updateLatencyAverageMicros", stats.updateCounter);
+        appendAverageMicrosIfAvailable(buf, "queryLatencyAverageMicros", stats.queryCounter);
+        appendAverageMicrosIfAvailable(buf, "commandsLatencyAverageMicros", stats.commandCounter);
 
-    BSONObj zoo = buf.obj();
+        buf.append("totalOps", static_cast<long long>(stats.opCount));
 
-    delete runner;
-    return zoo;
-}
+        auto appendPerSec = [&buf, runner](StringData name, double total) {
+            buf.append(name, total / (runner->_microsElapsed / 1000000.0));
+        };
 
-stdx::mutex BenchRunner::_staticMutex;
-map<OID, BenchRunner*> BenchRunner::_activeRuns;
+        appendPerSec("totalOps/s", stats.opCount);
+        appendPerSec("findOne", stats.findOneCounter.getNumEvents());
+        appendPerSec("insert", stats.insertCounter.getNumEvents());
+        appendPerSec("delete", stats.deleteCounter.getNumEvents());
+        appendPerSec("update", stats.updateCounter.getNumEvents());
+        appendPerSec("query", stats.queryCounter.getNumEvents());
+        appendPerSec("command", stats.commandCounter.getNumEvents());
 
-/**
- * benchRun( { ops : [] , host : XXX , db : XXXX , parallel : 5 , seconds : 5 }
- */
-BSONObj BenchRunner::benchRunSync(const BSONObj& argsFake, void* data) {
-    BSONObj start = benchStart(argsFake, data);
+        BSONObj zoo = buf.obj();
 
-    OID oid = OID(start.firstElement().String());
-    BenchRunner* runner = BenchRunner::get(oid);
+        delete runner;
+        return zoo;
+    }
 
-    sleepmillis((int)(1000.0 * runner->config().seconds));
+    stdx::mutex BenchRunner::_staticMutex;
+    map<OID, BenchRunner*> BenchRunner::_activeRuns;
 
-    return benchFinish(start, data);
-}
+    /**
+     * benchRun( { ops : [] , host : XXX , db : XXXX , parallel : 5 , seconds : 5 }
+     */
+    BSONObj BenchRunner::benchRunSync(const BSONObj& argsFake, void* data) {
+        BSONObj start = benchStart(argsFake, data);
 
-/**
- * benchRun( { ops : [] , host : XXX , db : XXXX , parallel : 5 , seconds : 5 }
- */
-BSONObj BenchRunner::benchStart(const BSONObj& argsFake, void* data) {
-    verify(argsFake.firstElement().isABSONObj());
-    BSONObj args = argsFake.firstElement().Obj();
+        OID oid = OID(start.firstElement().String());
+        BenchRunner* runner = BenchRunner::get(oid);
 
-    // Get new BenchRunner object
-    BenchRunner* runner = BenchRunner::createWithConfig(args);
+        sleepmillis((int)(1000.0 * runner->config().seconds));
 
-    runner->start();
-    return BSON("" << runner->oid().toString());
-}
+        return benchFinish(start, data);
+    }
 
-/**
- * benchRun( { ops : [] , host : XXX , db : XXXX , parallel : 5 , seconds : 5 }
- */
-BSONObj BenchRunner::benchFinish(const BSONObj& argsFake, void* data) {
-    OID oid = OID(argsFake.firstElement().String());
+    /**
+     * benchRun( { ops : [] , host : XXX , db : XXXX , parallel : 5 , seconds : 5 }
+     */
+    BSONObj BenchRunner::benchStart(const BSONObj& argsFake, void* data) {
+        verify(argsFake.firstElement().isABSONObj());
+        BSONObj args = argsFake.firstElement().Obj();
 
-    // Get old BenchRunner object
-    BenchRunner* runner = BenchRunner::get(oid);
+        // Get new BenchRunner object
+        BenchRunner* runner = BenchRunner::createWithConfig(args);
 
-    BSONObj finalObj = BenchRunner::finish(runner);
+        runner->start();
+        return BSON("" << runner->oid().toString());
+    }
 
-    return BSON("" << finalObj);
-}
+    /**
+     * benchRun( { ops : [] , host : XXX , db : XXXX , parallel : 5 , seconds : 5 }
+     */
+    BSONObj BenchRunner::benchFinish(const BSONObj& argsFake, void* data) {
+        OID oid = OID(argsFake.firstElement().String());
+
+        // Get old BenchRunner object
+        BenchRunner* runner = BenchRunner::get(oid);
+
+        BSONObj finalObj = BenchRunner::finish(runner);
+
+        return BSON("" << finalObj);
+    }
 
 }  // namespace mongo
