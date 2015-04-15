@@ -50,7 +50,13 @@ namespace mongo {
                                            const BSONObj& cmdObj,
                                            std::vector<Privilege>* out) {} // No auth required
         bool run(OperationContext* txn, const string& dbname, BSONObj& cmdObj, int, string& errmsg, BSONObjBuilder& result, bool fromRepl ) {
-            result.append("a", "ok");
+            long long micros = 10 * 1000;
+
+            if (cmdObj["micros"].isNumber()) {
+                micros = cmdObj["micros"].numberLong();
+            }
+            sleepmicros(micros);
+
             return true;
         }
     };
