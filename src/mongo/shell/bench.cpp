@@ -406,6 +406,11 @@ namespace mongo {
                     if ( op == "nop") {
                         // do nothing
                     }
+                    else if (op == "sleepMicros") {
+                        // sleep for some amount of time. If nothing set use 1 ms
+                        long long sleep = e["micros"].eoo() ? 1000 : e["micros"].Long();
+                        sleepmicros(sleep);
+                    }
                     else if ( op == "findOne" ) {
 
                         BSONObj result;
