@@ -111,7 +111,7 @@ namespace mongo {
         insertCounter.reset();
         deleteCounter.reset();
         queryCounter.reset();
-
+        opCounter.reset();
         trappedErrors.clear();
     }
 
@@ -125,6 +125,7 @@ namespace mongo {
         insertCounter.updateFrom(other.insertCounter);
         deleteCounter.updateFrom(other.deleteCounter);
         queryCounter.updateFrom(other.queryCounter);
+        opCounter.updateFrom(other.opCounter);
 
         for (size_t i = 0; i < other.trappedErrors.size(); ++i)
             trappedErrors.push_back(other.trappedErrors[i]);
@@ -666,6 +667,8 @@ namespace mongo {
                         _stats.error = true;
                         return;
                     }
+                    // Count 1 for total ops. Successfully got through the try phrase
+                    _stats.opCounter.countOne(0);
                 }
                 catch( DBException& ex ){
                     if( ! _config->hideErrors || e["showError"].trueValue() ){
@@ -890,7 +893,11 @@ namespace mongo {
          appendAverageMicrosIfAvailable(buf, "deleteLatencyAverageMicros", stats.deleteCounter);
          appendAverageMicrosIfAvailable(buf, "updateLatencyAverageMicros", stats.updateCounter);
          appendAverageMicrosIfAvailable(buf, "queryLatencyAverageMicros", stats.queryCounter);
+         appendAverageMicrosIfAvailable(buf, "opLatencyAverageMicros", stats.opCounter);
 
+         buf.append("TotalOps", (long long) stats.opCounter.getNumEvents());
+         buf.append("TotalOps/s", (double) stats.opCounter.getNumEvents() / (runner->_microsElapsed / 1000000.0));
+         
          {
              BSONObjIterator i( after );
              while ( i.more() ) {
