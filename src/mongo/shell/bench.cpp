@@ -447,10 +447,12 @@ namespace mongo {
                     else if ( op == "command" ) {
 
                         BSONObj result;
-                        conn->runCommand( ns, fixQuery( e["command"].Obj(), bsonTemplateEvaluator ),
+                        bool ok = conn->runCommand( ns, fixQuery( e["command"].Obj(), bsonTemplateEvaluator ),
                                           result, e["options"].numberInt() );
+                        if (!ok)
+                            _stats.errCount++;
 
-                        if( check ){
+                        else if( check ){
                             int err = scope->invoke( scopeFunc , 0 , &result,  1000 * 60 , false );
                             if( err ){
                                 log() << "Error checking in benchRun thread [command]" << causedBy( scope->getError() ) << endl;
