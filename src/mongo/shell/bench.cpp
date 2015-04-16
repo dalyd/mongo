@@ -406,6 +406,16 @@ namespace mongo {
                         long long sleep = e["micros"].eoo() ? 1000 : e["micros"].Long();
                         sleepmicros(sleep);
                     }
+                    else if (op == "cpuload") {
+                        // sleep for some amount of time. If nothing set use 1 ms
+                        double factor = e["factor"].eoo() ? 1 : e["factor"].number();
+                        long long limit = 1000000 * factor;
+                        volatile long long x = 0;
+                        for (long long i = 0; i < limit; i++)
+                            {
+                                x+= 1;
+                            }
+                    }
                     else if ( op == "findOne" ) {
 
                         BSONObj result;
