@@ -424,6 +424,7 @@ coredbEnv.Library(
         "commands/isself.cpp",
         "commands/noop.cpp",
         "commands/sleep.cpp",
+        "commands/cpuload.cpp",
         "repl/isself.cpp",
         "commands/mr_common.cpp",
         "commands/rename_collection_common.cpp",
