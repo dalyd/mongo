@@ -409,7 +409,7 @@ namespace mongo {
                     else if (op == "cpuload") {
                         // sleep for some amount of time. If nothing set use 1 ms
                         double factor = e["factor"].eoo() ? 1 : e["factor"].number();
-                        long long limit = 1000000 * factor;
+                        long long limit = 10000 * factor;
                         volatile long long x = 0;
                         for (long long i = 0; i < limit; i++)
                             {
