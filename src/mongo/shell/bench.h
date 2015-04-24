@@ -412,6 +412,8 @@ namespace mongo {
          */
         void populateStats(BenchRunStats *stats);
 
+        void getThreadOps(BSONArrayBuilder &threadops);
+
         OID oid() const { return _oid; }
 
         const BenchRunConfig &config() const { return *_config; } // TODO: Remove this function.

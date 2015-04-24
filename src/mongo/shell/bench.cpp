@@ -884,6 +884,16 @@ namespace mongo {
                         static_cast<double>(counter.getTotalTimeMicros()) / counter.getNumEvents());
      }
 
+    void BenchRunner::getThreadOps(BSONArrayBuilder &threadops)
+    {
+        const std::string name = "threadops";
+        for ( size_t i = 0; i < _workers.size(); ++i )
+            {
+                threadops.append((long long) _workers[i]->stats().opCounter.getNumEvents());
+            }
+        
+    }
+
      BSONObj BenchRunner::finish( BenchRunner* runner ) {
 
          runner->stop();
@@ -915,6 +925,12 @@ namespace mongo {
          buf.append("TotalOps", (long long) stats.opCounter.getNumEvents());
          buf.append("TotalOps/s", (double) stats.opCounter.getNumEvents() / (runner->_microsElapsed / 1000000.0));
          
+         // Adding in the per thread counts
+         BSONArrayBuilder threadops(buf.subarrayStart("threadops"));
+         runner->getThreadOps(threadops);
+         threadops.done();
+
+
          {
              BSONObjIterator i( after );
              while ( i.more() ) {
