@@ -757,7 +757,6 @@ namespace mongo {
 
     void BenchRunWorker::run() {
         try {
-            BenchRunWorkerStateGuard _workerStateGuard( _brState );
             boost::scoped_ptr<DBClientBase> conn( _config->createConnection() );
             if ( !_config->username.empty() ) {
                 string errmsg;
@@ -766,6 +765,7 @@ namespace mongo {
                               "Authenticating to connection for benchThread failed: " + errmsg);
                 }
             }
+            BenchRunWorkerStateGuard _workerStateGuard( _brState );
             generateLoadOnConnection( conn.get() );
         }
         catch( DBException& e ){
