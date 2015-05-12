@@ -415,11 +415,13 @@ namespace mongo {
                         // sleep for some amount of time. If nothing set use 1 ms
                         double factor = e["factor"].eoo() ? 1 : e["factor"].number();
                         long long limit = 10000 * factor;
-                        volatile long long x = 0;
+                        volatile uint64_t result = 0;
+                        uint64_t x = 100;
                         for (long long i = 0; i < limit; i++)
                             {
-                                x+= 1;
+                                x*= 13;
                             }
+                        result = x;
                     }
                     else if ( op == "findOne" ) {
 
