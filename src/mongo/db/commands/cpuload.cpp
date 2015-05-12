@@ -67,7 +67,7 @@ namespace mongo {
                 {
                     x+= 1;
                 }
-            result = x;
+            lresult = x;
             return true;
         }
     };
