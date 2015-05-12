@@ -61,11 +61,13 @@ namespace mongo {
                 factor = cmdObj["factor"].number();
             }
             limit = limit * factor;
-            volatile long long x = 0;
+            volatile uint64_t lresult;
+            uint64_t x = 0;
             for (long long i = 0; i < limit; i++)
                 {
                     x+= 1;
                 }
+            result = x;
             return true;
         }
     };
