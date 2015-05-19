@@ -56,16 +56,15 @@ namespace mongo {
                          string& errmsg,
                          BSONObjBuilder& result) {
             double factor = 1;
-            long long limit = 10000;
             if (cmdObj["factor"].isNumber()) {
                 factor = cmdObj["factor"].number();
             }
-            limit = limit * factor;
-            volatile uint64_t lresult;
-            uint64_t x = 0;
+            long long limit = 10000 * factor;
+            volatile uint64_t lresult = 0;
+            uint64_t x = 100;
             for (long long i = 0; i < limit; i++)
                 {
-                    x+= 1;
+                    x*= 13;
                 }
             lresult = x;
             return true;
