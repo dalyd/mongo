@@ -104,6 +104,7 @@ namespace mongo {
     void BenchRunStats::reset() {
         error = false;
         errCount = 0;
+        opCount = 0;
 
         findOneCounter.reset();
         updateCounter.reset();
@@ -111,7 +112,6 @@ namespace mongo {
         deleteCounter.reset();
         queryCounter.reset();
         commandCounter.reset();
-        opCounter.reset();
         trappedErrors.clear();
     }
 
@@ -119,6 +119,7 @@ namespace mongo {
         if (other.error)
             error = true;
         errCount += other.errCount;
+        opCount += other.opCount;
 
         findOneCounter.updateFrom(other.findOneCounter);
         updateCounter.updateFrom(other.updateCounter);
@@ -126,7 +127,6 @@ namespace mongo {
         deleteCounter.updateFrom(other.deleteCounter);
         queryCounter.updateFrom(other.queryCounter);
         commandCounter.updateFrom(other.commandCounter);
-        opCounter.updateFrom(other.opCounter);
 
         for (size_t i = 0; i < other.trappedErrors.size(); ++i)
             trappedErrors.push_back(other.trappedErrors[i]);
@@ -696,7 +696,7 @@ namespace mongo {
                         return;
                     }
                     // Count 1 for total ops. Successfully got through the try phrase
-                    if (collectStats) _stats.opCounter.countOne(0);
+                    if (collectStats) _stats.opCount++;
                 }
                 catch( DBException& ex ){
                     if( ! _config->hideErrors || e["showError"].trueValue() ){
@@ -926,10 +926,9 @@ namespace mongo {
          appendAverageMicrosIfAvailable(buf, "updateLatencyAverageMicros", stats.updateCounter);
          appendAverageMicrosIfAvailable(buf, "queryLatencyAverageMicros", stats.queryCounter);
          appendAverageMicrosIfAvailable(buf, "commandsLatencyAverageMicros", stats.commandCounter);
-         appendAverageMicrosIfAvailable(buf, "opLatencyAverageMicros", stats.opCounter);
 
-         buf.append("TotalOps", (long long) stats.opCounter.getNumEvents());
-         buf.append("TotalOps/s", (double) stats.opCounter.getNumEvents() /
+         buf.append("TotalOps", (long long) stats.opCount);
+         buf.append("TotalOps/s", (double) stats.opCount /
                     (runner->_microsElapsed / 1000000.0));
 
          {

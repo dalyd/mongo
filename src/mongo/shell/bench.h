@@ -238,6 +238,7 @@ namespace mongo {
 
         bool error;
         unsigned long long errCount;
+        unsigned long long opCount;
 
         BenchRunEventCounter findOneCounter;
         BenchRunEventCounter updateCounter;
@@ -245,7 +246,6 @@ namespace mongo {
         BenchRunEventCounter deleteCounter;
         BenchRunEventCounter queryCounter;
         BenchRunEventCounter commandCounter;
-        BenchRunEventCounter opCounter;
 
         std::map<std::string, long long> opcounters;
         std::vector<BSONObj> trappedErrors;
