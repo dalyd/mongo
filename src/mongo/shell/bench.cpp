@@ -447,7 +447,7 @@ namespace mongo {
 
                     }
                     else if ( op == "command" ) {
-                        
+
                         bool ok;
                         BSONObj result;
                         {
@@ -929,8 +929,9 @@ namespace mongo {
          appendAverageMicrosIfAvailable(buf, "opLatencyAverageMicros", stats.opCounter);
 
          buf.append("TotalOps", (long long) stats.opCounter.getNumEvents());
-         buf.append("TotalOps/s", (double) stats.opCounter.getNumEvents() / (runner->_microsElapsed / 1000000.0));
-         
+         buf.append("TotalOps/s", (double) stats.opCounter.getNumEvents() /
+                    (runner->_microsElapsed / 1000000.0));
+
          {
              BSONObjIterator i( after );
              while ( i.more() ) {
