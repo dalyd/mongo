@@ -110,6 +110,7 @@ namespace mongo {
         insertCounter.reset();
         deleteCounter.reset();
         queryCounter.reset();
+        commandCounter.reset();
         opCounter.reset();
         trappedErrors.clear();
     }
@@ -124,6 +125,7 @@ namespace mongo {
         insertCounter.updateFrom(other.insertCounter);
         deleteCounter.updateFrom(other.deleteCounter);
         queryCounter.updateFrom(other.queryCounter);
+        commandCounter.updateFrom(other.commandCounter);
         opCounter.updateFrom(other.opCounter);
 
         for (size_t i = 0; i < other.trappedErrors.size(); ++i)
@@ -141,7 +143,7 @@ namespace mongo {
         password = "";
 
         parallel = 1;
-        seconds = 1;
+        seconds = 1.0;
         hideResults = true;
         handleErrors = false;
         hideErrors = false;
@@ -445,10 +447,14 @@ namespace mongo {
 
                     }
                     else if ( op == "command" ) {
-
+                        
+                        bool ok;
                         BSONObj result;
-                        bool ok = conn->runCommand( ns, fixQuery( e["command"].Obj(), bsonTemplateEvaluator ),
+                        {
+                            if (collectStats) BenchRunEventTrace _bret(&_stats.commandCounter);
+                            ok = conn->runCommand( ns, fixQuery( e["command"].Obj(), bsonTemplateEvaluator ),
                                           result, e["options"].numberInt() );
+                        }
                         if (!ok) {
                             if (collectStats) _stats.errCount++;
                         }
@@ -919,6 +925,7 @@ namespace mongo {
          appendAverageMicrosIfAvailable(buf, "deleteLatencyAverageMicros", stats.deleteCounter);
          appendAverageMicrosIfAvailable(buf, "updateLatencyAverageMicros", stats.updateCounter);
          appendAverageMicrosIfAvailable(buf, "queryLatencyAverageMicros", stats.queryCounter);
+         appendAverageMicrosIfAvailable(buf, "commandsLatencyAverageMicros", stats.commandCounter);
          appendAverageMicrosIfAvailable(buf, "opLatencyAverageMicros", stats.opCounter);
 
          buf.append("TotalOps", (long long) stats.opCounter.getNumEvents());
