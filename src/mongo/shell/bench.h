@@ -279,6 +279,11 @@ namespace mongo {
          */
         void tellWorkersToFinish();
 
+        /**
+         * Notify the worker threads to collect statistics.  Does not block.
+         */
+        void tellWorkersToCollectStats();
+
         /// Check that the current state is BRS_FINISHED.
         void assertFinished();
 
@@ -291,6 +296,12 @@ namespace mongo {
          * to tellWorkersToFinish()).
          */
         bool shouldWorkerFinish();
+
+         /**
+         * Predicate that workers call to see if they should start collecting stats (as a result of a call
+         * to tellWorkersToCollectStats()).
+         */
+        bool shouldWorkerCollectStats();
 
         /**
          * Called by each BenchRunWorker from within its thread context, immediately before it
@@ -310,6 +321,7 @@ namespace mongo {
         unsigned _numUnstartedWorkers;
         unsigned _numActiveWorkers;
         AtomicUInt32 _isShuttingDown;
+        AtomicUInt32 _isCollectingStats;
     };
 
     /**
@@ -353,6 +365,8 @@ namespace mongo {
 
         /// Predicate, used to decide whether or not it's time to terminate the worker.
         bool shouldStop() const;
+        /// Predicate, used to decide whether or not it's time to collect statistics from the worker.
+        bool shouldCollectStats() const;
 
         size_t _id;
         const BenchRunConfig *_config;
