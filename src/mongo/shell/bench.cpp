@@ -827,9 +827,7 @@ namespace mongo {
              _brState.waitForState(BenchRunState::BRS_RUNNING);
 
              // initial stats
-             conn->simpleCommand( "admin" , &before , "serverStatus" );
              _brState.tellWorkersToCollectStats();
-             before = before.getOwned();
              _brTimer = new mongo::Timer();
          }
      }
@@ -852,9 +850,6 @@ namespace mongo {
                                "still required to use benchRun with auth enabled");
                  }
              }
-             // Get final stats
-             conn->simpleCommand( "admin" , &after , "serverStatus" );
-             after = after.getOwned();
          }
 
          {
@@ -878,17 +873,6 @@ namespace mongo {
         stats->reset();
         for ( size_t i = 0; i < _workers.size(); ++i )
             stats->updateFrom( _workers[i]->stats() );
-        BSONObj before = this->before["opcounters"].Obj();
-        BSONObj after = this->after["opcounters"].Obj();
-        {
-             BSONObjIterator i( after );
-             while ( i.more() ) {
-                 BSONElement e = i.next();
-                 long long delta = e.numberLong();
-                 delta -= before[e.fieldName()].numberLong();
-                 stats->opcounters[e.fieldName()] = delta;
-             }
-        }
     }
 
      static void appendAverageMicrosIfAvailable(
@@ -912,10 +896,6 @@ namespace mongo {
          if ( error )
              return BSON( "err" << 1 );
 
-         // compute actual ops/sec
-         BSONObj before = runner->before["opcounters"].Obj();
-         BSONObj after = runner->after["opcounters"].Obj();
-
          BSONObjBuilder buf;
          buf.append( "note" , "values per second" );
          buf.append( "errCount", (long long) stats.errCount );
@@ -930,17 +910,18 @@ namespace mongo {
          buf.append("TotalOps", (long long) stats.opCount);
          buf.append("TotalOps/s", (double) stats.opCount /
                     (runner->_microsElapsed / 1000000.0));
-
-         {
-             BSONObjIterator i( after );
-             while ( i.more() ) {
-                 BSONElement e = i.next();
-                 double x = e.number();
-                 x -= before[e.fieldName()].number();
-                 std::string s = e.fieldName();
-                 buf.append( s, x / (runner->_microsElapsed / 1000000.0) );
-             }
-         }
+         buf.append("findOne", (double) stats.findOneCounter.getNumEvents() /
+                    (runner->_microsElapsed / 1000000.0));
+         buf.append("insert", (double) stats.insertCounter.getNumEvents() /
+                    (runner->_microsElapsed / 1000000.0));
+         buf.append("delete", (double) stats.deleteCounter.getNumEvents() /
+                    (runner->_microsElapsed / 1000000.0));
+         buf.append("update", (double) stats.updateCounter.getNumEvents() /
+                    (runner->_microsElapsed / 1000000.0));
+         buf.append("query", (double) stats.queryCounter.getNumEvents() /
+                    (runner->_microsElapsed / 1000000.0));
+         buf.append("delete", (double) stats.commandCounter.getNumEvents() /
+                    (runner->_microsElapsed / 1000000.0));
 
          BSONObj zoo = buf.obj();
 

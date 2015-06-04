@@ -450,9 +450,6 @@ namespace mongo {
         unsigned long long _microsElapsed;
         std::unique_ptr<BenchRunConfig> _config;
         std::vector<BenchRunWorker *> _workers;
-
-        BSONObj before;
-        BSONObj after;
     };
 
 }  // namespace mongo
