@@ -299,8 +299,8 @@ namespace mongo {
         bool shouldWorkerFinish();
 
          /**
-         * Predicate that workers call to see if they should start collecting stats (as a result of a call
-         * to tellWorkersToCollectStats()).
+         * Predicate that workers call to see if they should start collecting stats (as a result
+         * of a call to tellWorkersToCollectStats()).
          */
         bool shouldWorkerCollectStats();
 
@@ -366,7 +366,7 @@ namespace mongo {
 
         /// Predicate, used to decide whether or not it's time to terminate the worker.
         bool shouldStop() const;
-        /// Predicate, used to decide whether or not it's time to collect statistics from the worker.
+        /// Predicate, used to decide whether or not it's time to collect statistics
         bool shouldCollectStats() const;
 
         size_t _id;

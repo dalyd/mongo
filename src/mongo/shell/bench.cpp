@@ -452,8 +452,11 @@ namespace mongo {
                         BSONObj result;
                         {
                             if (collectStats) BenchRunEventTrace _bret(&_stats.commandCounter);
-                            ok = conn->runCommand( ns, fixQuery( e["command"].Obj(), bsonTemplateEvaluator ),
-                                          result, e["options"].numberInt() );
+                            ok = conn->runCommand( ns,
+                                                   fixQuery( e["command"].Obj(),
+                                                             bsonTemplateEvaluator ),
+                                                   result,
+                                                   e["options"].numberInt());
                         }
                         if (!ok) {
                             if (collectStats) _stats.errCount++;
