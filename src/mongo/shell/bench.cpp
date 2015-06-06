@@ -370,15 +370,12 @@ namespace mongo {
             }
         }
 
-        // don't start accumulating stats until told to
-        bool collectStats = false;
         while ( !shouldStop() ) {
             BSONObjIterator i( _config->ops );
             while ( i.more() ) {
 
                 if ( shouldStop() ) break;
-                if (!collectStats && shouldCollectStats())
-                    collectStats = true;
+                auto& stats = shouldCollectStats() ? _stats : _statsBlackHole;
                 BSONElement e = i.next();
 
                 string ns = e["ns"].String();
@@ -427,7 +424,7 @@ namespace mongo {
 
                         BSONObj result;
                         {
-                            if (collectStats) BenchRunEventTrace _bret(&_stats.findOneCounter);
+                            BenchRunEventTrace _bret(&stats.findOneCounter);
                             result = conn->findOne( ns , fixQuery( e["query"].Obj(),
                                                                    bsonTemplateEvaluator ) );
                         }
@@ -437,7 +434,7 @@ namespace mongo {
                             if( err ){
                                 log() << "Error checking in benchRun thread [findOne]" << causedBy( scope->getError() ) << endl;
 
-                                if (collectStats) _stats.errCount++;
+                                stats.errCount++;
 
                                 return;
                             }
@@ -451,7 +448,7 @@ namespace mongo {
                         bool ok;
                         BSONObj result;
                         {
-                            if (collectStats) BenchRunEventTrace _bret(&_stats.commandCounter);
+                            BenchRunEventTrace _bret(&stats.commandCounter);
                             ok = conn->runCommand( ns,
                                                    fixQuery( e["command"].Obj(),
                                                              bsonTemplateEvaluator ),
@@ -459,14 +456,14 @@ namespace mongo {
                                                    e["options"].numberInt());
                         }
                         if (!ok) {
-                            if (collectStats) _stats.errCount++;
+                            stats.errCount++;
                         }
                         else if( check ){
                             int err = scope->invoke( scopeFunc , 0 , &result,  1000 * 60 , false );
                             if( err ){
                                 log() << "Error checking in benchRun thread [command]" << causedBy( scope->getError() ) << endl;
 
-                                if (collectStats) _stats.errCount++;
+                                stats.errCount++;
 
                                 return;
                             }
@@ -491,12 +488,12 @@ namespace mongo {
 
                         // use special query function for exhaust query option
                         if (options & QueryOption_Exhaust) {
-                            if (collectStats) BenchRunEventTrace _bret(&_stats.queryCounter);
+                            BenchRunEventTrace _bret(&stats.queryCounter);
                             stdx::function<void (const BSONObj&)> castedDoNothing(doNothing);
                             count =  conn->query(castedDoNothing, ns, fixedQuery, &filter, options);
                         }
                         else {
-                            if (collectStats) BenchRunEventTrace _bret(&_stats.queryCounter);
+                            BenchRunEventTrace _bret(&stats.queryCounter);
                             cursor = conn->query(ns, fixedQuery, limit, skip, &filter, options,
                                                  batchSize);
                             count = cursor->itcount();
@@ -513,7 +510,7 @@ namespace mongo {
                             if( err ){
                                 log() << "Error checking in benchRun thread [find]" << causedBy( scope->getError() ) << endl;
 
-                                if (collectStats) _stats.errCount++;
+                                stats.errCount++;
 
                                 return;
                             }
@@ -532,7 +529,7 @@ namespace mongo {
                         bool safe = e["safe"].trueValue();
 
                         {
-                            if (collectStats) BenchRunEventTrace _bret(&_stats.updateCounter);
+                            BenchRunEventTrace _bret(&stats.updateCounter);
                             BSONObj query = fixQuery(queryOrginal, bsonTemplateEvaluator);
                             BSONObj update = fixQuery(updateOriginal, bsonTemplateEvaluator);
 
@@ -566,7 +563,7 @@ namespace mongo {
                                 if( err ){
                                     log() << "Error checking in benchRun thread [update]" << causedBy( scope->getError() ) << endl;
 
-                                    if (collectStats) _stats.errCount++;
+                                    stats.errCount++;
 
                                     return;
                                 }
@@ -584,7 +581,7 @@ namespace mongo {
                         BSONObj result;
 
                         {
-                            if (collectStats) BenchRunEventTrace _bret(&_stats.insertCounter);
+                            BenchRunEventTrace _bret(&stats.insertCounter);
 
                             BSONObj insertDoc = fixQuery(e["doc"].Obj(), bsonTemplateEvaluator);
 
@@ -613,7 +610,7 @@ namespace mongo {
                                 if( err ){
                                     log() << "Error checking in benchRun thread [insert]" << causedBy( scope->getError() ) << endl;
 
-                                    if (collectStats) _stats.errCount++;
+                                    stats.errCount++;
 
                                     return;
                                 }
@@ -633,7 +630,7 @@ namespace mongo {
                         bool safe = e["safe"].trueValue();
                         BSONObj result;
                         {
-                            if (collectStats) BenchRunEventTrace _bret(&_stats.deleteCounter);
+                            BenchRunEventTrace _bret(&stats.deleteCounter);
                             BSONObj predicate = fixQuery(query, bsonTemplateEvaluator);
                             if (useWriteCmd) {
 
@@ -665,7 +662,7 @@ namespace mongo {
                                 if( err ){
                                     log() << "Error checking in benchRun thread [delete]" << causedBy( scope->getError() ) << endl;
 
-                                    if (collectStats) _stats.errCount++;
+                                    stats.errCount++;
 
                                     return;
                                 }
@@ -695,11 +692,11 @@ namespace mongo {
                     }
                     else {
                         log() << "don't understand op: " << op << endl;
-                        _stats.error = true;
+                        stats.error = true;
                         return;
                     }
                     // Count 1 for total ops. Successfully got through the try phrase
-                    if (collectStats) _stats.opCount++;
+                    stats.opCount++;
                 }
                 catch( DBException& ex ){
                     if( ! _config->hideErrors || e["showError"].trueValue() ){
@@ -720,19 +717,19 @@ namespace mongo {
                         ( ! _config->noTrapPattern && _config->trapPattern && yesTrap ) ||
                         ( _config->trapPattern && _config->noTrapPattern && yesTrap && ! noTrap ) ){
                         {
-                            _stats.trappedErrors.push_back( BSON( "error" << ex.what() << "op" << e << "count" << count ) );
+                            stats.trappedErrors.push_back( BSON( "error" << ex.what() << "op" << e << "count" << count ) );
                         }
                         if( _config->breakOnTrap ) return;
                     }
                     if( ! _config->handleErrors && ! e["handleError"].trueValue() ) return;
 
-                    if (collectStats) _stats.errCount++;
+                    stats.errCount++;
                 }
                 catch( ... ){
                     if( ! _config->hideErrors || e["showError"].trueValue() ) log() << "Error in benchRun thread caused by unknown error for op " << e << endl;
                     if( ! _config->handleErrors && ! e["handleError"].trueValue() ) return;
 
-                    if (collectStats) _stats.errCount++;
+                    stats.errCount++;
                 }
 
                 if (++count % 100 == 0 && !useWriteCmd) {

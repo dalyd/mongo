@@ -373,6 +373,8 @@ namespace mongo {
         const BenchRunConfig *_config;
         BenchRunState *_brState;
         BenchRunStats _stats;
+        /// Dummy stats to use before observation period
+        BenchRunStats _statsBlackHole;
         int64_t _randomSeed;
     };
 
