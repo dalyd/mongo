@@ -898,7 +898,7 @@ namespace mongo {
 
          BSONObjBuilder buf;
          buf.append( "note" , "values per second" );
-         buf.append( "errCount", (long long) stats.errCount );
+         buf.append( "errCount", static_cast<long long>(stats.errCount) );
          buf.append( "trapped", "error: not implemented" );
          appendAverageMicrosIfAvailable(buf, "findOneLatencyAverageMicros", stats.findOneCounter);
          appendAverageMicrosIfAvailable(buf, "insertLatencyAverageMicros", stats.insertCounter);
@@ -907,21 +907,19 @@ namespace mongo {
          appendAverageMicrosIfAvailable(buf, "queryLatencyAverageMicros", stats.queryCounter);
          appendAverageMicrosIfAvailable(buf, "commandsLatencyAverageMicros", stats.commandCounter);
 
-         buf.append("TotalOps", (long long) stats.opCount);
-         buf.append("TotalOps/s", (double) stats.opCount /
-                    (runner->_microsElapsed / 1000000.0));
-         buf.append("findOne", (double) stats.findOneCounter.getNumEvents() /
-                    (runner->_microsElapsed / 1000000.0));
-         buf.append("insert", (double) stats.insertCounter.getNumEvents() /
-                    (runner->_microsElapsed / 1000000.0));
-         buf.append("delete", (double) stats.deleteCounter.getNumEvents() /
-                    (runner->_microsElapsed / 1000000.0));
-         buf.append("update", (double) stats.updateCounter.getNumEvents() /
-                    (runner->_microsElapsed / 1000000.0));
-         buf.append("query", (double) stats.queryCounter.getNumEvents() /
-                    (runner->_microsElapsed / 1000000.0));
-         buf.append("delete", (double) stats.commandCounter.getNumEvents() /
-                    (runner->_microsElapsed / 1000000.0));
+         buf.append("TotalOps", static_cast<long long>(stats.opCount));
+
+         auto appendPerSec = [&buf, runner](StringData name, double total) {
+             buf.append(name, total / (runner->_microsElapsed / 1000000.0));
+         };
+
+         appendPerSec("TotalOps/s", stats.opCount);
+         appendPerSec("findOne", stats.findOneCounter.getNumEvents());
+         appendPerSec("insert", stats.insertCounter.getNumEvents());
+         appendPerSec("delete", stats.deleteCounter.getNumEvents());
+         appendPerSec("update", stats.updateCounter.getNumEvents());
+         appendPerSec("query", stats.queryCounter.getNumEvents());
+         appendPerSec("command", stats.commandCounter.getNumEvents());
 
          BSONObj zoo = buf.obj();
 
