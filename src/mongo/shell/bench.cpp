@@ -907,13 +907,13 @@ namespace mongo {
          appendAverageMicrosIfAvailable(buf, "queryLatencyAverageMicros", stats.queryCounter);
          appendAverageMicrosIfAvailable(buf, "commandsLatencyAverageMicros", stats.commandCounter);
 
-         buf.append("TotalOps", static_cast<long long>(stats.opCount));
+         buf.append("totalOps", static_cast<long long>(stats.opCount));
 
          auto appendPerSec = [&buf, runner](StringData name, double total) {
              buf.append(name, total / (runner->_microsElapsed / 1000000.0));
          };
 
-         appendPerSec("TotalOps/s", stats.opCount);
+         appendPerSec("totalOps/s", stats.opCount);
          appendPerSec("findOne", stats.findOneCounter.getNumEvents());
          appendPerSec("insert", stats.insertCounter.getNumEvents());
          appendPerSec("delete", stats.deleteCounter.getNumEvents());
