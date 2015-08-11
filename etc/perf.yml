@@ -65,7 +65,7 @@ functions:
     - command: json.get_history
       params:
         task: ${task_name}
-        file: "src/history.json"
+        file: "src/perf/history.json"
         name: "perf"
     - command: shell.exec
       type : test
@@ -74,6 +74,7 @@ functions:
         script: |
           set -o errexit
           set -o verbose
+          source ./venv/bin/activate
           cd perf
           python perf_regression_check.py -f history.json --rev ${revision}
   "run perf tests":
