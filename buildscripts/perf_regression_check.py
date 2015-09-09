@@ -106,8 +106,8 @@ def main(args):
                         "'threadThreshold'x100 percent off")
     parser.add_argument("--threadNoiseLevel", default=2, type=float, dest="threadNoise", help=
                         "Don't flag an error if thread level throughput is less than 'noise' times the computed noise level off")
-    parser.add_argument("--reference", dest="reference", help=
-                        "Reference commit to compare against. Should be a githash")
+    parser.add_argument("--refTag", dest="reference", help=
+                        "Reference tag to compare against. Should be a valid tag name")
     args = parser.parse_args()
     j = get_json(args.file)
     t = get_json(args.tfile)
@@ -134,10 +134,10 @@ def main(args):
                           args.noise, args.threadThreshold, args.threadNoise):
             failed = True
         daysprevious = history.seriesItemsNDaysBefore(test, args.rev,args.ndays)
-        reference = tagHistory.seriesAtRevision(test, args.reference)
         if compareResults(this_one, daysprevious, args.threshold, "NDays", history.noiseLevels(test),
                           args.noise, args.threadThreshold, args.threadNoise):
             failed = True
+        reference = tagHistory.seriesAtTag(test, args.reference)
         if compareResults(this_one, reference, args.threshold, "Reference", history.noiseLevels(test),
                           args.noise, args.threadThreshold, args.threadNoise):
             failed = True
@@ -178,6 +178,13 @@ class History(object):
         s = self.series(testname)
         for result in s:
             if result["revision"] == revision:
+                return result
+        return None
+
+    def seriesAtTag(self, testname, tagName):
+        s = self.series(testname)
+        for result in s:
+            if result["tag"] == tagName:
                 return result
         return None
 
@@ -267,6 +274,7 @@ class History(object):
             if matching:
                 result = matching[0]
                 result["revision"] = commit["revision"]
+                result["tag"] = commit["tag"]
                 result["end"] = commit["data"]["end"]
                 result["order"] = commit["order"]
                 result["max"] = max(f["ops_per_sec"] for f in result["results"].values()
