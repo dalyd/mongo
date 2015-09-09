@@ -92,6 +92,8 @@ def main(args):
     parser = argparse.ArgumentParser()
     parser.add_argument("-f", "--file", dest="file", help="path to json file containing"
                         "history data")
+    parser.add_argument("-t", "--tagFile", dest="tfile", help="path to json file containing"
+                        "tag data")
     parser.add_argument("--rev", dest="rev", help="revision to examine for regressions")
     parser.add_argument("--ndays", default=7, type=int, dest="ndays", help="Check against"
                         "commit from n days ago.")
@@ -108,12 +110,14 @@ def main(args):
                         "Reference commit to compare against. Should be a githash")
     args = parser.parse_args()
     j = get_json(args.file)
-    h = History(j)
-    testnames = h.testnames()
+    t = get_json(args.tfile)
+    tagHistory = History(t)
+    history = History(j)
+    testnames = history.testnames()
     failed = False
 
     for test in testnames:
-        this_one = h.seriesAtRevision(test, args.rev)
+        this_one = history.seriesAtRevision(test, args.rev)
         print "checking %s.." % (test)
         if not this_one:
             print "\tno data at this revision, skipping"
@@ -122,19 +126,19 @@ def main(args):
         #If the new build is 10% lower than the target (3.0 will be
         #used as the baseline for 3.2 for instance), consider it
         #regressed.
-        previous = h.seriesItemsNBefore(test, args.rev, 1)
+        previous = history.seriesItemsNBefore(test, args.rev, 1)
         if not previous:
             print "\tno previous data, skipping"
             continue
-        if compareResults(this_one, previous[0], args.threshold, "Previous", h.noiseLevels(test),
+        if compareResults(this_one, previous[0], args.threshold, "Previous", history.noiseLevels(test),
                           args.noise, args.threadThreshold, args.threadNoise):
             failed = True
-        daysprevious = h.seriesItemsNDaysBefore(test, args.rev,args.ndays)
-        reference = h.seriesAtRevision(test, args.reference)
-        if compareResults(this_one, daysprevious, args.threshold, "NDays", h.noiseLevels(test),
+        daysprevious = history.seriesItemsNDaysBefore(test, args.rev,args.ndays)
+        reference = tagHistory.seriesAtRevision(test, args.reference)
+        if compareResults(this_one, daysprevious, args.threshold, "NDays", history.noiseLevels(test),
                           args.noise, args.threadThreshold, args.threadNoise):
             failed = True
-        if compareResults(this_one, reference, args.threshold, "Reference", h.noiseLevels(test),
+        if compareResults(this_one, reference, args.threshold, "Reference", history.noiseLevels(test),
                           args.noise, args.threadThreshold, args.threadNoise):
             failed = True
 
