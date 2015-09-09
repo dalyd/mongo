@@ -138,7 +138,7 @@ def main(args):
                           args.noise, args.threadThreshold, args.threadNoise):
             failed = True
         reference = tagHistory.seriesAtTag(test, args.reference)
-        if compareResults(this_one, reference, args.threshold, "Reference", history.noiseLevels(test),
+        if compareResults(this_one, reference, args.threshold, "Baseline Comparison " + args.reference, history.noiseLevels(test),
                           args.noise, args.threadThreshold, args.threadNoise):
             failed = True
 
