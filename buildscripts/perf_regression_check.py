@@ -116,6 +116,9 @@ def main(args):
     testnames = history.testnames()
     failed = False
 
+    # This should be read in from a file. Starting with it here to get the code working. 
+    overrides = {'ndays' : {'Geo.near.2d.findOne' : 25000}, 'reference' : {}}
+
     for test in testnames:
         this_one = history.seriesAtRevision(test, args.rev)
         print "checking %s.." % (test)
@@ -134,6 +137,8 @@ def main(args):
                           args.noise, args.threadThreshold, args.threadNoise):
             failed = True
         daysprevious = history.seriesItemsNDaysBefore(test, args.rev,args.ndays)
+        if test in overrides['ndays']:
+            print "Override in ndays for test %s" % test
         if compareResults(this_one, daysprevious, args.threshold, "NDays", history.noiseLevels(test),
                           args.noise, args.threadThreshold, args.threadNoise):
             failed = True
