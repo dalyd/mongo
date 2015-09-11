@@ -108,6 +108,8 @@ def main(args):
                         "Don't flag an error if thread level throughput is less than 'noise' times the computed noise level off")
     parser.add_argument("--refTag", dest="reference", help=
                         "Reference tag to compare against. Should be a valid tag name")
+    parser.add_argument("--overrideFile", dest="overrideFile", help="File to read for comparison override information")
+
     args = parser.parse_args()
     j = get_json(args.file)
     t = get_json(args.tfile)
@@ -116,15 +118,12 @@ def main(args):
     testnames = history.testnames()
     failed = False
 
-    # This should be read in from a file. Starting with it here to get the code working. 
-    overrides = {'ndays' : {'Geo.near.2d.findOne' :
-                            {'revision' : 'override',
-                             'max' : 2500,
-                             'results' : {'1' : {'ops_per_sec' : 5556}, '2' : {'ops_per_sec' : 11043}, '4' : {'ops_per_sec' : 21713}, '8' : {'ops_per_sec' : 23088}}}}, 
-                 'reference' : {'Geo.near.2d.findOne' :
-                            {'revision' : 'override',
-                             'max' : 2500,
-                             'results' : {'1' : {'ops_per_sec' : 5556}, '2' : {'ops_per_sec' : 11043}, '4' : {'ops_per_sec' : 21713}, '8' : {'ops_per_sec' : 23088}}}}}
+    if args.overrideFile :
+        overrides = get_json(args.overrideFile)
+        print "Read in overrides file"
+    else : 
+        overrides = {'ndays' : {}, 'reference' : {}}
+        print "using default overrides file"
 
     for test in testnames:
         this_one = history.seriesAtRevision(test, args.rev)
