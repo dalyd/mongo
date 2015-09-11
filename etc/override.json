@@ -1,0 +1,42 @@
+{
+    "reference": {
+        "Geo.near.2d.findOne": {
+            "max": 2500,
+            "results": {
+                "1": {
+                    "ops_per_sec": 5556
+                },
+                "8": {
+                    "ops_per_sec": 23088
+                },
+                "2": {
+                    "ops_per_sec": 11043
+                },
+                "4": {
+                    "ops_per_sec": 21713
+                }
+            },
+            "revision": "override"
+        }
+    },
+    "ndays": {
+        "Geo.near.2d.findOne": {
+            "max": 2500,
+            "results": {
+                "1": {
+                    "ops_per_sec": 5556
+                },
+                "8": {
+                    "ops_per_sec": 23088
+                },
+                "2": {
+                    "ops_per_sec": 11043
+                },
+                "4": {
+                    "ops_per_sec": 21713
+                }
+            },
+            "revision": "override"
+        }
+    }
+}
