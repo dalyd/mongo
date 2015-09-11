@@ -109,6 +109,7 @@ def main(args):
     parser.add_argument("--refTag", dest="reference", help=
                         "Reference tag to compare against. Should be a valid tag name")
     parser.add_argument("--overrideFile", dest="overrideFile", help="File to read for comparison override information")
+    parser.add_argument("--variant", dest="variant", help="Variant to lookup in the override file")
 
     args = parser.parse_args()
     j = get_json(args.file)
@@ -118,12 +119,16 @@ def main(args):
     testnames = history.testnames()
     failed = False
 
+    # Default empty override structure
+    overrides = {'ndays' : {}, 'reference' : {}}
     if args.overrideFile :
-        overrides = get_json(args.overrideFile)
-        print "Read in overrides file"
-    else : 
-        overrides = {'ndays' : {}, 'reference' : {}}
-        print "using default overrides file"
+        # Read the overrides file
+        foverrides = get_json(args.overrideFile)
+        # Is this variant in the overrides file?
+        print "Variant is " + args.variant + " and keys are " +str(foverrides.keys())
+        if args.variant in foverrides : 
+            print "Variant in overrides and using it"
+            overrides = foverrides[args.variant]
 
     for test in testnames:
         this_one = history.seriesAtRevision(test, args.rev)
