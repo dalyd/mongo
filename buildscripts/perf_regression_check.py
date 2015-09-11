@@ -117,7 +117,14 @@ def main(args):
     failed = False
 
     # This should be read in from a file. Starting with it here to get the code working. 
-    overrides = {'ndays' : {'Geo.near.2d.findOne' : 25000}, 'reference' : {}}
+    overrides = {'ndays' : {'Geo.near.2d.findOne' :
+                            {'revision' : 'override',
+                             'max' : 2500,
+                             'results' : {'1' : {'ops_per_sec' : 5556}, '2' : {'ops_per_sec' : 11043}, '4' : {'ops_per_sec' : 21713}, '8' : {'ops_per_sec' : 23088}}}}, 
+                 'reference' : {'Geo.near.2d.findOne' :
+                            {'revision' : 'override',
+                             'max' : 2500,
+                             'results' : {'1' : {'ops_per_sec' : 5556}, '2' : {'ops_per_sec' : 11043}, '4' : {'ops_per_sec' : 21713}, '8' : {'ops_per_sec' : 23088}}}}}
 
     for test in testnames:
         this_one = history.seriesAtRevision(test, args.rev)
@@ -139,10 +146,14 @@ def main(args):
         daysprevious = history.seriesItemsNDaysBefore(test, args.rev,args.ndays)
         if test in overrides['ndays']:
             print "Override in ndays for test %s" % test
+            daysprevious = overrides['ndays'][test]
         if compareResults(this_one, daysprevious, args.threshold, "NDays", history.noiseLevels(test),
                           args.noise, args.threadThreshold, args.threadNoise):
             failed = True
         reference = tagHistory.seriesAtTag(test, args.reference)
+        if test in overrides['reference']:
+            print "Override in references for test %s" % test
+            reference = overrides['reference'][test]
         if compareResults(this_one, reference, args.threshold, "Baseline Comparison " + args.reference, history.noiseLevels(test),
                           args.noise, args.threadThreshold, args.threadNoise):
             failed = True
