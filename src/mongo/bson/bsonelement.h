@@ -293,7 +293,7 @@ public:
     }
 
     /** Return int value for this field. MUST be NumberInt type. */
-    int _numberInt() const __attribute__ ((aligned(64))) {
+    __attribute__ ((aligned(64))) const int _numberInt() {
         return ConstDataView(value()).read<LittleEndian<int>>();
     }
 

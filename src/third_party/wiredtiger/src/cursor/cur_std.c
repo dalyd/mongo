@@ -229,8 +229,7 @@ err:	API_END_RET(session, ret);
  * __wt_cursor_set_keyv --
  *	WT_CURSOR->set_key default implementation.
  */
-void
-__wt_cursor_set_keyv(WT_CURSOR *cursor, uint32_t flags, va_list ap) __attribute__ ((aligned(64)))
+ __attribute__ ((aligned(64))) void __wt_cursor_set_keyv(WT_CURSOR *cursor, uint32_t flags, va_list ap)
 {
 	WT_DECL_RET;
 	WT_SESSION_IMPL *session;

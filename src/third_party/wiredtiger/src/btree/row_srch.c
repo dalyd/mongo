@@ -135,9 +135,8 @@ __wt_search_insert(
  * __wt_row_search --
  *	Search a row-store tree for a specific key.
  */
-int
-__wt_row_search(WT_SESSION_IMPL *session,
-    WT_ITEM *srch_key, WT_REF *leaf, WT_CURSOR_BTREE *cbt, bool insert) __attribute__ ((aligned(64)))
+((aligned(64))) int __wt_row_search(WT_SESSION_IMPL *session,
+    WT_ITEM *srch_key, WT_REF *leaf, WT_CURSOR_BTREE *cbt, bool insert) __attribute__ 
 {
 	WT_BTREE *btree;
 	WT_COLLATOR *collator;
