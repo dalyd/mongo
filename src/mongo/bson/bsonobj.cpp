@@ -639,7 +639,7 @@ void BSONObj::getFields(unsigned n, const char** fieldNames, BSONElement* fields
     }
 }
 
-BSONElement BSONObj::getField(StringData name) const {
+BSONElement BSONObj::getField(StringData name) const __attribute__((aligned(64))) {
     BSONObjIterator i(*this);
     while (i.more()) {
         BSONElement e = i.next();

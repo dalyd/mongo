@@ -137,7 +137,7 @@ __wt_search_insert(
  */
 int
 __wt_row_search(WT_SESSION_IMPL *session,
-    WT_ITEM *srch_key, WT_REF *leaf, WT_CURSOR_BTREE *cbt, bool insert)
+    WT_ITEM *srch_key, WT_REF *leaf, WT_CURSOR_BTREE *cbt, bool insert) __attribute__ ((aligned(64)))
 {
 	WT_BTREE *btree;
 	WT_COLLATOR *collator;

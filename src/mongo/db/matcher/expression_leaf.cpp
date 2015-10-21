@@ -102,7 +102,8 @@ Status ComparisonMatchExpression::init(StringData path, const BSONElement& rhs) 
 }
 
 
-bool ComparisonMatchExpression::matchesSingleElement(const BSONElement& e) const {
+bool ComparisonMatchExpression::matchesSingleElement(const BSONElement& e) const
+    __attribute__((aligned(64))) {
     // log() << "\t ComparisonMatchExpression e: " << e << " _rhs: " << _rhs << "\n"
     //<< toString() << std::endl;
 

@@ -357,7 +357,7 @@ err:	if (ret != 0)
  *	Search for a record in the tree.
  */
 int
-__wt_btcur_search_near(WT_CURSOR_BTREE *cbt, int *exactp)
+__wt_btcur_search_near(WT_CURSOR_BTREE *cbt, int *exactp) __attribute__ ((aligned(64)))
 {
 	WT_BTREE *btree;
 	WT_CURSOR *cursor;

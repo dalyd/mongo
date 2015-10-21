@@ -435,7 +435,7 @@ __wt_btcur_iterate_setup(WT_CURSOR_BTREE *cbt)
  *	Move to the next record in the tree.
  */
 int
-__wt_btcur_next(WT_CURSOR_BTREE *cbt, bool truncating)
+__wt_btcur_next(WT_CURSOR_BTREE *cbt, bool truncating) __attribute__ ((aligned(64)))
 {
 	WT_DECL_RET;
 	WT_PAGE *page;
