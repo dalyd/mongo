@@ -225,7 +225,7 @@ __cursor_reset(WT_CURSOR_BTREE *cbt)
  *	Return a row-store leaf page slot's K/V pair.
  */
 static inline int
-__cursor_row_slot_return(WT_CURSOR_BTREE *cbt, WT_ROW *rip, WT_UPDATE *upd) __attribute__((optimize(“align-functions=64 align-loops=64 align-jumps=64)))
+__cursor_row_slot_return(WT_CURSOR_BTREE *cbt, WT_ROW *rip, WT_UPDATE *upd) __attribute__((optimize("align-functions=64 align-loops=64 align-jumps=64")))
 {
 	WT_BTREE *btree;
 	WT_ITEM *kb, *vb;
