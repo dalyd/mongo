@@ -690,6 +690,16 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                                 docBuilder.append(insertDoc);
                             }
                             docBuilder.done();
+                            // put in write concern
+                            BSONObjBuilder wcBuilder(builder.subobjStart("writeConcern"));
+                            if (e["w"].eoo()) {
+                                wcBuilder.append("w", e["w"].String());
+                            }
+                            if (e["j"].eoo()) {
+                                wcBuilder.append("j", e["j"].String());
+                            }
+                            wcBuilder.done();
+
                             // TODO: Replace after SERVER-11774.
                             conn->runCommand(
                                 nsToDatabaseSubstring(ns).toString(), builder.done(), result);
