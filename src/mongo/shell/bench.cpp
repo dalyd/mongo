@@ -362,6 +362,26 @@ bool BenchRunWorker::shouldCollectStats() const {
 void doNothing(const BSONObj&) {}
 
 /**
+ * Convenience function to process the write concern for any operation
+ * that uses it
+ */
+void processWriteConcern(BSONObjBuilder& builder, BSONElement& e) {
+    BSONObjBuilder wcBuilder(builder.subobjStart("writeConcern"));
+    if (e["w"]) {
+        if (e["w"].isNumber())
+            wcBuilder.append("w", e["w"].numberInt());
+        else
+            wcBuilder.append("w", e["w"].String());
+    } else
+        wcBuilder.append("w", 1);
+    if (e["j"]) {
+        wcBuilder.append("j", e["j"].trueValue());
+    }
+    wcBuilder.done();
+}
+
+
+/**
  * Issues the query 'lpq' against 'conn' using read commands.  Returns the size of the result set
  * returned by the query.
  *
@@ -636,6 +656,7 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                             docBuilder.append(BSON("q" << query << "u" << update << "multi" << multi
                                                        << "upsert" << upsert));
                             docBuilder.done();
+                            processWriteConcern(builder, e);
                             conn->runCommand(
                                 nsToDatabaseSubstring(ns).toString(), builder.done(), result);
                         } else {
@@ -690,21 +711,7 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                                 docBuilder.append(insertDoc);
                             }
                             docBuilder.done();
-                            // put in write concern
-                            BSONObjBuilder wcBuilder(builder.subobjStart("writeConcern"));
-                            if (e["w"]) {
-                                if (e["w"].isNumber())
-                                    wcBuilder.append("w", e["w"].numberInt());
-                                else
-                                    wcBuilder.append("w", e["w"].String());
-                            } else
-                                wcBuilder.append("w", 1);
-                            if (e["j"]) {
-                                wcBuilder.append("j", e["j"].trueValue());
-                            }
-                            wcBuilder.done();
-
-                            // TODO: Replace after SERVER-11774.
+                            processWriteConcern(builder, e);
                             conn->runCommand(
                                 nsToDatabaseSubstring(ns).toString(), builder.done(), result);
                         } else {
@@ -763,6 +770,7 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                             int limit = (multi == true) ? 0 : 1;
                             docBuilder.append(BSON("q" << predicate << "limit" << limit));
                             docBuilder.done();
+                            processWriteConcern(builder, e);
                             conn->runCommand(
                                 nsToDatabaseSubstring(ns).toString(), builder.done(), result);
                         } else {
