@@ -692,11 +692,15 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                             docBuilder.done();
                             // put in write concern
                             BSONObjBuilder wcBuilder(builder.subobjStart("writeConcern"));
-                            if (e["w"].eoo()) {
-                                wcBuilder.append("w", e["w"].String());
-                            }
-                            if (e["j"].eoo()) {
-                                wcBuilder.append("j", e["j"].String());
+                            if (e["w"]) {
+                                if (e["w"].isNumber())
+                                    wcBuilder.append("w", e["w"].numberInt());
+                                else
+                                    wcBuilder.append("w", e["w"].String());
+                            } else
+                                wcBuilder.append("w", 1);
+                            if (e["j"]) {
+                                wcBuilder.append("j", e["j"].trueValue());
                             }
                             wcBuilder.done();
 
