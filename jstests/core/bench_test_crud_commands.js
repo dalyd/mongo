@@ -14,7 +14,7 @@
         return benchRun(benchArgs);
     }
 
-    function testInsert(writeCmd) {
+    function testInsert(writeCmd, w, j) {
         coll.drop();
 
         var docs = [];
@@ -24,7 +24,9 @@
         var res = executeBenchRun([{ns: coll.getFullName(),
                                     op: "insert",
                                     doc: docs,
-                                    writeCmd: writeCmd}]);
+                                    writeCmd: writeCmd, 
+                                    w : w,
+                                    j : j}]);
 
         assert.gt(coll.count(), 0);
         assert.eq(coll.findOne({}, {_id:0}), docs[0]);
@@ -58,8 +60,9 @@
         assert.gt(res.findOne, 0, tojson(res));
     }
 
-    testInsert(false);
-    testInsert(true);
+    testInsert(false, null, null);
+    testInsert(true, "majority", "true");
+    testInsert(true, 1, "false");
     testFind(false);
     testFind(true);
     testFindOne(false);
