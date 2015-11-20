@@ -698,6 +698,7 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
 
                         BSONObj insertDoc;
                         if (useWriteCmd) {
+                            // TODO: Replace after SERVER-11774.
                             BSONObjBuilder builder;
                             builder.append("insert", nsToCollectionSubstring(ns));
                             BSONArrayBuilder docBuilder(builder.subarrayStart("documents"));
