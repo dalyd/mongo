@@ -59,7 +59,7 @@
         assert.gt(res.findOne, 0, tojson(res));
     }
 
-    testInsert(false, );
+    testInsert(false, {});
     testInsert(true, {"writeConcern" : {"w" : "majority"}});
     testInsert(true, {"writeConcern" : {"w" : 1, "j": false}});
     testInsert(true, {"writeConcern" : {"j" : true}});

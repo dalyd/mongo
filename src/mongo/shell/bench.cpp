@@ -637,7 +637,7 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                                                        << "upsert" << upsert));
                             docBuilder.done();
                             if (e["writeConcern"]) {
-                                builder.append(e["writeConcern"].Obj());
+                                builder.append("writeConcern", e["writeConcern"].Obj());
                             }
                             conn->runCommand(
                                 nsToDatabaseSubstring(ns).toString(), builder.done(), result);
@@ -695,7 +695,7 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                             }
                             docBuilder.done();
                             if (e["writeConcern"]) {
-                                builder.append(e["writeConcern"].Obj());
+                                builder.append("writeConcern", e["writeConcern"].Obj());
                             }
                             conn->runCommand(
                                 nsToDatabaseSubstring(ns).toString(), builder.done(), result);
@@ -756,7 +756,7 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                             docBuilder.append(BSON("q" << predicate << "limit" << limit));
                             docBuilder.done();
                             if (e["writeConcern"]) {
-                                builder.append(e["writeConcern"].Obj());
+                                builder.append("writeConcern", e["writeConcern"].Obj());
                             }
                             conn->runCommand(
                                 nsToDatabaseSubstring(ns).toString(), builder.done(), result);
