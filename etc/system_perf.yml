@@ -140,6 +140,7 @@ functions:
         script: |
           set -e
           set -v
+          cd ./clusters/${cluster}
           touch test.success
 
   "destroy cluster":
