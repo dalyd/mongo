@@ -51,11 +51,11 @@ functions:
           set -e
           set -v
           src/dsi/dsi/bin/setup-dsi-env.sh
-          # This is a dirty hack. setup_dsi-env.sh downloads MC and
-          # terraform. Terraform ends up local, but MC is access from
-          # the bin directory, and the run scripts expect it to be
-          # there. If we move it, we need to tell those scripts where
-          # to find MC. Punting for now.
+          # This should be cleaned up in the future. setup_dsi-env.sh
+          # downloads MC and terraform. Terraform ends up local, but
+          # MC is access from the bin directory, and the run scripts
+          # expect it to be there. If we move it, we need to tell
+          # those scripts where to find MC.
           ln -s $(pwd)/bin/* src/dsi/dsi/bin
           pwd bin
           ls bin
@@ -67,7 +67,7 @@ functions:
         script: |
           # generate aws private key file
           echo "${terraform_secret}" > secret
-          chmod 500 secret
+          chmod 400 secret
           echo "${ec2_pem}" > keys/aws.pem
           chmod 400 keys/aws.pem
     - command: shell.exec
@@ -94,7 +94,6 @@ functions:
           cat dsienv.sh
           source ./dsienv.sh
           # create all resources and instances
-          echo ../src/dsi/dsi/bin/setup-cluster.sh ${cluster} ../terraform
           ../src/dsi/dsi/bin/setup-cluster.sh ${cluster} ../terraform
           echo "EC2 Cluster CREATED."
           tar -czvf cluster_config.tgz infrastructure_provisioning.out.yml ips.sh ips.py terraform.tfstate cluster.tf terraform.tfvars variables.tf
@@ -258,7 +257,7 @@ functions:
           set -o errexit
           set -o verbose
           source ./dsienv.sh
-          python -u $DSI/analysis/dashboard_gen.py --rev ${revision} -f history.json -t tags.json --refTag 3.2.3-Baseline 3.2.1-Baseline 3.1.8-Baseline 3.0.9-Baseline --overrideFile analysis/master/system_perf_override.json --project_id sys-perf --task_name ${task_name} --variant ${build_variant} --jira-user ${perf_jira_user} --jira-password ${perf_jira_pw} || true
+          python -u $DSI/analysis/dashboard_gen.py --rev ${revision} -f history.json -t tags.json --refTag 3.2.1-Baseline --overrideFile ../src/dsi/dsi/analysis/master/system_perf_override.json --project_id sys-perf --task_name ${task_name} --variant ${build_variant} || true
     - command: "json.send"
       params:
          name: "dashboard"
@@ -271,7 +270,7 @@ functions:
         script: |
           set -o errexit
           set -o verbose
-          python -u ../src/dsi/dsi/analysis/post_run_check.py --rev ${revision} -f history.json -t tags.json --refTag 3.2.1-Baseline --overrideFile analysis/master/system_perf_override.json --project_id sys-perf --task_name ${task_name} --variant ${build_variant}
+          python -u ../src/dsi/dsi/analysis/post_run_check.py --rev ${revision} -f history.json -t tags.json --refTag 3.2.1-Baseline --overrideFile ../src/dsi/dsi/analysis/master/system_perf_override.json --project_id sys-perf --task_name ${task_name} --variant ${build_variant}
 
   "compare":
     - command: shell.exec
