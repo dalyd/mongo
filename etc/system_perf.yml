@@ -161,15 +161,6 @@ functions:
           set -e
           set -v
           touch test.success
-  "fake it":
-    - command: shell.exec
-      params:
-        working_dir: work
-        script: |
-          set -e
-          set -v
-          touch test.success
-
 
   "destroy cluster":
     - command: shell.exec
@@ -181,7 +172,7 @@ functions:
           set -o verbose
           source ./dsienv.sh
           # destroy the EC2 cluster
-          yes yes | ./terraform destroy; true # We could leave terraform somewhere else and copy it
+          yes yes | ./terraform destroy; true
           # make sure we destroy the cluster in case of AWS API timing issue
           yes yes | ./terraform destroy; true
           echo "Cluster DESTROYED."
@@ -206,7 +197,6 @@ functions:
           touch ./reports/graphs/timeseries-p1.html
           ../src/dsi/dsi/bin/retrieve-diag-data.sh
           ../src/dsi/dsi/bin/generate-timeseries-html.sh || true
-          rm -rf ../reports
     - command: archive.targz_pack
       params:
         target: "reports.tgz"
