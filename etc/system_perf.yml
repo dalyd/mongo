@@ -71,7 +71,7 @@ functions:
           set -e
           set -v
           source work/dsienv.sh
-          src/dsi/dsi/bin/setup-dsi-env.sh
+          $DSI_PATH/bin/setup-dsi-env.sh
   "bring up cluster":
     - command: shell.exec
       # bring up the cluster
