@@ -61,7 +61,6 @@ functions:
         # setup execution environment
         # configure environment, has private information, no logging
         script: |
-          cp ../terraform/* . # Do we need to copy this or can we point to it?
           python $DSI_PATH/bin/setup_work_env.py --cluster-type ${cluster} --aws-key-name ${terraform_key} --ssh-keyfile-path ../keys/aws.pem --aws-secret-file ../secret --mongo-download-url https://s3.amazonaws.com/mciuploads/dsi/${version_id}/${revision}/${platform}/mongod-${version_id}.tar.gz --production
           ls
           pwd
@@ -72,6 +71,7 @@ functions:
           set -v
           source work/dsienv.sh
           $DSI_PATH/bin/setup-dsi-env.sh
+          cp terraform/* work # Do we need to copy this or can we point to it?
   "bring up cluster":
     - command: shell.exec
       # bring up the cluster
