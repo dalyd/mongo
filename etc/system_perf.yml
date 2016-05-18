@@ -61,7 +61,7 @@ functions:
         # setup execution environment
         # configure environment, has private information, no logging
         script: |
-          python $DSI_PATH/bin/setup_work_env.py --cluster-type ${cluster} --aws-key-name ${terraform_key} --ssh-keyfile-path ../keys/aws.pem --aws-secret-file ../secret --mongo-download-url https://s3.amazonaws.com/mciuploads/dsi/${version_id}/${revision}/${platform}/mongod-${version_id}.tar.gz --production
+          python ../src/dsi/dsi/bin/setup_work_env.py --cluster-type ${cluster} --aws-key-name ${terraform_key} --ssh-keyfile-path ../keys/aws.pem --aws-secret-file ../secret --mongo-download-url https://s3.amazonaws.com/mciuploads/dsi/${version_id}/${revision}/${platform}/mongod-${version_id}.tar.gz --production
           ls
           pwd
     - command: shell.exec
@@ -252,6 +252,7 @@ functions:
         script: |
           set -o errexit
           set -o verbose
+          source dsienv.sh
           python -u $DSI_PATH/analysis/post_run_check.py --rev ${revision} -f history.json -t tags.json --refTag 3.2.1-Baseline --overrideFile $DSI_PATH/analysis/master/system_perf_override.json --project_id sys-perf --task_name ${task_name} --variant ${build_variant}
 
   "compare":
@@ -287,7 +288,7 @@ functions:
         script: |
           set -o errexit
           set -o verbose
-          python -u $DSI_PATH/analysis/compare.py -b standalone.json -c oplog.json
+          python -u ../src/dsi/dsi/analysis/compare.py -b standalone.json -c oplog.json
     - command: "json.send"
       params:
         name: "perf"
