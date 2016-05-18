@@ -61,7 +61,7 @@ functions:
         # configure environment, has private information, no logging
         script: |
           cp ../terraform/* . # Do we need to copy this or can we point to it?
-          python ../src/dsi/dsi/bin/setup_work_env.py --cluster-type ${cluster} --aws-key-name ${terraform_key} --ssh-keyfile-path ../keys/aws.pem --aws-secret-file ../secret --mongo-download-url https://s3.amazonaws.com/mciuploads/dsi/${version_id}/${revision}/${platform}/mongod-${version_id}.tar.gz --production
+          python $DSI_PATH/bin/setup_work_env.py --cluster-type ${cluster} --aws-key-name ${terraform_key} --ssh-keyfile-path ../keys/aws.pem --aws-secret-file ../secret --mongo-download-url https://s3.amazonaws.com/mciuploads/dsi/${version_id}/${revision}/${platform}/mongod-${version_id}.tar.gz --production
           ls
           pwd
     - command: shell.exec
@@ -85,7 +85,7 @@ functions:
           cat dsienv.sh
           source ./dsienv.sh
           # create all resources and instances
-          ../src/dsi/dsi/bin/setup-cluster.sh ${cluster} ../terraform
+          $DSI_PATH/bin/setup-cluster.sh ${cluster} ../terraform
           echo "EC2 Cluster CREATED."
           tar -czvf cluster_config.tgz infrastructure_provisioning.out.yml ips.sh ips.py terraform.tfstate cluster.tf terraform.tfvars variables.tf
     - command: s3.put
@@ -127,7 +127,7 @@ functions:
           source ./dsienv.sh
           source ./venv/bin/activate
           cp mongodb_setup.${setup}.${storageEngine}.yml mongodb_setup.yml
-          $DSI/bin/mongodb_setup.py --config
+          $DSI_PATH/bin/mongodb_setup.py --config
           echo "${cluster} MongoDB Cluster STARTED."
 
   "run test":
@@ -139,7 +139,7 @@ functions:
           set -v
           source ./dsienv.sh
           echo "Run test for ${test}-${storageEngine} with setup ${setup}"
-          ../src/dsi/dsi/bin/run-${test}.sh ${storageEngine} ${setup} ${cluster}
+          $DSI_PATH/bin/run-${test}.sh ${storageEngine} ${setup} ${cluster}
           echo "Done test for ${test}-${storageEngine} with setup ${setup}!"
     - command: "json.send"
       params:
@@ -186,8 +186,8 @@ functions:
           cd ..
           mkdir -p ./reports/graphs
           touch ./reports/graphs/timeseries-p1.html
-          ../src/dsi/dsi/bin/retrieve-diag-data.sh
-          ../src/dsi/dsi/bin/generate-timeseries-html.sh || true
+          $DSI_PATH/bin/retrieve-diag-data.sh
+          $DSI_PATH/bin/generate-timeseries-html.sh || true
     - command: archive.targz_pack
       params:
         target: "reports.tgz"
@@ -238,7 +238,7 @@ functions:
           set -o errexit
           set -o verbose
           source ./dsienv.sh
-          python -u $DSI/analysis/dashboard_gen.py --rev ${revision} -f history.json -t tags.json --refTag 3.2.1-Baseline --overrideFile ../src/dsi/dsi/analysis/master/system_perf_override.json --project_id sys-perf --task_name ${task_name} --variant ${build_variant} || true
+          python -u $DSI_PATH/analysis/dashboard_gen.py --rev ${revision} -f history.json -t tags.json --refTag 3.2.1-Baseline --overrideFile $DSI_PATH/analysis/master/system_perf_override.json --project_id sys-perf --task_name ${task_name} --variant ${build_variant} || true
     - command: "json.send"
       params:
          name: "dashboard"
@@ -251,7 +251,7 @@ functions:
         script: |
           set -o errexit
           set -o verbose
-          python -u ../src/dsi/dsi/analysis/post_run_check.py --rev ${revision} -f history.json -t tags.json --refTag 3.2.1-Baseline --overrideFile ../src/dsi/dsi/analysis/master/system_perf_override.json --project_id sys-perf --task_name ${task_name} --variant ${build_variant}
+          python -u $DSI_PATH/analysis/post_run_check.py --rev ${revision} -f history.json -t tags.json --refTag 3.2.1-Baseline --overrideFile $DSI_PATH/analysis/master/system_perf_override.json --project_id sys-perf --task_name ${task_name} --variant ${build_variant}
 
   "compare":
     - command: shell.exec
@@ -286,7 +286,7 @@ functions:
         script: |
           set -o errexit
           set -o verbose
-          python -u ../src/dsi/dsi/analysis/compare.py -b standalone.json -c oplog.json
+          python -u $DSI_PATH/analysis/compare.py -b standalone.json -c oplog.json
     - command: "json.send"
       params:
         name: "perf"
