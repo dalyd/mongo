@@ -47,22 +47,6 @@ functions:
         directory: src
     - command: shell.exec
       params:
-        script: |
-          set -e
-          set -v
-          src/dsi/dsi/bin/setup-dsi-env.sh
-          # This should be cleaned up in the future. setup_dsi-env.sh
-          # downloads MC and terraform. Terraform ends up local, but
-          # MC is access from the bin directory, and the run scripts
-          # expect it to be there. If we move it, we need to tell
-          # those scripts where to find MC.
-          ln -s $(pwd)/bin/* src/dsi/dsi/bin
-          pwd bin
-          ls bin
-          pwd src/dsi/dsi/bin
-          ls src/dsi/dsi/bin
-    - command: shell.exec
-      params:
         silent: true
         script: |
           # generate aws private key file
@@ -80,6 +64,13 @@ functions:
           python ../src/dsi/dsi/bin/setup_work_env.py --cluster-type ${cluster} --aws-key-name ${terraform_key} --ssh-keyfile-path ../keys/aws.pem --aws-secret-file ../secret --mongo-download-url https://s3.amazonaws.com/mciuploads/dsi/${version_id}/${revision}/${platform}/mongod-${version_id}.tar.gz --production
           ls
           pwd
+    - command: shell.exec
+      params:
+        script: |
+          set -e
+          set -v
+          source work/dsienv.sh
+          src/dsi/dsi/bin/setup-dsi-env.sh
   "bring up cluster":
     - command: shell.exec
       # bring up the cluster
