@@ -32,6 +32,7 @@ functions:
           mkdir src
           mkdir work
           mkdir bin
+          mkdir keys
           pwd
           ls
     - command: manifest.load
