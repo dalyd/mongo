@@ -252,7 +252,7 @@ functions:
         script: |
           set -o errexit
           set -o verbose
-          source dsienv.sh
+          source ./dsienv.sh
           python -u $DSI_PATH/analysis/post_run_check.py --rev ${revision} -f history.json -t tags.json --refTag 3.2.1-Baseline --overrideFile $DSI_PATH/analysis/master/system_perf_override.json --project_id sys-perf --task_name ${task_name} --variant ${build_variant}
 
   "compare":
