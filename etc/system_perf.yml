@@ -67,11 +67,11 @@ functions:
     - command: shell.exec
       params:
         script: |
-          set -e
           set -v
           source work/dsienv.sh
           $DSI_PATH/bin/setup-dsi-env.sh
-          cp terraform/* work # Do we need to copy this or can we point to it?
+          cp terraform/* work/
+          ls work
   "bring up cluster":
     - command: shell.exec
       # bring up the cluster
