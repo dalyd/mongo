@@ -68,6 +68,7 @@ public:
     BSONElement check;
     BSONObj command;
     BSONObj context;
+    double cpuFactor = 1;
     int delay = 0;
     BSONObj doc;
     bool isDocAnArray = false;
@@ -75,6 +76,7 @@ public:
     bool handleError = false;
     BSONObj key;
     int limit = 0;
+    long long micros = 1000;
     bool multi = false;
     std::string ns;
     OpType op = OpType::NONE;

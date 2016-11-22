@@ -215,6 +215,12 @@ BenchRunOp opFromBson(const BSONObj& op) {
             myOp.command = arg.Obj();
         } else if (name == "context") {
             myOp.context = arg.Obj();
+        } else if (name == "cpuFactor") {
+            uassert(40354,
+                    str::stream() << "Field 'cpuFactor' should be a number, instead it's type: "
+                                  << typeName(arg.type()),
+                    arg.isNumber());
+            myOp.cpuFactor = arg.numberDouble();
         } else if (name == "delay") {
             uassert(34379,
                     str::stream() << "Field 'delay' should be a number, instead it's type: "
@@ -266,6 +272,12 @@ BenchRunOp opFromBson(const BSONObj& op) {
                                   << typeName(arg.type()),
                     arg.isNumber());
             myOp.limit = arg.numberInt();
+        } else if (name == "micros") {
+            uassert(40355,
+                    str::stream() << "Field 'micros' should be a number, instead it's type: "
+                                  << typeName(arg.type()),
+                    arg.isNumber());
+            myOp.micros = arg.numberLong();
         } else if (name == "multi") {
             uassert(34383,
                     str::stream()
@@ -711,21 +723,18 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                     case OpType::NOP:
                         break;
                     case OpType::SLEEP:
-                        // sleep for some amount of time. If nothing set use 1 ms
-                        long long sleep = e["micros"].eoo() ? 1000 : e["micros"].Long();
-                        sleepmicros(sleep);
+                        sleepmicros(op.delay);
                         break;
-                    case OpType::CPULOAD:
+                    case OpType::CPULOAD: {
                         // sleep for some amount of time. If nothing set use 1 ms
-                        double factor = e["factor"].eoo() ? 1 : e["factor"].number();
-                        long long limit = 10000 * factor;
+                        long long limit = 10000 * op.cpuFactor;
                         volatile uint64_t result = 0;
                         uint64_t x = 100;
                         for (long long i = 0; i < limit; i++) {
                             x *= 13;
                         }
                         result = x;
-                        break;
+                    } break;
                     case OpType::FINDONE: {
                         BSONObj fixedQuery = fixQuery(op.query, bsonTemplateEvaluator);
                         BSONObj result;
