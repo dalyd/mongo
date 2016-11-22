@@ -1250,115 +1250,111 @@ BenchRunner* BenchRunner::createWithConfig(const BSONObj& configArgs) {
     return new BenchRunner(config);
 }
 
-void BenchRunner::getThreadOps(BSONArrayBuilder& threadops) {
-    const std::string name = "threadops";
-    for (size_t i = 0; i < _workers.size(); ++i) {
-        threadops.append((long long)_workers[i]->stats().opCounter.getNumEvents());
-    }
+BenchRunner* BenchRunner::get(OID oid) {
+    stdx::lock_guard<stdx::mutex> lk(_staticMutex);
+    return _activeRuns[oid];
+}
+void BenchRunner::populateStats(BenchRunStats* stats) {
+    _brState.assertFinished();
+    stats->reset();
+    for (size_t i = 0; i < _workers.size(); ++i)
+        stats->updateFrom(_workers[i]->stats());
+}
+
+static void appendAverageMicrosIfAvailable(BSONObjBuilder& buf,
+                                           const std::string& name,
+                                           const BenchRunEventCounter& counter) {
+    if (counter.getNumEvents() > 0)
+        buf.append(name,
+                   static_cast<double>(counter.getTotalTimeMicros()) / counter.getNumEvents());
 }
 
 BSONObj BenchRunner::finish(BenchRunner* runner) {
+    runner->stop();
 
-    void BenchRunner::populateStats(BenchRunStats * stats) {
-        _brState.assertFinished();
-        stats->reset();
-        for (size_t i = 0; i < _workers.size(); ++i)
-            stats->updateFrom(_workers[i]->stats());
-    }
+    BenchRunStats stats;
+    runner->populateStats(&stats);
 
-    static void appendAverageMicrosIfAvailable(
-        BSONObjBuilder & buf, const std::string& name, const BenchRunEventCounter& counter) {
-        if (counter.getNumEvents() > 0)
-            buf.append(name,
-                       static_cast<double>(counter.getTotalTimeMicros()) / counter.getNumEvents());
-    }
+    // vector<BSONOBj> errors = runner->config.errors;
+    bool error = stats.error;
 
-    BSONObj BenchRunner::finish(BenchRunner * runner) {
-        runner->stop();
+    if (error)
+        return BSON("err" << 1);
 
-        BenchRunStats stats;
-        runner->populateStats(&stats);
+    BSONObjBuilder buf;
+    buf.append("note", "values per second");
+    buf.append("errCount", static_cast<long long>(stats.errCount));
+    buf.append("trapped", "error: not implemented");
+    appendAverageMicrosIfAvailable(buf, "findOneLatencyAverageMicros", stats.findOneCounter);
+    appendAverageMicrosIfAvailable(buf, "insertLatencyAverageMicros", stats.insertCounter);
+    appendAverageMicrosIfAvailable(buf, "deleteLatencyAverageMicros", stats.deleteCounter);
+    appendAverageMicrosIfAvailable(buf, "updateLatencyAverageMicros", stats.updateCounter);
+    appendAverageMicrosIfAvailable(buf, "queryLatencyAverageMicros", stats.queryCounter);
+    appendAverageMicrosIfAvailable(buf, "commandsLatencyAverageMicros", stats.commandCounter);
 
-        // vector<BSONOBj> errors = runner->config.errors;
-        bool error = stats.error;
+    buf.append("totalOps", static_cast<long long>(stats.opCount));
 
-        if (error)
-            return BSON("err" << 1);
+    auto appendPerSec = [&buf, runner](StringData name, double total) {
+        buf.append(name, total / (runner->_microsElapsed / 1000000.0));
+    };
 
-        BSONObjBuilder buf;
-        buf.append("note", "values per second");
-        buf.append("errCount", static_cast<long long>(stats.errCount));
-        buf.append("trapped", "error: not implemented");
-        appendAverageMicrosIfAvailable(buf, "findOneLatencyAverageMicros", stats.findOneCounter);
-        appendAverageMicrosIfAvailable(buf, "insertLatencyAverageMicros", stats.insertCounter);
-        appendAverageMicrosIfAvailable(buf, "deleteLatencyAverageMicros", stats.deleteCounter);
-        appendAverageMicrosIfAvailable(buf, "updateLatencyAverageMicros", stats.updateCounter);
-        appendAverageMicrosIfAvailable(buf, "queryLatencyAverageMicros", stats.queryCounter);
-        appendAverageMicrosIfAvailable(buf, "commandsLatencyAverageMicros", stats.commandCounter);
+    appendPerSec("totalOps/s", stats.opCount);
+    appendPerSec("findOne", stats.findOneCounter.getNumEvents());
+    appendPerSec("insert", stats.insertCounter.getNumEvents());
+    appendPerSec("delete", stats.deleteCounter.getNumEvents());
+    appendPerSec("update", stats.updateCounter.getNumEvents());
+    appendPerSec("query", stats.queryCounter.getNumEvents());
+    appendPerSec("command", stats.commandCounter.getNumEvents());
 
-        buf.append("totalOps", static_cast<long long>(stats.opCount));
+    BSONObj zoo = buf.obj();
 
-        auto appendPerSec = [&buf, runner](StringData name, double total) {
-            buf.append(name, total / (runner->_microsElapsed / 1000000.0));
-        };
+    delete runner;
+    return zoo;
+}
 
-        appendPerSec("totalOps/s", stats.opCount);
-        appendPerSec("findOne", stats.findOneCounter.getNumEvents());
-        appendPerSec("insert", stats.insertCounter.getNumEvents());
-        appendPerSec("delete", stats.deleteCounter.getNumEvents());
-        appendPerSec("update", stats.updateCounter.getNumEvents());
-        appendPerSec("query", stats.queryCounter.getNumEvents());
-        appendPerSec("command", stats.commandCounter.getNumEvents());
+stdx::mutex BenchRunner::_staticMutex;
+map<OID, BenchRunner*> BenchRunner::_activeRuns;
 
-        BSONObj zoo = buf.obj();
+/**
+ * benchRun( { ops : [] , host : XXX , db : XXXX , parallel : 5 , seconds : 5 }
+ */
+BSONObj BenchRunner::benchRunSync(const BSONObj& argsFake, void* data) {
+    BSONObj start = benchStart(argsFake, data);
 
-        delete runner;
-        return zoo;
-    }
+    OID oid = OID(start.firstElement().String());
+    BenchRunner* runner = BenchRunner::get(oid);
 
-    stdx::mutex BenchRunner::_staticMutex;
-    map<OID, BenchRunner*> BenchRunner::_activeRuns;
+    sleepmillis((int)(1000.0 * runner->config().seconds));
 
-    /**
-     * benchRun( { ops : [] , host : XXX , db : XXXX , parallel : 5 , seconds : 5 }
-     */
-    BSONObj BenchRunner::benchRunSync(const BSONObj& argsFake, void* data) {
-        BSONObj start = benchStart(argsFake, data);
+    return benchFinish(start, data);
+}
 
-        OID oid = OID(start.firstElement().String());
-        BenchRunner* runner = BenchRunner::get(oid);
+/**
+ * benchRun( { ops : [] , host : XXX , db : XXXX , parallel : 5 , seconds : 5 }
+ */
+BSONObj BenchRunner::benchStart(const BSONObj& argsFake, void* data) {
+    verify(argsFake.firstElement().isABSONObj());
+    BSONObj args = argsFake.firstElement().Obj();
 
-        sleepmillis((int)(1000.0 * runner->config().seconds));
+    // Get new BenchRunner object
+    BenchRunner* runner = BenchRunner::createWithConfig(args);
 
-        return benchFinish(start, data);
-    }
+    runner->start();
+    return BSON("" << runner->oid().toString());
+}
 
-    /**
-     * benchRun( { ops : [] , host : XXX , db : XXXX , parallel : 5 , seconds : 5 }
-     */
-    BSONObj BenchRunner::benchStart(const BSONObj& argsFake, void* data) {
-        verify(argsFake.firstElement().isABSONObj());
-        BSONObj args = argsFake.firstElement().Obj();
+/**
+ * benchRun( { ops : [] , host : XXX , db : XXXX , parallel : 5 , seconds : 5 }
+ */
+BSONObj BenchRunner::benchFinish(const BSONObj& argsFake, void* data) {
+    OID oid = OID(argsFake.firstElement().String());
 
-        // Get new BenchRunner object
-        BenchRunner* runner = BenchRunner::createWithConfig(args);
+    // Get old BenchRunner object
+    BenchRunner* runner = BenchRunner::get(oid);
 
-        runner->start();
-        return BSON("" << runner->oid().toString());
-    }
+    BSONObj finalObj = BenchRunner::finish(runner);
 
-    /**
-     * benchRun( { ops : [] , host : XXX , db : XXXX , parallel : 5 , seconds : 5 }
-     */
-    BSONObj BenchRunner::benchFinish(const BSONObj& argsFake, void* data) {
-        OID oid = OID(argsFake.firstElement().String());
-
-        // Get old BenchRunner object
-        BenchRunner* runner = BenchRunner::get(oid);
-
-        BSONObj finalObj = BenchRunner::finish(runner);
-
-        return BSON("" << finalObj);
-    }
+    return BSON("" << finalObj);
+}
 
 }  // namespace mongo
