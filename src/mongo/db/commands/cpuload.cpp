@@ -35,47 +35,48 @@
 
 namespace mongo {
 
-    using std::string;
-    using std::stringstream;
+using std::string;
+using std::stringstream;
 
-    class CPULoadCommand : public Command {
-    public:
-        CPULoadCommand() : Command("cpuload") {}
-        virtual bool slaveOk() const { return true; }
-        virtual bool isWriteCommandForConfigServer() const { return false; }
-        virtual void help( stringstream &help ) const {
-            help << "{ cpuload : 1, factor : 1 } Runs a straight CPU load. Length of execution scaled by factor. Puts no additional load on the server beyond the cpu use";
-        }
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {} // No auth required
-        virtual bool run(OperationContext* txn,
-                         const string& badns,
-                         BSONObj& cmdObj,
-                         int,
-                         string& errmsg,
-                         BSONObjBuilder& result) {
-            double factor = 1;
-            if (cmdObj["factor"].isNumber()) {
-                factor = cmdObj["factor"].number();
-            }
-            long long limit = 10000 * factor;
-            volatile uint64_t lresult = 0;
-            uint64_t x = 100;
-            for (long long i = 0; i < limit; i++)
-                {
-                    x*= 13;
-                }
-            lresult = x;
-            return true;
-        }
-    };
-
-    MONGO_INITIALIZER_WITH_PREREQUISITES(RegisterCPULoadCommand, ("GenerateInstanceId"))
-        (InitializerContext* context) {
-        // Leaked intentionally: a Command registers itself when constructed
-        new CPULoadCommand();
-        return Status::OK();
+class CPULoadCommand : public Command {
+public:
+    CPULoadCommand() : Command("cpuload") {}
+    virtual bool slaveOk() const {
+        return true;
     }
+    virtual bool isWriteCommandForConfigServer() const {
+        return false;
+    }
+    virtual void help(stringstream& help) const {
+        help << "{ cpuload : 1, factor : 1 } Runs a straight CPU load. Length of execution scaled "
+                "by factor. Puts no additional load on the server beyond the cpu use";
+    }
+    virtual void addRequiredPrivileges(const std::string& dbname,
+                                       const BSONObj& cmdObj,
+                                       std::vector<Privilege>* out) {}  // No auth required
+    virtual bool run(OperationContext* txn,
+                     const string& badns,
+                     BSONObj& cmdObj,
+                     int,
+                     string& errmsg,
+                     BSONObjBuilder& result) {
+        double factor = 1;
+        if (cmdObj["factor"].isNumber()) {
+            factor = cmdObj["factor"].number();
+        }
+        long long limit = 10000 * factor;
+        volatile uint64_t lresult = 0;
+        uint64_t x = 100;
+        for (long long i = 0; i < limit; i++) {
+            x *= 13;
+        }
+        lresult = x;
+        return true;
+    }
+    virtual bool supportsWriteConcern(const BSONObj& cmd) const {
+        return false;
+    }
+} CPULoadCommand;
+
 
 }  // namespace mongo

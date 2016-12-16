@@ -35,42 +35,44 @@
 
 namespace mongo {
 
-    using std::string;
-    using std::stringstream;
+using std::string;
+using std::stringstream;
 
-    class SleepMicrosCommand : public Command {
-    public:
-        SleepMicrosCommand() : Command("sleepmicros") {}
-        virtual bool slaveOk() const { return true; }
-        virtual bool isWriteCommandForConfigServer() const { return false; }
-        virtual void help( stringstream &help ) const {
-            help << "{ sleepmicros : 1, micros : 1000 } Sleeps for specificed number of micro seconds. Puts no additional load on the server";
-        }
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) {} // No auth required
-        virtual bool run(OperationContext* txn,
-                         const string& badns,
-                         BSONObj& cmdObj,
-                         int,
-                         string& errmsg,
-                         BSONObjBuilder& result) {
-            long long micros = 10 * 1000;
-
-            if (cmdObj["micros"].isNumber()) {
-                micros = cmdObj["micros"].numberLong();
-            }
-            sleepmicros(micros);
-
-            return true;
-        }
-    };
-
-    MONGO_INITIALIZER_WITH_PREREQUISITES(RegisterSleepMicrosCommand, ("GenerateInstanceId"))
-        (InitializerContext* context) {
-        // Leaked intentionally: a Command registers itself when constructed
-        new SleepMicrosCommand();
-        return Status::OK();
+class SleepMicrosCommand : public Command {
+public:
+    SleepMicrosCommand() : Command("sleepmicros") {}
+    virtual bool slaveOk() const {
+        return true;
     }
+    virtual bool isWriteCommandForConfigServer() const {
+        return false;
+    }
+    virtual void help(stringstream& help) const {
+        help << "{ sleepmicros : 1, micros : 1000 } Sleeps for specificed number of micro seconds. "
+                "Puts no additional load on the server";
+    }
+    virtual void addRequiredPrivileges(const std::string& dbname,
+                                       const BSONObj& cmdObj,
+                                       std::vector<Privilege>* out) {}  // No auth required
+    virtual bool run(OperationContext* txn,
+                     const string& badns,
+                     BSONObj& cmdObj,
+                     int,
+                     string& errmsg,
+                     BSONObjBuilder& result) {
+        long long micros = 10 * 1000;
+
+        if (cmdObj["micros"].isNumber()) {
+            micros = cmdObj["micros"].numberLong();
+        }
+        sleepmicros(micros);
+
+        return true;
+    }
+    virtual bool supportsWriteConcern(const BSONObj& cmd) const {
+        return false;
+    }
+} SleepMicrosCommand;
+
 
 }  // namespace mongo
