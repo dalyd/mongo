@@ -317,6 +317,10 @@ BenchRunOp opFromBson(const BSONObj& op) {
                 myOp.op = OpType::DROPINDEX;
             } else if (type == "let") {
                 myOp.op = OpType::LET;
+            } else if (type == "sleepMicros") {
+                myOp.op = OpType::SLEEP;
+            } else if (type == "cpuload") {
+                myOp.op = OpType::CPULOAD;
             } else {
                 uassert(34387,
                         str::stream() << "benchRun passed an unsupported op type: " << type,
