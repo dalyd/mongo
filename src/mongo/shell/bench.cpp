@@ -90,7 +90,6 @@ const std::map<OpType, std::string> opTypeName{{OpType::NONE, "none"},
                                                {OpType::CREATEINDEX, "createIndex"},
                                                {OpType::DROPINDEX, "dropIndex"},
                                                {OpType::LET, "let"},
-                                               {OpType::SLEEP, "sleepMicros"},
                                                {OpType::CPULOAD, "cpuload"}};
 
 BenchRunEventCounter::BenchRunEventCounter() {
@@ -272,12 +271,6 @@ BenchRunOp opFromBson(const BSONObj& op) {
                                   << typeName(arg.type()),
                     arg.isNumber());
             myOp.limit = arg.numberInt();
-        } else if (name == "micros") {
-            uassert(40383,
-                    str::stream() << "Field 'micros' should be a number, instead it's type: "
-                                  << typeName(arg.type()),
-                    arg.isNumber());
-            myOp.micros = arg.numberLong();
         } else if (name == "multi") {
             uassert(34383,
                     str::stream()
@@ -317,8 +310,6 @@ BenchRunOp opFromBson(const BSONObj& op) {
                 myOp.op = OpType::DROPINDEX;
             } else if (type == "let") {
                 myOp.op = OpType::LET;
-            } else if (type == "sleepMicros") {
-                myOp.op = OpType::SLEEP;
             } else if (type == "cpuload") {
                 myOp.op = OpType::CPULOAD;
             } else {
@@ -725,9 +716,6 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
             try {
                 switch (op.op) {
                     case OpType::NOP:
-                        break;
-                    case OpType::SLEEP:
-                        sleepmicros(op.delay);
                         break;
                     case OpType::CPULOAD: {
                         // sleep for some amount of time. If nothing set use 1 ms
